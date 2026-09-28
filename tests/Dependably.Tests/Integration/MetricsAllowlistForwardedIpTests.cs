@@ -126,7 +126,7 @@ public sealed class MetricsAllowlistForwardedIpTests
     /// </summary>
     private sealed class MetricsForwardedIpFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
-        private readonly TestMetadataStore _store = new();
+        private readonly IntegrationDatabase _db = new();
         private readonly InMemoryBlobStore _blob = new();
         private readonly string? _trustedProxies;
 
@@ -145,14 +145,14 @@ public sealed class MetricsAllowlistForwardedIpTests
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_store);
+            _db.ConfigureServices(builder.Services);
 
             builder.Services.RemoveAll<IUpstreamUrlValidator>();
             builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
@@ -175,7 +175,7 @@ public sealed class MetricsAllowlistForwardedIpTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -183,8 +183,8 @@ public sealed class MetricsAllowlistForwardedIpTests
 
         public new async Task DisposeAsync()
         {
-            await _store.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
     }
 }

@@ -35,6 +35,12 @@ public sealed class HealthService
             ["tenant-count-poller"] = TimeSpan.FromMinutes(10),
             ["healthcheck-pinger"] = TimeSpan.FromMinutes(10),
             ["oci-staging-janitor"] = TimeSpan.FromHours(36),
+            // Hourly job runs every hour; 3h tolerates one missed occurrence before going stale.
+            ["usage-rollup-hourly"] = TimeSpan.FromHours(3),
+            // Daily/weekly usage jobs get the same generous 36h/9d windows the other cron jobs use.
+            ["usage-rollup-daily"] = TimeSpan.FromHours(36),
+            ["usage-storage-snapshot"] = TimeSpan.FromHours(36),
+            ["usage-reconcile-weekly"] = TimeSpan.FromDays(9),
         };
 
     // Default staleness threshold for any registry job not in JobStalenessThresholds.
@@ -66,6 +72,10 @@ public sealed class HealthService
             "retention",
             "orphan-reconciler",
             "oci-staging-janitor",
+            "usage-rollup-hourly",
+            "usage-rollup-daily",
+            "usage-storage-snapshot",
+            "usage-reconcile-weekly",
         };
 
     private readonly ReadinessAggregator _readiness;
@@ -327,7 +337,7 @@ public sealed class HealthService
         int count = 0;
         foreach (var item in items)
         {
-            if (item.Status == "suspended") { count++; continue; }
+            if (item.Status is "suspended" or "read_only") { count++; continue; }
             if (item.StorageQuotaBytes.HasValue
                 && item.StorageBytes >= (long)(item.StorageQuotaBytes.Value * StorageWarnFraction)) { count++; }
         }

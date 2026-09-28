@@ -111,6 +111,7 @@ public partial class Program
 
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddDependablyRepositories(builder.Configuration);
+        builder.Services.AddDependablyUsageMetering(builder.Configuration);
         builder.Services.AddDependablyManagementRepositories();
 
         // Mail foundation: instance-level SMTP config resolver + the MailKit sender every
@@ -429,6 +430,19 @@ public partial class Program
         // so all upstream-fetch exception mappings live together in the pipeline.
         app.UseMiddleware<Dependably.Infrastructure.SsrfBlockedExceptionMiddleware>();
 
+        // Endpoint routing. Registered explicitly, and only here: without a UseRouting call
+        // WebApplication inserts one at the very start of the pipeline, where it would select the
+        // endpoint from the pre-rewrite path and TransparentInterceptMiddleware's rewrite would
+        // never reach the prefixed controllers. It must sit after the intercept rewrite, and
+        // before everything that reads the routed endpoint: egress metering ([MeteredEgress]),
+        // CORS, authentication/authorization, the rate limiter, and the tenant status gate
+        // (RateLimitPartitions.IsProtocolControllerRequest).
+        app.UseRouting();
+
+        // Egress metering sits outside compression, so it counts the bytes that actually leave
+        // the process, and after tenant resolution, so each usage event carries its org. Only
+        // endpoints marked [MeteredEgress] are wrapped.
+        app.UseMiddleware<Dependably.Infrastructure.Usage.EgressMeteringMiddleware>();
         app.UseResponseCompression();
         app.UseSerilogRequestLogging(opts => opts.GetLevel = SerilogRequestLogLevel);
 

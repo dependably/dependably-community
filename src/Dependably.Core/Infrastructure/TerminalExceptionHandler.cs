@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Localization;
 using Microsoft.AspNetCore.Mvc;
@@ -46,6 +47,7 @@ public sealed class TerminalExceptionHandler : IExceptionHandler
         CancellationToken cancellationToken)
     {
         string correlationId = ResolveCorrelationId(httpContext);
+        RowLevelSecurityViolations.Record(exception);
 
         // Path only — the query string can carry tokens and other caller-supplied secrets.
         _logger.LogError(

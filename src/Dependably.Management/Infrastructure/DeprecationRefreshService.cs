@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
@@ -103,6 +104,10 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
 
     internal async Task RunRefreshPassAsync(CancellationToken ct)
     {
+        // xtenant: groups upstream refresh work across every tenant that holds a package; each
+        // write filters on the group's org_id.
+        using var ownerScope = DbScope.CrossTenant("deprecation refresh");
+
         using var scope = BackgroundJobScope.Begin("deprecation-refresh", "deprecation.refresh_pass", _time);
         try
         {

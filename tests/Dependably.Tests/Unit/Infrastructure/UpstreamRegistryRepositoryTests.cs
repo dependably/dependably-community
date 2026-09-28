@@ -118,6 +118,153 @@ public sealed class UpstreamRegistryRepositoryTests : IClassFixture<InMemoryDbFi
 
     // ── OCI-specific: AddOciAsync, BuildOciUpstreamsForOrgAsync ────────────────
 
+    // ── Credential-free upstreams: what makes proxied content public ─────────
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_OnlyAnonymousRows_IsTrue()
+    {
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+        await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://registry.npmjs.org"));
+        await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://mirror.example/npm", AuthType: "anonymous"));
+
+        Assert.True(await repo.AllUpstreamsCredentialFreeAsync(org, "npm"));
+    }
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_OneBearerRowAmongAnonymousOnes_IsFalse()
+    {
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+        await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://registry.npmjs.org"));
+        await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://npm.private.example", AuthType: "bearer", Secret: "tok"));
+
+        Assert.False(await repo.AllUpstreamsCredentialFreeAsync(org, "npm"));
+    }
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_IsScopedToTheOrgAndEcosystem()
+    {
+        string orgA = await OrgSeeder.InsertAsync(_fixture.Store, $"a-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_fixture.Store, $"b-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+        await repo.AddAsync(orgA, new NewUpstreamRegistry("npm", "https://registry.npmjs.org"));
+        await repo.AddAsync(orgA, new NewUpstreamRegistry("pypi", "https://pypi.private.example", AuthType: "basic", Username: "u", Secret: "p"));
+        await repo.AddAsync(orgB, new NewUpstreamRegistry("npm", "https://npm.private.example", AuthType: "bearer", Secret: "tok"));
+
+        Assert.True(await repo.AllUpstreamsCredentialFreeAsync(orgA, "npm"));
+        Assert.False(await repo.AllUpstreamsCredentialFreeAsync(orgA, "pypi"));
+        Assert.False(await repo.AllUpstreamsCredentialFreeAsync(orgB, "npm"));
+    }
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_NoRowsForTheEcosystem_IsFalse()
+    {
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        await NewRepo().AddAsync(org, new NewUpstreamRegistry("npm", "https://registry.npmjs.org"));
+
+        Assert.False(await NewRepo().AllUpstreamsCredentialFreeAsync(org, "cargo"));
+    }
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_OciDefaults_AreTrue_ABasicRowMakesItFalse()
+    {
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await UpstreamRegistrySeeder.SeedOciDefaultsForOrgAsync(conn, org);
+        }
+
+        // MCR anonymous plus Docker Hub's anonymous token exchange: no credential is sent.
+        Assert.True(await repo.AllUpstreamsCredentialFreeAsync(org, "oci"));
+
+        await repo.AddOciAsync(org, new NewOciUpstreamRegistry(
+            Host: "registry.private.example", AuthType: OciAuthType.Basic, Prefixes: ["team/"],
+            Username: "robot", Secret: "s3cret"));
+
+        Assert.False(await repo.AllUpstreamsCredentialFreeAsync(org, "oci"));
+    }
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_ACredentialedUpstreamAddedThenDeleted_StaysFalse()
+    {
+        // The deleted upstream's objects are still in the proxy cache, and nothing records which
+        // upstream fetched them, so the org can never be shown public for the ecosystem again.
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+        await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://registry.npmjs.org"));
+        var priv = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://npm.private.example", AuthType: "bearer", Secret: "tok"));
+        var oci = await repo.AddOciAsync(org, new NewOciUpstreamRegistry(
+            Host: "registry.private.example", AuthType: OciAuthType.Basic, Prefixes: ["team/"], Username: "robot", Secret: "s3cret"));
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await UpstreamRegistrySeeder.SeedOciDefaultsForOrgAsync(conn, org);
+        }
+
+        await repo.DeleteAsync(org, priv.Id);
+        await repo.DeleteAsync(org, oci.Id);
+
+        Assert.Equal(["https://registry.npmjs.org"], await Urls(repo, org, "npm"));
+        Assert.False(await repo.AllUpstreamsCredentialFreeAsync(org, "npm"));
+        Assert.False(await repo.AllUpstreamsCredentialFreeAsync(org, "oci"));
+    }
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_AnonymousUpstreamAddedThenDeleted_LeavesNoHistory()
+    {
+        string org = await OrgSeeder.InsertAsync(_fixture.Store, $"o-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+        await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://registry.npmjs.org"));
+        var mirror = await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://mirror.example/npm"));
+
+        await repo.DeleteAsync(org, mirror.Id);
+
+        Assert.True(await repo.AllUpstreamsCredentialFreeAsync(org, "npm"));
+    }
+
+    [Fact]
+    public async Task AllUpstreamsCredentialFree_HistoryIsPerOrgAndEcosystem()
+    {
+        string tainted = await OrgSeeder.InsertAsync(_fixture.Store, $"t-{Guid.NewGuid():N}");
+        string clean = await OrgSeeder.InsertAsync(_fixture.Store, $"c-{Guid.NewGuid():N}");
+        var repo = NewRepo();
+        foreach (string org in new[] { tainted, clean })
+        {
+            await repo.AddAsync(org, new NewUpstreamRegistry("npm", "https://registry.npmjs.org"));
+            await repo.AddAsync(org, new NewUpstreamRegistry("pypi", "https://pypi.org"));
+        }
+
+        var priv = await repo.AddAsync(tainted, new NewUpstreamRegistry("npm", "https://npm.private.example", AuthType: "basic", Username: "u", Secret: "p"));
+        await repo.DeleteAsync(tainted, priv.Id);
+
+        Assert.False(await repo.AllUpstreamsCredentialFreeAsync(tainted, "npm"));
+        Assert.True(await repo.AllUpstreamsCredentialFreeAsync(tainted, "pypi"));
+        Assert.True(await repo.AllUpstreamsCredentialFreeAsync(clean, "npm"));
+    }
+
+    [Theory]
+    [InlineData("anonymous", null, false, "https://registry.npmjs.org", true)]
+    [InlineData("dockerhub_token_exchange", null, false, "registry-1.docker.io", true)]
+    [InlineData("anonymous", null, false, "mcr.microsoft.com", true)]
+    [InlineData("dockerhub_token_exchange", "robot", true, "registry-1.docker.io", false)]
+    [InlineData("basic", "u", true, "https://x.example", false)]
+    [InlineData("bearer", null, true, "https://x.example", false)]
+    [InlineData("bearer", null, false, "https://x.example", false)]
+    [InlineData("aws_ecr", null, false, "123.dkr.ecr.ca-central-1.amazonaws.com", false)]
+    [InlineData("something-new", null, false, "https://x.example", false)]
+    [InlineData(null, null, false, "https://x.example", false)]
+    [InlineData("anonymous", "u", false, "https://x.example", false)]
+    [InlineData("anonymous", null, true, "https://x.example", false)]
+    [InlineData("anonymous", null, false, "https://u:p@x.example/npm", false)]
+    [InlineData("anonymous", null, false, "u:p@x.example", false)]
+    [InlineData("anonymous", null, false, "https://x.example/npm?token=abc", false)]
+    [InlineData("anonymous", null, false, "https://x.example/a@b", true)]
+    [InlineData("anonymous", null, false, "", false)]
+    public void IsCredentialFree_ReadsAuthTypeUsernameSecretAndUrl(
+        string? authType, string? username, bool hasSecret, string url, bool expected)
+        => Assert.Equal(expected, UpstreamRegistryRepository.IsCredentialFree(authType, username, hasSecret, url));
+
     [Fact]
     public async Task AddOci_StoresAllFields_SecretNotExposedInList()
     {

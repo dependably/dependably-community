@@ -153,7 +153,7 @@ public sealed class ForwardedHeadersFailClosedTests : IAsyncLifetime
     {
         private readonly string? _trustedProxies;
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         public FailClosedFactory(string? trustedProxies) => _trustedProxies = trustedProxies;
 
@@ -164,14 +164,14 @@ public sealed class ForwardedHeadersFailClosedTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             // Inject a non-loopback socket peer so the default allowlist (127.0.0.1/::1)
             // denies it without an XFF rewrite. Tests that set TRUSTED_PROXIES to this
@@ -198,7 +198,7 @@ public sealed class ForwardedHeadersFailClosedTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -206,8 +206,8 @@ public sealed class ForwardedHeadersFailClosedTests : IAsyncLifetime
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         private sealed class FixedRemoteIpFilter : IStartupFilter

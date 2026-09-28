@@ -350,10 +350,9 @@ public sealed class ProjectFolderApiTests : IClassFixture<DependablyFactory>, IA
             await conn.ExecuteAsync(
                 """
                 INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
-                VALUES (@id, @orgId, 'project', 'their-api', 'application',
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                VALUES (@id, @orgId, 'project', 'their-api', 'application', @now)
                 """,
-                new { id = foreignProject, orgId = foreignOrg });
+                new { id = foreignProject, orgId = foreignOrg, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
         }
 
         var result = await PatchAsync(client, foreignProject, """{"name":"hijacked"}""");
@@ -383,10 +382,9 @@ public sealed class ProjectFolderApiTests : IClassFixture<DependablyFactory>, IA
             await conn.ExecuteAsync(
                 """
                 INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
-                VALUES (@id, @orgId, 'collection', 'their-folder', 'application',
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                VALUES (@id, @orgId, 'collection', 'their-folder', 'application', @now)
                 """,
-                new { id = foreignFolder, orgId = foreignOrg });
+                new { id = foreignFolder, orgId = foreignOrg, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
         }
 
         using var resp = await client.GetAsync("/api/v1/projects/collections");

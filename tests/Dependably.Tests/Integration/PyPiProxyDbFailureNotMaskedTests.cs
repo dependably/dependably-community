@@ -80,13 +80,9 @@ public sealed class PyPiProxyDbFailureNotMaskedTests : IClassFixture<DependablyF
             // synchronous global-plane write is the per-tenant packages GetOrCreate INSERT. A
             // BEFORE INSERT trigger that aborts makes that INSERT throw SqliteException — a
             // DbException the fetch path must not mask as a 404.
-            await conn.ExecuteAsync(
-                """
-                CREATE TRIGGER __test_fail_packages_insert BEFORE INSERT ON packages
-                BEGIN
-                    SELECT RAISE(ABORT, 'injected db failure');
-                END
-                """);
+            await FailingInsertTrigger.InstallAsync(
+                conn, _factory.Services.GetRequiredService<IMetadataStore>().Provider,
+                "__test_fail_packages_insert", "packages", "injected db failure");
 
             string token = await _factory.CreateToken("pull");
             using var client = _factory.CreateClientWithBasic(token);
@@ -135,7 +131,9 @@ public sealed class PyPiProxyDbFailureNotMaskedTests : IClassFixture<DependablyF
         finally
         {
             // Drop the trigger so sibling tests on the shared factory are unaffected.
-            await conn.ExecuteAsync("DROP TRIGGER IF EXISTS __test_fail_packages_insert");
+            await FailingInsertTrigger.DropAsync(
+                conn, _factory.Services.GetRequiredService<IMetadataStore>().Provider,
+                "__test_fail_packages_insert", "packages");
         }
     }
 }

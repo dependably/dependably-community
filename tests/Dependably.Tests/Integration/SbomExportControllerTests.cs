@@ -43,18 +43,19 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
     {
         string projectId = Guid.NewGuid().ToString("N");
         string versionId = Guid.NewGuid().ToString("N");
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
-            VALUES (@projectId, @orgId, 'project', @projectName, 'application', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@projectId, @orgId, 'project', @projectName, 'application', @now)
             """,
-            new { projectId, orgId, projectName });
+            new { projectId, orgId, projectName, now });
         await conn.ExecuteAsync(
             """
             INSERT INTO project_versions (id, org_id, project_id, version, is_latest, created_at)
-            VALUES (@versionId, @orgId, @projectId, @versionLabel, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@versionId, @orgId, @projectId, @versionLabel, 1, @now)
             """,
-            new { versionId, orgId, projectId, versionLabel });
+            new { versionId, orgId, projectId, versionLabel, now });
         return (projectId, versionId, projectName, versionLabel);
     }
 
@@ -73,9 +74,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
             VALUES
                 (@id, @orgId, @versionId, @purl, 'npm', @name, @version, @name,
                  'library', @sbomScope, @dependencyScope, 'direct', @dependencyPath,
-                 @licenseSpdx, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 @licenseSpdx, @now)
             """,
-            new { id, orgId, versionId, purl, name, version, sbomScope, dependencyScope, dependencyPath, licenseSpdx });
+            new { id, orgId, versionId, purl, name, version, sbomScope, dependencyScope, dependencyPath, licenseSpdx, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
     }
 
     /// <summary>
@@ -99,9 +100,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
                  component_type, sbom_scope, dependency_scope, dependency_kind, version_range, is_external, created_at)
             VALUES
                 (@id, @orgId, @versionId, @purl, 'npm', @name, @version, @name,
-                 'library', @sbomScope, @dependencyScope, 'direct', @versionRange, @isExternal, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'library', @sbomScope, @dependencyScope, 'direct', @versionRange, @isExternal, @now)
             """,
-            new { id, orgId, versionId, purl, name, version, dependencyScope, versionRange, isExternal, sbomScope });
+            new { id, orgId, versionId, purl, name, version, dependencyScope, versionRange, isExternal = isExternal is null ? (int?)null : isExternal.Value ? 1 : 0, sbomScope, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
         return id;
     }
 
@@ -110,15 +111,16 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         System.Data.IDbConnection conn, string componentId, string osvId, string ecosystem, string packageName)
     {
         string vulnId = Guid.NewGuid().ToString("N");
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, severity, cvss_score, fetched_at)
-            VALUES (@vulnId, @osvId, @ecosystem, @packageName, 'HIGH', 7.5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@vulnId, @osvId, @ecosystem, @packageName, 'HIGH', 7.5, @now)
             """,
-            new { vulnId, osvId, ecosystem, packageName });
+            new { vulnId, osvId, ecosystem, packageName, now });
         await conn.ExecuteAsync(
-            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@id, @componentId, @vulnId, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-            new { id = Guid.NewGuid().ToString("N"), componentId, vulnId });
+            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@id, @componentId, @vulnId, @now)",
+            new { id = Guid.NewGuid().ToString("N"), componentId, vulnId, now });
     }
 
     private static async Task<string> SeedCollectionAsync(
@@ -128,9 +130,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         await conn.ExecuteAsync(
             """
             INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
-            VALUES (@id, @orgId, 'collection', @name, 'application', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@id, @orgId, 'collection', @name, 'application', @now)
             """,
-            new { id, orgId, name });
+            new { id, orgId, name, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
         return id;
     }
 
@@ -139,18 +141,19 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
     {
         string projectId = Guid.NewGuid().ToString("N");
         string versionId = Guid.NewGuid().ToString("N");
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO projects (id, org_id, parent_id, kind, name, classifier, created_at)
-            VALUES (@projectId, @orgId, @parentId, 'project', @projectName, 'application', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@projectId, @orgId, @parentId, 'project', @projectName, 'application', @now)
             """,
-            new { projectId, orgId, parentId, projectName });
+            new { projectId, orgId, parentId, projectName, now });
         await conn.ExecuteAsync(
             """
             INSERT INTO project_versions (id, org_id, project_id, version, is_latest, created_at)
-            VALUES (@versionId, @orgId, @projectId, @versionLabel, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@versionId, @orgId, @projectId, @versionLabel, 1, @now)
             """,
-            new { versionId, orgId, projectId, versionLabel });
+            new { versionId, orgId, projectId, versionLabel, now });
         return (projectId, versionId);
     }
 
@@ -745,6 +748,7 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "vdr-check", "1.0.0");
 
         string compId = Guid.NewGuid().ToString("N");
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO sbom_components
@@ -752,22 +756,22 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
                  component_type, sbom_scope, dependency_scope, dependency_kind, created_at)
             VALUES
                 (@compId, @orgId, @versionId, 'pkg:npm/qs@6.10.2', 'npm', 'qs', '6.10.2', 'qs',
-                 'library', 'required', 'runtime', 'direct', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'library', 'required', 'runtime', 'direct', @now)
             """,
-            new { compId, orgId, versionId });
+            new { compId, orgId, versionId, now });
 
         string vulnId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, severity, cvss_score, fetched_at)
-            VALUES (@vulnId, 'CVE-2022-24999', 'npm', 'qs', 'HIGH', 7.5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@vulnId, 'CVE-2022-24999', 'npm', 'qs', 'HIGH', 7.5, @now)
             """,
-            new { vulnId });
+            new { vulnId, now });
 
         string linkId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
-            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@linkId, @compId, @vulnId, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-            new { linkId, compId, vulnId });
+            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@linkId, @compId, @vulnId, @now)",
+            new { linkId, compId, vulnId, now });
 
         string analysisId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
@@ -777,10 +781,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
                  vex_response, vex_detail, vex_source, updated_at)
             VALUES
                 (@analysisId, @orgId, @versionId, 'pkg:npm/qs', 'CVE-2022-24999', 'exploitable', NULL,
-                 'update', 'qs.parse is reachable from an unauthenticated route.', 'upload',
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'update', 'qs.parse is reachable from an unauthenticated route.', 'upload', @now)
             """,
-            new { analysisId, orgId, versionId });
+            new { analysisId, orgId, versionId, now });
 
         using var c = await AdminClient();
         var resp = await c.GetAsync($"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=vdr");
@@ -838,6 +841,7 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         string purlKey, string osvId)
     {
         string compId = Guid.NewGuid().ToString("N");
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO sbom_components
@@ -845,20 +849,20 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
                  component_type, dependency_scope, created_at)
             VALUES
                 (@compId, @orgId, @versionId, @purl, @ecosystem, @purlName, @version, @name,
-                 'library', 'runtime', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'library', 'runtime', @now)
             """,
-            new { compId, orgId, versionId, purl, ecosystem, purlName, version, name });
+            new { compId, orgId, versionId, purl, ecosystem, purlName, version, name, now });
 
         string vulnId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, severity, cvss_score, fetched_at)
-            VALUES (@vulnId, @osvId, @ecosystem, @purlName, 'HIGH', 7.5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@vulnId, @osvId, @ecosystem, @purlName, 'HIGH', 7.5, @now)
             """,
-            new { vulnId, osvId, ecosystem, purlName });
+            new { vulnId, osvId, ecosystem, purlName, now });
         await conn.ExecuteAsync(
-            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@id, @compId, @vulnId, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-            new { id = Guid.NewGuid().ToString("N"), compId, vulnId });
+            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@id, @compId, @vulnId, @now)",
+            new { id = Guid.NewGuid().ToString("N"), compId, vulnId, now });
         await conn.ExecuteAsync(
             """
             INSERT INTO project_vuln_analysis
@@ -866,9 +870,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
                  vex_source, updated_at)
             VALUES
                 (@id, @orgId, @versionId, @purlKey, @osvId, 'not_affected', 'code_not_reachable',
-                 'upload', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'upload', @now)
             """,
-            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, purlKey, osvId });
+            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, purlKey, osvId, now });
     }
 
     [Fact]
@@ -880,6 +884,7 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "vdr-no-analysis", "1.0.0");
 
         string compId = Guid.NewGuid().ToString("N");
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO sbom_components
@@ -887,21 +892,21 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
                  component_type, dependency_scope, dependency_kind, created_at)
             VALUES
                 (@compId, @orgId, @versionId, 'pkg:pypi/requests@2.28.1', 'pypi', 'requests', '2.28.1', 'requests',
-                 'library', 'runtime', 'direct', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'library', 'runtime', 'direct', @now)
             """,
-            new { compId, orgId, versionId });
+            new { compId, orgId, versionId, now });
 
         string vulnId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, severity, cvss_score, fetched_at)
-            VALUES (@vulnId, 'CVE-2023-32681', 'pypi', 'requests', 'MEDIUM', 6.1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@vulnId, 'CVE-2023-32681', 'pypi', 'requests', 'MEDIUM', 6.1, @now)
             """,
-            new { vulnId });
+            new { vulnId, now });
         string linkId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
-            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@linkId, @compId, @vulnId, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-            new { linkId, compId, vulnId });
+            "INSERT INTO sbom_component_vulns (id, component_id, vuln_id, checked_at) VALUES (@linkId, @compId, @vulnId, @now)",
+            new { linkId, compId, vulnId, now });
 
         using var c = await AdminClient();
         var resp = await c.GetAsync($"/api/v1/projects/{projectId}/versions/{versionId}/export/sbom?variant=vdr");
@@ -920,30 +925,31 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
         string orgId = await DefaultOrgIdAsync(conn);
         var (projectId, versionId, _, _) = await SeedProjectVersionAsync(conn, orgId, "vex-check", "1.0.0");
 
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO project_vuln_analysis
                 (id, org_id, project_version_id, purl_key, vuln_key, vex_state, vex_source, updated_at)
-            VALUES (@id, @orgId, @versionId, 'pkg:npm/minimist', 'CVE-2021-44906', 'exploitable', 'upload', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@id, @orgId, @versionId, 'pkg:npm/minimist', 'CVE-2021-44906', 'exploitable', 'upload', @now)
             """,
-            new { id = Guid.NewGuid().ToString("N"), orgId, versionId });
+            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, now });
 
         await conn.ExecuteAsync(
             """
             INSERT INTO project_vuln_analysis
                 (id, org_id, project_version_id, purl_key, vuln_key, vex_state, vex_justification, vex_source, updated_at)
-            VALUES (@id, @orgId, @versionId, 'pkg:pypi/requests', 'CVE-2023-32681', 'not_affected', 'code_not_reachable', 'manual', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@id, @orgId, @versionId, 'pkg:pypi/requests', 'CVE-2023-32681', 'not_affected', 'code_not_reachable', 'manual', @now)
             """,
-            new { id = Guid.NewGuid().ToString("N"), orgId, versionId });
+            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, now });
 
         // A SARIF-only row: reachability facts, no VEX opinion — must not appear in a VEX export.
         await conn.ExecuteAsync(
             """
             INSERT INTO project_vuln_analysis
                 (id, org_id, project_version_id, purl_key, vuln_key, reachability, updated_at)
-            VALUES (@id, @orgId, @versionId, 'pkg:npm/lodash', 'CVE-9999-00000', 'reachable', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@id, @orgId, @versionId, 'pkg:npm/lodash', 'CVE-9999-00000', 'reachable', @now)
             """,
-            new { id = Guid.NewGuid().ToString("N"), orgId, versionId });
+            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, now });
 
         using var c = await AdminClient();
         var resp = await c.GetAsync($"/api/v1/projects/{projectId}/versions/{versionId}/export/vex");
@@ -987,9 +993,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
             INSERT INTO project_documents
                 (id, org_id, project_version_id, doc_type, format, spec_version, sha256, size_bytes, blob_key, uploaded_at)
             VALUES
-                (@documentId, @orgId, @versionId, 'sbom', 'cyclonedx-json', '1.6', @sha256, @size, @blobKey, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (@documentId, @orgId, @versionId, 'sbom', 'cyclonedx-json', '1.6', @sha256, @size, @blobKey, @now)
             """,
-            new { documentId, orgId, versionId, sha256, size = bytes.Length, blobKey });
+            new { documentId, orgId, versionId, sha256, size = bytes.Length, blobKey, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
 
         using var c = await AdminClient();
         var resp = await c.GetAsync($"/api/v1/sbom-documents/{documentId}/original");
@@ -1028,9 +1034,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
             INSERT INTO project_documents
                 (id, org_id, project_version_id, doc_type, format, spec_version, sha256, size_bytes, blob_key, uploaded_at)
             VALUES
-                (@documentId, @orgId, @versionId, 'sbom', 'cyclonedx-json', '1.6', @sha256, @size, @blobKey, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (@documentId, @orgId, @versionId, 'sbom', 'cyclonedx-json', '1.6', @sha256, @size, @blobKey, @now)
             """,
-            new { documentId, orgId, versionId, sha256, size = bytes.Length, blobKey });
+            new { documentId, orgId, versionId, sha256, size = bytes.Length, blobKey, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
 
         using var c = await AdminClient();
         c.DefaultRequestHeaders.IfNoneMatch.Add(new EntityTagHeaderValue($"\"{sha256}\""));
@@ -1068,9 +1074,9 @@ public sealed class SbomExportControllerTests : IClassFixture<DependablyFactory>
             INSERT INTO project_documents
                 (id, org_id, project_version_id, doc_type, format, spec_version, sha256, size_bytes, blob_key, uploaded_at)
             VALUES
-                (@documentId, @orgId, @versionId, 'sbom', 'cyclonedx-json', '1.6', @sha256, @size, @blobKey, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (@documentId, @orgId, @versionId, 'sbom', 'cyclonedx-json', '1.6', @sha256, @size, @blobKey, @now)
             """,
-            new { documentId, orgId, versionId, sha256, size = bytes.Length, blobKey });
+            new { documentId, orgId, versionId, sha256, size = bytes.Length, blobKey, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
 
         string crossToken = await CreateOtherOrgReadTokenAsync();
         using var c = _factory.CreateClient();

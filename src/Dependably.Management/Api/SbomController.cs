@@ -600,19 +600,19 @@ public sealed class SbomController : ControllerBase
         // ResolveActorAsync is the same lookup RecordUploadAsync already uses for the (non-
         // security) sbom_uploaded event; a security-relevant refusal or warning gets the same
         // real kind and denormalized service-token label, never a fabricated ActorKinds.User.
-        (string? actorKind, string? actorLabel) = actorId is null
-            ? (null, null)
+        var actor = actorId is null
+            ? null
             : await _svc.Ingest.ResolveActorAsync(orgId, actorId, ct);
 
         if (mode == "block" && effectiveStatus != ProvenanceStatuses.Verified)
         {
             await _svc.Audit.LogAsync(
                 "sbom_signature_blocked", orgId, actorId,
-                actorKind: actorKind,
+                actorKind: actor?.Kind,
                 ecosystem: "sbom",
                 detail: JsonSerializer.Serialize(new { reason = effectiveStatus },
                     Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-                sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actorLabel, ct: ct);
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actor?.Label, ct: ct);
             return (_svc.Problems.ForbiddenActionKey("error.sbom.signatureRejected", effectiveStatus), null, null);
         }
 
@@ -620,11 +620,11 @@ public sealed class SbomController : ControllerBase
         {
             await _svc.Audit.LogAsync(
                 "sbom_signature_warn", orgId, actorId,
-                actorKind: actorKind,
+                actorKind: actor?.Kind,
                 ecosystem: "sbom",
                 detail: JsonSerializer.Serialize(new { status = verdict.Status },
                     Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
-                sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actorLabel, ct: ct);
+                sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actor?.Label, ct: ct);
         }
 
         // Never persists Unverifiable: that value is a fact about live policy (an anchor set that
@@ -1030,8 +1030,8 @@ public sealed class SbomController : ControllerBase
     {
         DependablyMeter.SbomUploads.Add(1);
 
-        (string? kind, string? label) = actorId is null
-            ? (null, null)
+        var actor = actorId is null
+            ? null
             : await _svc.Ingest.ResolveActorAsync(orgId, actorId, ct);
         string detail = JsonSerializer.Serialize(
             new
@@ -1046,8 +1046,8 @@ public sealed class SbomController : ControllerBase
 
         await _svc.Audit.LogActivityAsync(
             orgId, "sbom", purl: null, eventType: "sbom_uploaded",
-            actorId: actorId, actorKind: kind, detail: detail,
-            sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: label, ct: ct);
+            actorId: actorId, actorKind: actor?.Kind, detail: detail,
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actor?.Label, ct: ct);
 
         if (projectCreated)
         {
@@ -1055,8 +1055,8 @@ public sealed class SbomController : ControllerBase
             // project.created, and a consumer filtering on either spelling silently missed the
             // rows written by the other surface.
             await _svc.Audit.LogAsync(
-                "project.created", orgId: orgId, actorId: actorId, actorKind: kind,
-                detail: detail, sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: label, ct: ct);
+                "project.created", orgId: orgId, actorId: actorId, actorKind: actor?.Kind,
+                detail: detail, sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actor?.Label, ct: ct);
         }
     }
 }

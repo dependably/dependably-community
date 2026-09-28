@@ -225,6 +225,45 @@ public sealed partial class SchemaInitializer
         GROUP BY sb.org_id
         """;
 
+    /// <summary>
+    /// The bytes an org pays to store: what it uploaded, and nothing the proxy cache holds on its
+    /// behalf. It is deliberately NOT <see cref="OrgStorageBytesView"/>, which is the quota read
+    /// and charges every tenant for the cache entries it reaches; a cached public artifact counts
+    /// against quota but is never billed as storage.
+    ///
+    /// The hosted arm is <see cref="OrgStorageBytesView"/>'s hosted arm verbatim, so the two
+    /// views agree on every uploaded non-OCI byte. OCI is summed from <c>oci_blobs</c> for the same
+    /// reason the quota view does it — a catalogue row sizes a manifest, never its layers — but
+    /// only the rows a push wrote (<c>origin = 'uploaded'</c>); proxy-cached layers are the cache
+    /// arm's concern.
+    ///
+    /// Orgs with nothing uploaded have no row; readers LEFT JOIN from <c>orgs</c> and treat the
+    /// absence as zero.
+    /// </summary>
+    // xtenant: view DDL. The view groups by org_id and projects it as its own column so that every
+    // consumer can filter on it; the definition itself necessarily spans all tenants.
+    // plane-ok: billable storage is the uploaded plane by definition; the proxy plane is excluded on
+    // purpose because cached public artifacts are not billed as storage.
+    private const string OrgBillableStorageBytesView =
+        """
+        CREATE VIEW org_billable_storage_bytes AS
+        SELECT bs.org_id                 AS org_id,
+               SUM(bs.hosted_bytes)      AS hosted_bytes,
+               SUM(bs.oci_bytes)         AS oci_uploaded_bytes,
+               SUM(bs.hosted_bytes + bs.oci_bytes) AS billable_bytes
+        FROM (
+            SELECT p.org_id AS org_id, pv.size_bytes AS hosted_bytes, 0 AS oci_bytes
+            FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.ecosystem != 'oci' AND pv.origin = 'uploaded'
+            UNION ALL
+            SELECT ob.org_id AS org_id, 0 AS hosted_bytes, ob.size_bytes AS oci_bytes
+            FROM oci_blobs ob
+            WHERE ob.origin = 'uploaded'
+        ) bs
+        GROUP BY bs.org_id
+        """;
+
     // Name paired with the statement that declares it. The statement text is also the comparison key
     // on SQLite, so it is stored verbatim rather than rebuilt per provider.
     private static readonly (string Name, string Sql)[] ViewDefinitions =
@@ -232,6 +271,7 @@ public sealed partial class SchemaInitializer
         ("artifact_inventory", ArtifactInventoryView),
         ("artifact_license", ArtifactLicenseView),
         ("org_storage_bytes", OrgStorageBytesView),
+        ("org_billable_storage_bytes", OrgBillableStorageBytesView),
     ];
 
     // Set once per boot, the first time a one-time migration is about to run a body that may reshape
@@ -263,13 +303,32 @@ public sealed partial class SchemaInitializer
         {
             if (_db.Provider == DbProvider.Postgres)
             {
-                await EnsurePostgresViewAsync(conn, name, sql);
+                await EnsurePostgresViewAsync(conn, name, WithSecurityInvokerWhenEnforced(name, sql));
             }
             else
             {
                 await EnsureSqliteViewAsync(conn, name, sql);
             }
         }
+    }
+
+    // Under row-level security a view must evaluate its base tables' policies as the reader, not
+    // the owner, or it reads every tenant. The option is part of the CREATE statement itself:
+    // CREATE OR REPLACE VIEW without it clears security_invoker, so setting it afterwards would open
+    // a window on every boot in which a concurrent replica reads through an owner-rights view.
+    private string WithSecurityInvokerWhenEnforced(string name, string sql)
+    {
+        if (EnforcedRowLevelSecurity is null)
+        {
+            return sql;
+        }
+
+        // rawsql: `name` comes from ViewDefinitions, a private compile-time constant array.
+        string declaration = $"CREATE VIEW {name} AS";
+        return sql.Contains(declaration, StringComparison.Ordinal)
+            // rawsql: `name` comes from ViewDefinitions, a private compile-time constant array.
+            ? sql.Replace(declaration, $"CREATE VIEW {name} WITH (security_invoker = true) AS", StringComparison.Ordinal)
+            : throw new InvalidOperationException($"View '{name}' does not open with '{declaration}'.");
     }
 
     // CREATE OR REPLACE VIEW swaps the definition atomically: the name is never unresolvable, so a

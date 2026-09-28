@@ -331,13 +331,14 @@ public sealed class OciBlobProxyRefusalTests
         await using var conn = await store.OpenAsync();
         await Dapper.SqlMapper.ExecuteAsync(conn,
             "DELETE FROM upstream_registry WHERE ecosystem = 'oci'");
+        string orgId = (await Dapper.SqlMapper.ExecuteScalarAsync<string>(conn,
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
         await Dapper.SqlMapper.ExecuteAsync(conn,
             """
             INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type, prefixes)
-            SELECT lower(hex(randomblob(16))), id, 'oci', @host, 0, 'anonymous', @prefixes
-            FROM orgs
+            VALUES (@id, @orgId, 'oci', @host, 0, 'anonymous', @prefixes)
             """,
-            new { host, prefixes = JsonSerializer.Serialize(new[] { "" }) });
+            new { id = Guid.NewGuid().ToString("N"), orgId, host, prefixes = JsonSerializer.Serialize(new[] { "" }) });
     }
 
     private static async Task EnableAnonymousPullAsync(DependablyFactory factory)

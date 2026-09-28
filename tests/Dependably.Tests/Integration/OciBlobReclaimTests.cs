@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
@@ -304,11 +305,21 @@ public sealed class OciBlobReclaimTests : IClassFixture<DependablyFactory>, IAsy
     }
 
     private async Task BackfillAsync() =>
-        await _factory.Services.GetRequiredService<OciReferenceGraphBackfillService>().RunOnceAsync();
+        await TestHarnessDbScope.AsHostAsync(() => _factory.Services.GetRequiredService<OciReferenceGraphBackfillService>().RunOnceAsync());
 
-    private async Task<int> ReclaimAsync() =>
-        await _factory.Services.GetRequiredService<OciBlobReclaimer>()
-            .ReclaimUnreferencedAsync(await DefaultOrgIdAsync(), limit: 500);
+    // Host code under the scope OciBlobSweepService declares for it in production.
+    private async Task<int> ReclaimAsync()
+    {
+        string orgId = await DefaultOrgIdAsync();
+        var reclaimer = _factory.Services.GetRequiredService<OciBlobReclaimer>();
+        return await TestHarnessDbScope.AsHostAsync(async () =>
+        {
+            using (DbScope.CrossTenant("test: the blob sweep's scope"))
+            {
+                return await reclaimer.ReclaimUnreferencedAsync(orgId, limit: 500);
+            }
+        });
+    }
 
     private async Task<bool> BlobRowExistsAsync(string digest)
     {

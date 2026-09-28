@@ -77,6 +77,28 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
     }
 
     [Fact]
+    public async Task ReadOnlyWrite_Returns423Locked_WithReadOnlyDetail()
+    {
+        var mw = BuildThrowing(new TenantNotReadyException(
+            "t-ro", TenantNotReadyReason.ReadOnlyWrite, "status='read_only'"));
+        var ctx = NewContext();
+
+        await mw.InvokeAsync(ctx);
+
+        Assert.Equal(StatusCodes.Status423Locked, ctx.Response.StatusCode);
+        Assert.False(ctx.Response.Headers.ContainsKey("Retry-After"));
+
+        var body = await ReadBodyAsync(ctx);
+        Assert.Equal("ReadOnlyWrite", body.GetProperty("reason").GetString());
+        // Unlike StatusInactive, ReadOnlyWrite carries a detail — it already discloses no more
+        // than the reason itself does, so spelling out the read-only posture is not a new leak.
+        Assert.Equal(
+            "The organization is read-only. Downloads keep working; uploads and publishes are refused.",
+            body.GetProperty("detail").GetString());
+        Assert.False(body.TryGetProperty("tenantId", out _));
+    }
+
+    [Fact]
     public async Task StatusInactive_PreservesSecurityAndCorsHeaders_ButNotTheAbortedContentType()
     {
         // Simulates what SecurityHeadersMiddleware + CorsMiddleware already wrote, and what a

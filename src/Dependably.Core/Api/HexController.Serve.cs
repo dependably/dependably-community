@@ -103,9 +103,27 @@ public sealed partial class HexController
             return StatusCode(StatusCodes.Status304NotModified);
         }
 
-        var body = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(hosted.BlobKey), ct);
+        string storeKey = BlobKeys.StoreKey(hosted.BlobKey);
+        if (await TryRedirectTarballAsync(storeKey, hosted.SizeBytes, BlobOrigins.FromColumn(hosted.Origin), ct) is { } redirect)
+        {
+            return redirect;
+        }
+
+        var body = await _svc.Blobs.GetAsync(storeKey, ct);
         return body is null ? NotFound() : File(body, TarContentType, ctx.Filename);
     }
+
+    /// <summary>
+    /// The presigned-redirect decision for a package tarball. A release tarball is immutable — its
+    /// outer checksum is in the signed index — so a hosted or cached one may redirect. Docs
+    /// tarballs stream: a proxied one is not a cache-plane artefact and has no recorded size to
+    /// meter the redirect by.
+    /// </summary>
+    private async Task<IActionResult?> TryRedirectTarballAsync(
+        string storeKey, long sizeBytes, BlobOrigin origin, CancellationToken ct)
+        => _svc.Presign is not { } presign
+            ? null
+            : await presign.TryRedirectAsync(HttpContext, _svc.Blobs, storeKey, sizeBytes, origin, Ecosystem, ct);
 
     /// <summary>
     /// The cache plane's arm, or null when the recorded blob is missing and the caller should fall
@@ -115,8 +133,15 @@ public sealed partial class HexController
     private async Task<IActionResult?> ServeCachedTarballAsync(
         HexServeContext ctx, CacheArtifactServeFacts cached, CancellationToken ct)
     {
-        var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(cached.BlobKey), ct);
-        if (stream is null)
+        // A redirect candidate probes for the blob rather than opening it, so a hit answered by a
+        // redirect does not open (and then discard) a stream from the object store; the probe is
+        // the only existence check the redirect makes.
+        string storeKey = BlobKeys.StoreKey(cached.BlobKey);
+        var probe = _svc.Presign is { } presign
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, storeKey, BlobOrigin.Proxied, Ecosystem, ct)
+            : null;
+        var stream = probe is null ? await _svc.Blobs.GetAsync(storeKey, ct) : null;
+        if (stream is null && probe is not { Exists: true })
         {
             return null;
         }
@@ -124,19 +149,44 @@ public sealed partial class HexController
         if (await _svc.BlockGate.EvaluateAsync(
                 BlockGateRequest.ForProxyCacheFacts(ctx.OrgId, Ecosystem, cached, ctx.Token, ctx.Settings, ctx.SourceIp), ct) == BlockDecision.Blocked)
         {
-            await stream.DisposeAsync();
+            await DisposeIfOpenAsync(stream);
             return StatusCode(StatusCodes.Status403Forbidden);
         }
 
-        await RecordCacheHitAsync(ctx.OrgId, ctx.Name, ctx.Version, ctx.Filename, cached, ct);
+        // The hit is recorded only once the answer is committed — a 304, a redirect, or an opened
+        // stream — so a blob that vanishes between the probe and the open falls through to the
+        // miss path without having been counted as a hit first.
         if (TarballNotModified(cached.ContentHash))
         {
-            await stream.DisposeAsync();
+            await DisposeIfOpenAsync(stream);
+            await RecordCacheHitAsync(ctx.OrgId, ctx.Name, ctx.Version, ctx.Filename, cached, ct);
             return StatusCode(StatusCodes.Status304NotModified);
         }
 
+        if (probe is not null
+            && await _svc.Presign!.TryRedirectAsync(HttpContext, probe, cached.SizeBytes, ct) is { } redirect)
+        {
+            await RecordCacheHitAsync(ctx.OrgId, ctx.Name, ctx.Version, ctx.Filename, cached, ct);
+            return redirect;
+        }
+
+        stream ??= await _svc.Blobs.GetAsync(storeKey, ct);
+        if (stream is null)
+        {
+            return null;
+        }
+
+        await RecordCacheHitAsync(ctx.OrgId, ctx.Name, ctx.Version, ctx.Filename, cached, ct);
         Response.Headers["X-Cache"] = "HIT";
         return File(stream, TarContentType, ctx.Filename);
+    }
+
+    private static async Task DisposeIfOpenAsync(Stream? stream)
+    {
+        if (stream is not null)
+        {
+            await stream.DisposeAsync();
+        }
     }
 
     private async Task<IActionResult> ProxyTarballAsync(

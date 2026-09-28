@@ -137,7 +137,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
     private sealed class AirGapFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         public InMemoryBlobStore BlobStore { get; } = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -146,6 +146,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
@@ -153,8 +154,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(BlobStore, BlobStore));
 
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             // TestServer leaves Connection.RemoteIpAddress null, which
             // MetricsAccessMiddleware treats as unauthenticated (403). Set
@@ -174,7 +174,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -186,8 +186,8 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         private sealed class LoopbackRemoteIpFilter : IStartupFilter
@@ -212,7 +212,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
     private sealed class DisabledMetricsFactory : WebApplicationFactory<Program>, IAsyncLifetime, IAsyncDisposable
     {
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -221,13 +221,13 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
             builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
 
             builder.WebHost.UseTestServer();
@@ -243,12 +243,12 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
         public Task InitializeAsync() { _ = CreateClient(); return Task.CompletedTask; }
-        public new async Task DisposeAsync() { await _metadataStore.DisposeAsync(); await base.DisposeAsync(); }
+        public new async Task DisposeAsync() { await base.DisposeAsync(); await _db.DisposeAsync(); }
         async ValueTask IAsyncDisposable.DisposeAsync() => await DisposeAsync();
 
         private sealed class LoopbackRemoteIpFilter : IStartupFilter
@@ -270,7 +270,7 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
     private sealed class BlockedIpFactory : WebApplicationFactory<Program>, IAsyncLifetime, IAsyncDisposable
     {
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -279,13 +279,13 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
             builder.Services.AddSingleton<IStartupFilter, LoopbackRemoteIpFilter>();
 
             builder.WebHost.UseTestServer();
@@ -301,12 +301,12 @@ public sealed class AirGapObservabilityTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
         public Task InitializeAsync() { _ = CreateClient(); return Task.CompletedTask; }
-        public new async Task DisposeAsync() { await _metadataStore.DisposeAsync(); await base.DisposeAsync(); }
+        public new async Task DisposeAsync() { await base.DisposeAsync(); await _db.DisposeAsync(); }
         async ValueTask IAsyncDisposable.DisposeAsync() => await DisposeAsync();
 
         private sealed class LoopbackRemoteIpFilter : IStartupFilter

@@ -71,50 +71,66 @@ const SYSTEM_STATIC = [
   ['system-profile',       '/profile'],
   ['system-admins',        '/admins'],
   ['system-tenants',       '/tenants'],
+  ['system-tokens',        '/tokens'],
   ['system-banners',       '/banners'],
+  ['system-usage',         '/usage'],
 ]
 
 function staticTable() {
   return activeTable === 'system' ? SYSTEM_STATIC : TENANT_STATIC
 }
 
+// Pages whose identity lives in the URL path rather than the query string, per route table.
+// Each builds its path from params; none contributes a query string (see searchFor).
+const PATH_BUILDERS = {
+  tenant: {
+    'version-detail': (params) => {
+      const eco = encodeURIComponent(params.ecosystem ?? '')
+      const name = String(params.name ?? '').split('/').map(encodeURIComponent).join('/')
+      return `/package/${eco}/${name}`
+    },
+    // Projects epic: GUIDs in the path (labels are opaque user strings that may contain '/',
+    // so — unlike version-detail's name segments — there is no multi-segment-encode dance here).
+    'project-version': (params) => {
+      const id = encodeURIComponent(params.id ?? '')
+      const versionId = encodeURIComponent(params.versionId ?? '')
+      return `/project/${id}/version/${versionId}`
+    },
+    'project-detail': (params) => `/project/${encodeURIComponent(params.id ?? '')}`,
+  },
+  system: {
+    // System-admin per-tenant usage drill-down: /tenants/:slug/usage. The slug identity lives in
+    // the path (like every other system-tenant deep link); the date range/granularity are query
+    // params owned by the page itself.
+    'system-tenant-usage': (params) => `/tenants/${encodeURIComponent(params.slug ?? '')}/usage`,
+  },
+}
+
+function pathBuilder(page) {
+  const builders = PATH_BUILDERS[activeTable]
+  return builders && Object.hasOwn(builders, page) ? builders[page] : null
+}
+
 // pathFor: page → URL. Uses the first canonical entry for the given page (aliases are skipped
 // because the canonical entry is listed first and we return on first match).
 export function pathFor(page, params = {}) {
-  if (activeTable === 'tenant' && page === 'version-detail') {
-    const eco = encodeURIComponent(params.ecosystem ?? '')
-    const name = String(params.name ?? '').split('/').map(encodeURIComponent).join('/')
-    return `/package/${eco}/${name}`
-  }
-  // Projects epic: GUIDs in the path (labels are opaque user strings that may contain '/',
-  // so — unlike version-detail's name segments — there is no multi-segment-encode dance here).
-  if (activeTable === 'tenant' && page === 'project-version') {
-    const id = encodeURIComponent(params.id ?? '')
-    const versionId = encodeURIComponent(params.versionId ?? '')
-    return `/project/${id}/version/${versionId}`
-  }
-  if (activeTable === 'tenant' && page === 'project-detail') {
-    return `/project/${encodeURIComponent(params.id ?? '')}`
-  }
-  for (const [p, path] of staticTable()) {
-    if (p === page) return path
-  }
-  return '/'
+  const build = pathBuilder(page)
+  if (build) return build(params)
+  const entry = staticTable().find(([p]) => p === page)
+  return entry ? entry[1] : '/'
 }
 
-// searchFor: page → query string ('' or '?a=b&c=d'). version-detail carries its params in the
-// path (see pathFor), so it never contributes a query string. Every other page serializes its
-// params into the query string — which is how list pages (vulnerabilities, packages…) read their
-// initial table state on mount (lib/tableState.js readQuery). This lets navigate() deep-link a
-// list page with a non-default filter/sort, e.g. navigate('vulnerabilities', { sort: 'published' }).
+// searchFor: page → query string ('' or '?a=b&c=d'). A page in PATH_BUILDERS carries its params
+// in the path (see pathFor), so it never contributes a query string; one with its own
+// URL-persisted table state (the project-version component table, the tenant usage drill-down)
+// writes its query string directly via tableState.js's readQuery/writeQuery once mounted,
+// independent of navigate(). Every other page serializes its params into the query string —
+// which is how list pages (vulnerabilities, packages…) read their initial table state on mount
+// (lib/tableState.js readQuery). This lets navigate() deep-link a list page with a non-default
+// filter/sort, e.g. navigate('vulnerabilities', { sort: 'published' }).
 // Empty/nullish values are dropped so a bare navigation still yields a clean URL = default state.
 export function searchFor(page, params = {}) {
-  if (activeTable === 'tenant' && page === 'version-detail') return ''
-  // project-detail/project-version carry their identity as path GUIDs (see pathFor). A page
-  // with its own URL-persisted table state (the project-version component table) writes its
-  // query string directly via tableState.js's readQuery/writeQuery once mounted, independent of
-  // navigate() — the same relationship Packages.svelte has with the plain 'packages' page.
-  if (activeTable === 'tenant' && (page === 'project-detail' || page === 'project-version')) return ''
+  if (pathBuilder(page)) return ''
   const sp = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null || value === '') continue
@@ -122,6 +138,38 @@ export function searchFor(page, params = {}) {
   }
   const qs = sp.toString()
   return qs ? `?${qs}` : ''
+}
+
+// The inverse of PATH_BUILDERS: each pattern matches one path-identity page and decodes its
+// params, tried in order before the static table.
+const PATH_PATTERNS = {
+  tenant: [
+    [/^\/package\/([^/]+)\/(.+)$/, (m) => ({
+      page: 'version-detail',
+      params: {
+        ecosystem: decodeURIComponent(m[1]),
+        name: m[2].split('/').map(decodeURIComponent).join('/'),
+      },
+    })],
+    // versionId also matches the literal 'latest' — a server-resolved alias, not a GUID; the
+    // route layer passes whatever string is in the path through untouched.
+    [/^\/project\/([^/]+)\/version\/([^/]+)$/, (m) => ({
+      page: 'project-version',
+      params: { id: decodeURIComponent(m[1]), versionId: decodeURIComponent(m[2]) },
+    })],
+    [/^\/project\/([^/]+)$/, (m) => ({ page: 'project-detail', params: { id: decodeURIComponent(m[1]) } })],
+  ],
+  system: [
+    [/^\/tenants\/([^/]+)\/usage$/, (m) => ({ page: 'system-tenant-usage', params: { slug: decodeURIComponent(m[1]) } })],
+  ],
+}
+
+function matchPathPattern(path) {
+  for (const [pattern, toRoute] of PATH_PATTERNS[activeTable] ?? []) {
+    const m = pattern.exec(path)
+    if (m) return toRoute(m)
+  }
+  return null
 }
 
 // routeFor: pathname → { page, params } | null. Trailing slashes are normalized away.
@@ -132,37 +180,11 @@ export function routeFor(pathname) {
   let path = pathname
   if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1)
 
-  if (activeTable === 'tenant') {
-    const m = /^\/package\/([^/]+)\/(.+)$/.exec(path)
-    if (m) {
-      return {
-        page: 'version-detail',
-        params: {
-          ecosystem: decodeURIComponent(m[1]),
-          name: m[2].split('/').map(decodeURIComponent).join('/'),
-        },
-      }
-    }
+  const dynamic = matchPathPattern(path)
+  if (dynamic) return dynamic
 
-    // versionId also matches the literal 'latest' — a server-resolved alias, not a GUID; the
-    // route layer passes whatever string is in the path through untouched.
-    const mv = /^\/project\/([^/]+)\/version\/([^/]+)$/.exec(path)
-    if (mv) {
-      return {
-        page: 'project-version',
-        params: { id: decodeURIComponent(mv[1]), versionId: decodeURIComponent(mv[2]) },
-      }
-    }
-    const mp = /^\/project\/([^/]+)$/.exec(path)
-    if (mp) {
-      return { page: 'project-detail', params: { id: decodeURIComponent(mp[1]) } }
-    }
-  }
-
-  for (const [page, p] of staticTable()) {
-    if (p === path) return { page, params: {} }
-  }
-  return null
+  const entry = staticTable().find(([, p]) => p === path)
+  return entry ? { page: entry[0], params: {} } : null
 }
 
 export function routesEqual(a, b) {

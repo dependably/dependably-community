@@ -83,6 +83,18 @@
   <data name="error.token.nameRequired" xml:space="preserve">
     <value>Le nom est obligatoire.</value>
   </data>
+  <data name="error.token.descriptionTooLong" xml:space="preserve">
+    <value>La description doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.token.descriptionInvalidChars" xml:space="preserve">
+    <value>La description ne doit pas contenir de caractères de contrôle.</value>
+  </data>
+  <data name="error.token.expiryRequired" xml:space="preserve">
+    <value>Une date d'expiration est requise et doit être dans le futur.</value>
+  </data>
+  <data name="error.token.expiryTooFar" xml:space="preserve">
+    <value>L'expiration ne doit pas dépasser {0} jours à partir de maintenant.</value>
+  </data>
   <data name="error.invite.emailRequired" xml:space="preserve">
     <value>L'adresse courriel est obligatoire.</value>
   </data>
@@ -217,6 +229,9 @@
   <data name="error.token.limitReached" xml:space="preserve">
     <value>Limite de jetons actifs ({0}) atteinte pour ce locataire. Révoquez des jetons inutilisés avant d'en créer de nouveaux.</value>
   </data>
+  <data name="error.systemToken.limitReached" xml:space="preserve">
+    <value>Limite de jetons système actifs ({0}) atteinte pour cette instance. Révoquez des jetons inutilisés avant d'en créer de nouveaux.</value>
+  </data>
   <data name="error.list.patternRequired" xml:space="preserve">
     <value>pattern est obligatoire.</value>
   </data>
@@ -325,8 +340,14 @@
   <data name="error.system.quotaInvalid" xml:space="preserve">
     <value>Le quota doit être un nombre d'octets positif, ou null pour effacer.</value>
   </data>
+  <data name="error.system.usageCapInvalid" xml:space="preserve">
+    <value>Un plafond d'utilisation doit être une quantité positive, ou null pour l'effacer.</value>
+  </data>
+  <data name="error.system.usageMeterUnknown" xml:space="preserve">
+    <value>Compteur inconnu. Doit être « egress_bytes », « egress_metadata_bytes », « storage_bytes » ou « artifact_count ».</value>
+  </data>
   <data name="error.system.tenantStatusInvalid" xml:space="preserve">
-    <value>Doit être « active » ou « suspended ». (« archived » et « deleting » sont réservés à l'édition entreprise.)</value>
+    <value>Doit être « active », « suspended » ou « read_only ». (« archived » et « deleting » sont réservés à l'édition entreprise.)</value>
   </data>
   <data name="error.system.tenantAlreadyActive" xml:space="preserve">
     <value>Le locataire est déjà actif.</value>
@@ -345,6 +366,18 @@
   </data>
   <data name="error.system.unsupportedTimezone" xml:space="preserve">
     <value>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</value>
+  </data>
+  <data name="error.system.usageRangeInvalid" xml:space="preserve">
+    <value>Doit être une date au format AAAA-MM-JJ.</value>
+  </data>
+  <data name="error.system.usageRangeOrder" xml:space="preserve">
+    <value>« to » ne doit pas être antérieur à « from ».</value>
+  </data>
+  <data name="error.system.usageRangeTooLarge" xml:space="preserve">
+    <value>La plage ne peut pas dépasser {0} jours.</value>
+  </data>
+  <data name="error.system.usageGranularityInvalid" xml:space="preserve">
+    <value>Doit être « day » ou « hour ».</value>
   </data>
   <data name="error.password.currentRequired" xml:space="preserve">
     <value>Le mot de passe actuel est obligatoire.</value>

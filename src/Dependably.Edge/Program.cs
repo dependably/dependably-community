@@ -240,8 +240,7 @@ public partial class Program
                 + "dependably image for single/multi/header/bound modes.");
         }
 
-        string dbProvider = (configuration["DB_PROVIDER"] ?? "sqlite").Trim().ToLowerInvariant();
-        if (dbProvider == "postgres")
+        if (DbProviderSetting.FromConfiguration(configuration) == DbProvider.Postgres)
         {
             throw new InvalidOperationException(
                 "The dependably/edge image does not support DB_PROVIDER=postgres. Its in-process "
@@ -349,6 +348,12 @@ public partial class Program
         app.UseMiddleware<TenantStorageQuotaExceededExceptionMiddleware>();
         app.UseMiddleware<UpstreamFetchFailedExceptionMiddleware>();
         app.UseMiddleware<SsrfBlockedExceptionMiddleware>();
+
+        // Endpoint routing, after the intercept rewrite and before everything that reads the
+        // routed endpoint (auth, the rate limiter, the tenant status gate). Without an explicit
+        // call WebApplication routes at the start of the pipeline, on the pre-rewrite path — see
+        // the matching comment in src/Dependably/Program.cs.
+        app.UseRouting();
 
         app.UseResponseCompression();
         app.UseSerilogRequestLogging(opts => opts.GetLevel = SerilogRequestLogLevel);

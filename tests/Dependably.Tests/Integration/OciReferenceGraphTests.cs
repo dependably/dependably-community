@@ -185,7 +185,7 @@ public sealed class OciReferenceGraphTests : IClassFixture<DependablyFactory>, I
             .RemoveManifestAsync(orgId, image.ManifestDigest);
         Assert.Empty(await EdgesForAsync(image.ManifestDigest));
 
-        var summary = await BuildBackfill().RunOnceAsync();
+        var summary = await TestHarnessDbScope.AsHostAsync(() => BuildBackfill().RunOnceAsync());
 
         Assert.True(summary.Recorded >= 1);
         Assert.Equal(
@@ -211,7 +211,7 @@ public sealed class OciReferenceGraphTests : IClassFixture<DependablyFactory>, I
         await _factory.Services.GetRequiredService<Dependably.Storage.TieredBlobStorage>()
             .Registry.DeleteAsync(Dependably.Storage.BlobKeys.StoreKey(blobKey));
 
-        await BuildBackfill().RunOnceAsync();
+        await TestHarnessDbScope.AsHostAsync(() => BuildBackfill().RunOnceAsync());
 
         Assert.Empty(await EdgesForAsync(image.ManifestDigest));
         Assert.False(await _factory.Services.GetRequiredService<OciReferenceGraph>()
@@ -227,11 +227,11 @@ public sealed class OciReferenceGraphTests : IClassFixture<DependablyFactory>, I
         await PushImageAsync(client, "converge");
 
         var svc = BuildBackfill();
-        await svc.RunOnceAsync();
+        await TestHarnessDbScope.AsHostAsync(() => svc.RunOnceAsync());
 
         // A second pass must find nothing: layer and config rows are not manifests and must never
         // re-enter the claim query, or the sweep would churn every tick and never look done.
-        var second = await svc.RunOnceAsync();
+        var second = await TestHarnessDbScope.AsHostAsync(() => svc.RunOnceAsync());
         Assert.Equal(0, second.Recorded);
     }
 

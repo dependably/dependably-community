@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Protocol;
 using Dependably.Storage;
 
@@ -77,6 +78,9 @@ public sealed class OciReferenceGraphBackfillService : ScheduledBackgroundServic
     /// </summary>
     public async Task<BackfillSummary> RunOnceAsync(CancellationToken ct = default)
     {
+        // xtenant: claims unindexed manifests across every tenant, each recorded under its own org_id.
+        using var ownerScope = DbScope.CrossTenant("oci reference graph backfill");
+
         // Honours the operator switch and, via the edge allowlist inversion, keeps an edge node out
         // of the graph entirely: a cache node creates nothing authoritative, and the reclaim this
         // graph authorizes deletes bytes.
@@ -137,8 +141,12 @@ public sealed class OciReferenceGraphBackfillService : ScheduledBackgroundServic
     {
         await using var conn = await _db.OpenAsync(ct);
 
+        var (mediaTypesClause, parameters) = DapperInClause.Expand("mediaType", OciManifestParser.AcceptedMediaTypes.ToList());
+        parameters.AddDynamicParams(new { limit = BatchSize });
+
         // xtenant: deliberately fleet-wide — this is a one-time backfill of pre-upgrade content
         // across every tenant, and each row carries the org_id it is recorded under.
+        // rawsql: mediaTypesClause is a parameterized IN (@mediaType0, …) list built in C# by DapperInClause.
         var rows = await conn.QueryAsync<PendingManifest>(
             """
             SELECT b.digest AS Digest, b.org_id AS OrgId, b.blob_key AS BlobKey, b.origin AS Origin
@@ -149,8 +157,8 @@ public sealed class OciReferenceGraphBackfillService : ScheduledBackgroundServic
                   WHERE g.org_id = b.org_id AND g.manifest_digest = b.digest)
             ORDER BY b.digest
             LIMIT @limit
-            """,
-            new { mediaTypes = OciManifestParser.AcceptedMediaTypes.ToArray(), limit = BatchSize });
+            """.Replace("@mediaTypes", mediaTypesClause, StringComparison.Ordinal),
+            parameters);
 
         return rows.AsList();
     }

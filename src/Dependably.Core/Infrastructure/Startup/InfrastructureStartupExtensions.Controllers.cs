@@ -56,7 +56,8 @@ internal static partial class InfrastructureStartupExtensions
                 sp.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>(),
                 sp.GetRequiredService<Dependably.Protocol.BlockGateService>(),
                 sp.GetRequiredService<ApkIndexFetchCoordinator>(),
-                negativeCacheTtl);
+                negativeCacheTtl,
+                sp.GetService<BlobPresignService>());
         });
     }
 }

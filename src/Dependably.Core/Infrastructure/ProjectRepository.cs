@@ -385,14 +385,17 @@ public sealed partial class ProjectRepository
 
         var latest = await LatestVersionsAsync(conn, orgId, projectIds, ct);
 
+        var (subtreeProjects, subtreeProjectsParams) = DapperInClause.Expand("projectIds", projectIds.ToList());
+        subtreeProjectsParams.AddDynamicParams(new { orgId });
+        // rawsql: subtreeProjects is a parameterized IN (@projectIds0, …) list built in C# by DapperInClause.
         var rows = (await conn.QueryAsync<ProjectSubtreeEntry>(new CommandDefinition(
             """
             SELECT p.id AS ProjectId, p.name AS Name, p.classifier AS Classifier
             FROM projects p
             WHERE p.org_id = @orgId AND p.id IN @projectIds
             ORDER BY LOWER(p.name), p.id
-            """,
-            new { orgId, projectIds }, cancellationToken: ct))).AsList();
+            """.Replace("@projectIds", subtreeProjects, StringComparison.Ordinal),
+            subtreeProjectsParams, cancellationToken: ct))).AsList();
 
         foreach (var row in rows)
         {

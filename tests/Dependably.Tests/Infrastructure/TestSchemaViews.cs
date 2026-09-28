@@ -16,7 +16,7 @@ internal static class TestSchemaViews
 {
     internal static async Task DropAsync(DbConnection conn)
     {
-        foreach (string view in new[] { "artifact_inventory", "artifact_license", "org_storage_bytes" })
+        foreach (string view in new[] { "artifact_inventory", "artifact_license", "org_storage_bytes", "org_billable_storage_bytes" })
         {
             // rawsql: the name comes from a local compile-time constant array.
             await conn.ExecuteAsync($"DROP VIEW IF EXISTS {view}");

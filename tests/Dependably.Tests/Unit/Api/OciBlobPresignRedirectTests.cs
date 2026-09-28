@@ -285,6 +285,68 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
         Assert.Equal(afterStream[0], afterRedirect[1]);
     }
 
+    // ── Residency under the CloudFront signer ─────────────────────────────────
+
+    [Fact]
+    public async Task BlobGet_CloudFront_UploadedLayerSharingAProxiedDigest_IsSignedUnderTheUncachedPrefix()
+    {
+        // One digest, one content-addressed key, two rows: this org pushed the layer, the other
+        // org proxied the same bytes. The key cannot tell them apart; the row's origin does.
+        byte[] bytes = RandomBytes();
+        string digest = await SeedBlobAsync(bytes, _orgId, into: _registryBlobs, origin: "uploaded");
+        await SeedBlobAsync(bytes, _otherOrgId, origin: "proxy");
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+
+        var uploaded = BuildController(_orgId, presignEnabled: true, options: CloudFrontOptions(key, uncachedPrefix: "uploaded"));
+        var proxied = BuildController(
+            _otherOrgId, presignEnabled: true, options: CloudFrontOptions(key, uncachedPrefix: "uploaded"),
+            visibility: new PublicFor(_otherOrgId));
+
+        var uploadedRedirect = Assert.IsType<RedirectResult>(await uploaded.Get($"library/ubuntu/blobs/{digest}", default));
+        var proxiedRedirect = Assert.IsType<RedirectResult>(await proxied.Get($"library/ubuntu/blobs/{digest}", default));
+
+        Assert.StartsWith($"{CloudFrontBase}/uploaded/{BlobKeyFor(digest)}?", uploadedRedirect.Url, StringComparison.Ordinal);
+        Assert.StartsWith($"{CloudFrontBase}/cached/{BlobKeyFor(digest)}?", proxiedRedirect.Url, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BlobGet_CloudFront_UncachedPrefixUnset_UploadedLayerIsSignedByTheStore()
+    {
+        string digest = await SeedBlobAsync(RandomBytes(), _orgId, into: _registryBlobs, origin: "uploaded");
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+
+        var ctl = BuildController(_orgId, presignEnabled: true, options: CloudFrontOptions(key, uncachedPrefix: null));
+        var redirect = Assert.IsType<RedirectResult>(await ctl.Get($"library/ubuntu/blobs/{digest}", default));
+
+        Assert.StartsWith("https://blobs.test/signed/", redirect.Url, StringComparison.Ordinal);
+        Assert.Single(_registryBlobs.PresignedKeys);
+    }
+
+    private const string CloudFrontBase = "https://d111111abcdef8.cloudfront.net";
+
+    /// <summary>Answers "public" for one org's OCI content, as a credential-free upstream set would.</summary>
+    private sealed class PublicFor(string orgId) : IProxiedContentVisibility
+    {
+        public Task<bool> IsPublicAsync(string org, string ecosystem, CancellationToken ct = default)
+            => Task.FromResult(org == orgId && ecosystem == "oci");
+    }
+
+    private static PresignedReadOptions CloudFrontOptions(System.Security.Cryptography.RSA key, string? uncachedPrefix)
+        => new()
+        {
+            Enabled = true,
+            Ttl = TimeSpan.FromSeconds(PresignedReadOptions.DefaultTtlSeconds),
+            Signer = PresignedReadSigner.CloudFront,
+            CloudFront = new CloudFrontSignerOptions
+            {
+                UrlBase = new Uri(CloudFrontBase),
+                KeyPairId = "K2JCJMDEHXQW5F",
+                PrivateKey = key,
+                CachedPathPrefix = "cached",
+                UncachedPathPrefix = uncachedPrefix,
+            },
+        };
+
     /// <summary>
     /// An S3-style blob store: byte storage plus the optional presign capability, recording every
     /// key it was asked to sign and the expiry it was handed. The recording is what makes the
@@ -304,17 +366,13 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
 
         public bool SupportsPresignedReads => CanSign;
 
-        public async Task<Uri?> TryCreatePresignedReadUrlAsync(
+        public Task<Uri?> TryCreatePresignedReadUrlAsync(
             string key, DateTimeOffset expiresAt, CancellationToken ct = default)
         {
-            if (!await _inner.ExistsAsync(key, ct))
-            {
-                return null;
-            }
-
             _presignedKeys.Add(key);
             _presignedExpiries.Add(expiresAt);
-            return new Uri($"https://blobs.test/signed/{Uri.EscapeDataString(key)}?expires={expiresAt.ToUnixTimeSeconds()}");
+            return Task.FromResult<Uri?>(
+                new Uri($"https://blobs.test/signed/{Uri.EscapeDataString(key)}?expires={expiresAt.ToUnixTimeSeconds()}"));
         }
 
         public Task PutAsync(string key, Stream data, CancellationToken ct = default) => _inner.PutAsync(key, data, ct);
@@ -358,7 +416,7 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
         => BlobKeys.OciBlob("sha256", digest["sha256:".Length..]);
 
     private async Task<string> SeedBlobAsync(
-        byte[] bytes, string orgId, string? licenseSpdx = null, IBlobStore? into = null)
+        byte[] bytes, string orgId, string? licenseSpdx = null, IBlobStore? into = null, string origin = "proxy")
     {
         string sha256 = Sha256Hex(bytes);
         string digest = "sha256:" + sha256;
@@ -370,10 +428,10 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
         await conn.ExecuteAsync(
             """
             INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin, license_spdx)
-            VALUES (@digest, @orgId, 'application/octet-stream', @size, @blobKey, 'proxy', @licenseSpdx)
+            VALUES (@digest, @orgId, 'application/octet-stream', @size, @blobKey, @origin, @licenseSpdx)
             ON CONFLICT (digest, org_id) DO NOTHING
             """,
-            new { digest, orgId, size = (long)bytes.Length, blobKey, licenseSpdx });
+            new { digest, orgId, size = (long)bytes.Length, blobKey, origin, licenseSpdx });
 
         return digest;
     }
@@ -400,7 +458,8 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
     }
 
     private OciController BuildController(
-        string orgId, bool presignEnabled, TieredBlobStorage? tiers = null)
+        string orgId, bool presignEnabled, TieredBlobStorage? tiers = null, PresignedReadOptions? options = null,
+        IProxiedContentVisibility? visibility = null)
     {
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
@@ -413,13 +472,14 @@ public sealed class OciBlobPresignRedirectTests : IAsyncLifetime
 
         var blobs = tiers ?? new TieredBlobStorage(_cacheBlobs, _registryBlobs);
         var presign = new BlobPresignService(
-            new PresignedReadOptions
+            options ?? new PresignedReadOptions
             {
                 Enabled = presignEnabled,
                 Ttl = TimeSpan.FromSeconds(PresignedReadOptions.DefaultTtlSeconds),
             },
             _clock,
-            NullLogger<BlobPresignService>.Instance);
+            NullLogger<BlobPresignService>.Instance,
+            visibility);
 
         var svc = new OciControllerServices(
             Tokens: _tokens,

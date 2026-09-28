@@ -100,11 +100,13 @@ public sealed class MfaEnrollmentGuard : IAsyncAuthorizationFilter
 
         // MFA enrollment is an interactive-user session concern — the enforcement point is
         // the login flow that issues a JWT. An opaque API token authenticated by the ApiToken
-        // scheme required an already-MFA-gated session to mint in the first place, so it is
-        // exempt here. Checked as a positive match on the ApiToken scheme (rather than the
-        // absence of a JWT identity) so the exemption can never accidentally swallow a JWT
-        // principal whose identity happens to carry an unexpected AuthenticationType.
-        if (user.Identities.Any(i => i.AuthenticationType == TokenAuthenticationDefaults.Scheme))
+        // scheme, or a system API token authenticated by the SystemToken scheme, required an
+        // already-MFA-gated session to mint in the first place, so both are exempt here.
+        // Checked as a positive match on the token schemes (rather than the absence of a JWT
+        // identity) so the exemption can never accidentally swallow a JWT principal whose
+        // identity happens to carry an unexpected AuthenticationType.
+        if (user.Identities.Any(i => i.AuthenticationType is TokenAuthenticationDefaults.Scheme
+            or SystemTokenDefaults.Scheme))
         {
             return;
         }

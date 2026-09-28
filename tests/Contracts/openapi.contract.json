@@ -2007,7 +2007,87 @@
         }
       }
     },
+    "/api/v1/system/tenants/{slug}/usage": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "slug"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/tenants/{slug}/usage-limits": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "slug"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "patch": {
+          "requiredParams": [
+            "slug"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/tokens": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        },
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/tokens/{id}": {
+      "operations": {
+        "delete": {
+          "requiredParams": [
+            "id"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
     "/api/v1/system/trust-anchors/suspect": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/usage": {
+      "operations": {
+        "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/usage.csv": {
       "operations": {
         "get": {
           "requiredParams": [],

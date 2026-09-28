@@ -94,7 +94,10 @@ public static partial class BlobKeys
     /// files (e.g. <c>{sha256}-primary.xml.gz</c>) are cached forever keyed by their
     /// SHA-256 prefix, which is the content-address. Lives on the Cache tier.
     /// </summary>
-    public static string RpmRepodataProxy(string sha256) => $"proxy/rpm-repodata/{sha256}";
+    public static string RpmRepodataProxy(string sha256) => $"{RpmRepodataProxyPrefix}{sha256}";
+
+    /// <summary>The key prefix every <see cref="RpmRepodataProxy"/> key sits under.</summary>
+    public const string RpmRepodataProxyPrefix = "proxy/rpm-repodata/";
 
     /// <summary>
     /// Content-addressed key for OCI manifests and blobs. The Distribution Spec
@@ -115,7 +118,10 @@ public static partial class BlobKeys
     /// promotion to the content-addressed key; on mismatch, immediately.
     /// </summary>
     public static string OciStaging(string token)
-        => $"oci/_staging/{token}";
+        => $"{OciStagingPrefix}{token}";
+
+    /// <summary>The key prefix every <see cref="OciStaging"/> key sits under.</summary>
+    public const string OciStagingPrefix = "oci/_staging/";
 
     /// <summary>
     /// Org-scoped key for a Go module proxy artifact.
@@ -177,7 +183,46 @@ public static partial class BlobKeys
     /// <c>/docs/{name}-{version}.tar.gz</c>. Kept beside the package key so the two never collide.
     /// </summary>
     public static string HexDocs(string orgId, string name, string version)
-        => $"hex/{orgId}/{name}/{version}.docs.tar.gz";
+        => $"hex/{orgId}/{name}/{version}{HexDocsSuffix}";
+
+    private const string HexDocsSuffix = ".docs.tar.gz";
+
+    /// <summary>
+    /// The top-level key families every builder here produces, one per storage plane. Each
+    /// builder's key starts with exactly one of these, and no prefix is a prefix of another, so a
+    /// key belongs to at most one plane. <c>proxy/</c> covers <see cref="Proxy"/> and
+    /// <see cref="RpmRepodataProxy"/>; <c>hosted/</c> covers <see cref="Hosted"/>,
+    /// <see cref="HostedArtifact"/> and <see cref="ProjectDocument"/>; <c>oci/</c> covers
+    /// <see cref="OciBlob"/> and <see cref="OciStaging"/>; <c>hex/</c> covers <see cref="Hex"/> and
+    /// <see cref="HexDocs"/>.
+    /// </summary>
+    public static IReadOnlyList<string> PlanePrefixes { get; } =
+        ["hosted/", "proxy/", "oci/", "go/", "cargo/", "apk/", "terraform/", "hex/"];
+
+    /// <summary>
+    /// The entry of <see cref="PlanePrefixes"/> that <paramref name="storeKey"/> starts with, or
+    /// <c>null</c> for a key outside every plane.
+    /// </summary>
+    public static string? PlaneOf(string storeKey)
+        => PlanePrefixes.FirstOrDefault(prefix => storeKey.StartsWith(prefix, StringComparison.Ordinal));
+
+    /// <summary>True for a stored NuGet symbol package (<c>.snupkg</c>).</summary>
+    public static bool IsNuGetSymbolPackage(string storeKey)
+        => storeKey.EndsWith(".snupkg", StringComparison.Ordinal);
+
+    /// <summary>
+    /// True for a key family whose objects no metadata row records, by design: the
+    /// <see cref="RpmRepodataProxy"/> repository metadata, the <see cref="HexDocs"/> documentation
+    /// tarballs (the release row carries only a has-docs flag), and the <c>info</c> and
+    /// <c>mod</c> sidecars of a <see cref="Go"/> module (only the <c>zip</c> is recorded).
+    /// </summary>
+    public static bool IsRecordless(string storeKey)
+        => storeKey.StartsWith(RpmRepodataProxyPrefix, StringComparison.Ordinal)
+           || (storeKey.StartsWith("hex/", StringComparison.Ordinal)
+               && storeKey.EndsWith(HexDocsSuffix, StringComparison.Ordinal))
+           || (storeKey.StartsWith("go/", StringComparison.Ordinal)
+               && (storeKey.EndsWith("/info", StringComparison.Ordinal)
+                   || storeKey.EndsWith("/mod", StringComparison.Ordinal)));
 
     /// <summary>
     /// Converts a DB blob key to the actual blob store key.

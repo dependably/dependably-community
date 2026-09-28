@@ -78,7 +78,7 @@ public sealed class PasswordResetRateLimitTests
     private sealed class AuthRateLimitFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly Dictionary<string, string> _settings;
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
         private readonly InMemoryBlobStore _blobStore = new();
 
         public AuthRateLimitFactory(Dictionary<string, string> settings) => _settings = settings;
@@ -96,14 +96,15 @@ public sealed class PasswordResetRateLimitTests
                 ["DEPLOYMENT_MODE"] = "single",
             });
 
+            _db.ConfigureBefore(builder);
+
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blobStore);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blobStore, _blobStore));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
             builder.Services.RemoveAll<IUpstreamUrlValidator>();
             builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
             builder.Services.RemoveAll<SsrfConnectCallback>();
@@ -130,7 +131,7 @@ public sealed class PasswordResetRateLimitTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -142,8 +143,8 @@ public sealed class PasswordResetRateLimitTests
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         public async Task<string> CreateUser(string email, string password)
@@ -151,7 +152,7 @@ public sealed class PasswordResetRateLimitTests
             string passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
             string userId = Guid.NewGuid().ToString("N");
 
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             string orgId = await Dapper.SqlMapper.ExecuteScalarAsync<string>(conn,
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
                 ?? throw new InvalidOperationException("Default org not found.");

@@ -110,6 +110,14 @@ public abstract class ScheduledBackgroundService : BackgroundService
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
     private readonly IDistributedLock _locks;
+    private readonly TaskCompletionSource _startupPass = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// Completes once the startup pass has run — or straight away when the service has none, or
+    /// its schedule disables it. A caller that writes rows a pass rewrites can wait for it rather
+    /// than race the pass the host started on boot.
+    /// </summary>
+    public Task StartupPassCompleted => _startupPass.Task;
 
     /// <summary>
     /// Constructs the base with the DI services it needs directly.
@@ -143,6 +151,18 @@ public abstract class ScheduledBackgroundService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try
+        {
+            await RunScheduleAsync(stoppingToken);
+        }
+        finally
+        {
+            _startupPass.TrySetResult();
+        }
+    }
+
+    private async Task RunScheduleAsync(CancellationToken stoppingToken)
+    {
         CronExpression schedule;
         string scheduleText = _config[CronEnvKey] ?? DefaultCron;
         try
@@ -165,6 +185,8 @@ public abstract class ScheduledBackgroundService : BackgroundService
         {
             await RunTickGuardedAsync(stoppingToken);
         }
+
+        _startupPass.TrySetResult();
 
         while (!stoppingToken.IsCancellationRequested)
         {

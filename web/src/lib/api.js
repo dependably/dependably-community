@@ -722,11 +722,42 @@ export const systemApi = {
   // Storage quota: pass quotaBytes=null to clear (tenant becomes unlimited).
   setTenantStorageQuota: (slug, quotaBytes) =>
     req('PATCH', `/system/tenants/${slug}/storage-quota`, { quotaBytes }),
-  // Lifecycle gate. 'active' serves normally; any other status is a full lockout — protocol
-  // access, downloads, the management API and login all refuse, for every user in the org.
-  // Existing data is preserved, and only an operator can set the status back to 'active'.
+  // Lifecycle gate. 'active' serves normally. 'suspended' is a full lockout — protocol access,
+  // downloads, the management API and login all refuse, for every user in the org. 'read_only'
+  // is narrower — downloads and the management API (tokens, members, login) keep working; only
+  // a protocol-plane write (publish/upload/delete/yank) is refused. Existing data is preserved
+  // for both, and only an operator can set the status back to 'active'.
   setTenantStatus: (slug, status) =>
     req('PATCH', `/system/tenants/${slug}/status`, { status }),
+
+  // Fleet usage report — raw byte counts only (no GB conversion, no dollars, no plans; the SPA
+  // formats bytes for display). Defaults to the current UTC month to date when from/to are
+  // omitted. sort/dir are resolved server-side through a closed column allowlist.
+  /** @param {{ from?: string, to?: string, sort?: string, dir?: string, page?: number, pageSize?: number }} params */
+  getFleetUsage: ({ from, to, sort, dir, page = 1, pageSize = 50 } = {}) => {
+    const q = new URLSearchParams({ page: String(page), pageSize: String(pageSize) })
+    if (from) q.set('from', from)
+    if (to) q.set('to', to)
+    if (sort) q.set('sort', sort)
+    if (dir) q.set('dir', dir)
+    return req('GET', `/system/usage?${q}`)
+  },
+  // Every row the fleet listing would page through, as a CSV download. Same range/sort params.
+  /** @param {{ from?: string, to?: string, sort?: string, dir?: string }} params */
+  exportFleetUsage: (params = {}) => downloadCsv('/system/usage.csv', params, 'usage'),
+
+  // One tenant's usage series — daily (default) or hourly buckets, its latest storage snapshot,
+  // and a current-UTC-month-to-date summary independent of the requested range.
+  /** @param {string} slug
+   *  @param {{ from?: string, to?: string, granularity?: 'day' | 'hour' }} params */
+  getTenantUsage: (slug, { from, to, granularity } = {}) => {
+    const q = new URLSearchParams()
+    if (from) q.set('from', from)
+    if (to) q.set('to', to)
+    if (granularity) q.set('granularity', granularity)
+    const qs = q.toString()
+    return req('GET', `/system/tenants/${encodeURIComponent(slug)}/usage${qs ? '?' + qs : ''}`)
+  },
 
   // Minimal user lookup — control-plane metadata only.
   /** @param {{ email?: string, tenantSlug?: string, limit?: number }} params */
@@ -843,6 +874,14 @@ export const systemApi = {
   resetAdminPassword: (id) =>
     req('POST', `/system/admins/${encodeURIComponent(id)}/password-reset`),
   deleteAdmin: (id) => req('DELETE', `/system/admins/${encodeURIComponent(id)}`),
+
+  // System API tokens (dpsys_…) — scoped to the six tenant-lifecycle actions above; any system
+  // admin can list or revoke any token, minted or not. expiresAt is required by the backend and
+  // capped at 365 days out.
+  listSystemTokens: () => req('GET', '/system/tokens'),
+  createSystemToken: (name, expiresAt, description) =>
+    req('POST', '/system/tokens', { name, expiresAt, description }),
+  deleteSystemToken: (id) => req('DELETE', `/system/tokens/${encodeURIComponent(id)}`),
 
   // System banners — operator-authored banners shown across all tenants.
   listSystemBanners: () => req('GET', '/system/banners'),

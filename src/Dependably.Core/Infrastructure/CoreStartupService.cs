@@ -1,6 +1,7 @@
 using System.Reflection;
 using Dapper;
 using Dependably.Infrastructure.Identity;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Security;
 
 namespace Dependably.Infrastructure;
@@ -68,6 +69,10 @@ public sealed class CoreStartupService : IHostedService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        // xtenant: instance startup — schema apply, the instance lock, first boot, secret
+        // migration and the edge reseeds — acts for the whole instance, before any tenant exists
+        // or is resolved.
+        using var ownerScope = DbScope.CrossTenant("instance startup");
         string version = typeof(CoreStartupService).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? typeof(CoreStartupService).Assembly.GetName().Version?.ToString()
@@ -396,6 +401,21 @@ public sealed class CoreStartupService : IHostedService
         LogHaLocalStorageWarning();
         LogStagingFloorWarning();
         LogLegacySmtpWarning();
+        LogRowLevelSecurityOffWarning();
+    }
+
+    // Multi-tenant Postgres enforces row-level security unless told not to; an explicit off leaves
+    // the application's org_id filter as the only isolation layer, which an operator should see.
+    private void LogRowLevelSecurityOffWarning()
+    {
+        if (RowLevelSecurityOptions.FromConfiguration(_config).DisabledOnMultiTenantPostgres)
+        {
+            _logger.LogWarning(
+                "{Setting}=off on a multi-tenant Postgres deployment: row-level security is not backing the "
+                + "application's tenant filter, so a query that forgets its org_id filter is not caught by the "
+                + "database. Unset it to enforce row-level security.",
+                RowLevelSecurityOptions.ModeKey);
+        }
     }
 
     // The SMTP_* environment variables that once configured invite email delivery. Email

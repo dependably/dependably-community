@@ -78,6 +78,30 @@ public sealed class GlobalTenantStorageResolverTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task GetRegistryAsync_ReadOnly_ReadIntent_Succeeds()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("UPDATE orgs SET status = 'read_only' WHERE id = 't-active'");
+
+        // Default forWrite: false — a read intent is admitted for a read-only org.
+        var store = await _sut.GetRegistryAsync("t-active");
+        Assert.Same(_registry, store);
+    }
+
+    [Fact]
+    public async Task GetRegistryAsync_ReadOnly_WriteIntent_ThrowsReadOnlyWrite()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("UPDATE orgs SET status = 'read_only' WHERE id = 't-active'");
+
+        var ex = await Assert.ThrowsAsync<TenantNotReadyException>(
+            () => _sut.GetRegistryAsync("t-active", forWrite: true));
+        Assert.Equal("t-active", ex.TenantId);
+        Assert.Equal(TenantNotReadyReason.ReadOnlyWrite, ex.Reason);
+        Assert.Contains("read_only", ex.Detail);
+    }
+
+    [Fact]
     public async Task GetRegistryAsync_OrgRowMissing_ThrowsTenantNotReady()
     {
         var ex = await Assert.ThrowsAsync<TenantNotReadyException>(

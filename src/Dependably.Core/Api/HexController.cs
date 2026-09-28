@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Hex;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Protocol.Hex;
 using Dependably.Security;
@@ -35,6 +36,7 @@ public sealed partial class HexController : OrgScopedControllerBase
     // TTL-cached through UpstreamClient.
     [HttpGet("/hex/{**path}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.PerResponse, "hex")]
     public async Task<IActionResult> HandleRepositoryRequest(string? path, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(path) || path.StartsWith("api/", StringComparison.Ordinal) || path == "api")
@@ -111,6 +113,12 @@ public sealed partial class HexController : OrgScopedControllerBase
     private async Task<IActionResult> DispatchAsync(
         ResourceRequest request, string orgId, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
+        // Tarballs and docs archives are artifact bytes; the signed registry resources are the
+        // metadata a client resolves them through.
+        HttpContext.ClassifyEgress(request.Kind is ResourceKind.Tarball or ResourceKind.Docs
+            ? EgressKind.Artifact
+            : EgressKind.Metadata);
+
         // An edge holds no signing key: the five signed resources are its master's bytes, passed
         // through unchanged so a client registered against the master verifies either node.
         return _svc.Edge.IsEdge && request.Kind is not (ResourceKind.Tarball or ResourceKind.Docs)
@@ -420,4 +428,5 @@ public sealed record HexControllerServices(
     TimeProvider Time,
     ILogger<HexController> Logger,
     IEdgeMode Edge,
-    HexMasterKeyResolver MasterKeys);
+    HexMasterKeyResolver MasterKeys,
+    BlobPresignService? Presign = null);

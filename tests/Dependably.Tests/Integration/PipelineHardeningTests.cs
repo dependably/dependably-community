@@ -323,7 +323,7 @@ public sealed class PipelineHardeningTests
     {
         private readonly Dictionary<string, string> _settings;
         private readonly IBlobStore _blobStore;
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         public PipelineFactory(Dictionary<string, string> settings, IBlobStore? blobStore = null)
         {
@@ -338,14 +338,14 @@ public sealed class PipelineHardeningTests
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton(_blobStore);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blobStore, _blobStore));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
             builder.Services.AddSingleton<IStartupFilter, HeaderRemoteIpFilter>();
 
             builder.WebHost.UseTestServer();
@@ -364,7 +364,7 @@ public sealed class PipelineHardeningTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -376,8 +376,8 @@ public sealed class PipelineHardeningTests
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
     }
 

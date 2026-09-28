@@ -8,7 +8,8 @@ public static class BlobStoreFactory
     /// <c>S3_BUCKET</c>, etc.) and returns one store. Equivalent to <c>CreateForTier(...)</c>
     /// with no tier override.
     /// </summary>
-    public static IBlobStore Create(IConfiguration config) => CreateForTier(config, tier: null);
+    public static IBlobStore Create(IConfiguration config, ILoggerFactory? loggerFactory = null)
+        => CreateForTier(config, tier: null, loggerFactory);
 
     /// <summary>
     /// Two-tier factory. When <paramref name="tier"/> is non-null, every
@@ -18,7 +19,7 @@ public static class BlobStoreFactory
     /// <c>STORAGE_BACKEND=local STORAGE_BACKEND_REGISTRY=s3</c> route the cache to disk
     /// and the registry to S3 without operators having to learn a brand-new env-var schema.
     /// </summary>
-    public static IBlobStore CreateForTier(IConfiguration config, string? tier)
+    public static IBlobStore CreateForTier(IConfiguration config, string? tier, ILoggerFactory? loggerFactory = null)
     {
         string backend = TieredValue(config, "STORAGE_BACKEND", tier)?.ToLowerInvariant() ?? "local";
 
@@ -36,7 +37,8 @@ public static class BlobStoreFactory
                 // service (R2, MinIO, B2, Wasabi). S3_FORCE_PATH_STYLE=true is required by
                 // R2 and MinIO. Both honour the same tiered fallback as the other S3_* vars.
                 TieredValue(config, "S3_ENDPOINT", tier),
-                bool.TryParse(TieredValue(config, "S3_FORCE_PATH_STYLE", tier), out bool fps) && fps),
+                bool.TryParse(TieredValue(config, "S3_FORCE_PATH_STYLE", tier), out bool fps) && fps,
+                loggerFactory?.CreateLogger<S3BlobStore>()),
 
             "azure" => new AzureBlobStore(
                 TieredValue(config, "AZURE_CONNECTION_STRING", tier)

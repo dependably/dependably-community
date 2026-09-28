@@ -119,6 +119,7 @@ public sealed class OciUploadService
     public async Task<OciUploadSession> StartUploadAsync(string orgId, string repository, CancellationToken ct)
     {
         EnsureStagingDiskFloor();
+        await EnsureNotReadOnlyAsync(orgId, ct);
 
         int cap = await _orgs.GetMaxConcurrentOciUploadsPerTenantAsync(ct);
 
@@ -206,6 +207,23 @@ public sealed class OciUploadService
             "UPDATE oci_uploads SET received_bytes = @total WHERE upload_id = @uploadId AND org_id = @orgId",
             new { total, uploadId = session.UploadId, orgId });
         return total;
+    }
+
+    /// <summary>
+    /// Defence-in-depth re-check of <c>orgs.status</c> at this service's own write entry point,
+    /// same posture as <see cref="GlobalTenantStorageResolver.GetRegistryAsync"/>'s
+    /// <c>forWrite</c> gate. <see cref="TenantStatusEnforcementMiddleware"/> already refuses the
+    /// POST that reaches here for a read-only org's blob-upload-session start (a protocol-plane
+    /// write), so this only matters if that upstream gate is ever bypassed or this service is
+    /// invoked from a path that doesn't cross it.
+    /// </summary>
+    private async Task EnsureNotReadOnlyAsync(string orgId, CancellationToken ct)
+    {
+        var org = await _orgs.GetByIdAsync(orgId, ct);
+        if (org?.Status == "read_only")
+        {
+            throw new TenantNotReadyException(orgId, TenantNotReadyReason.ReadOnlyWrite, "status='read_only'");
+        }
     }
 
     /// <summary>

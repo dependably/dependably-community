@@ -96,6 +96,8 @@ public static class AuditActions
         "system_admin.password_changed",
         "system_admin.password_reset",
         "system_admin.admin_password_reset",
+        "system_admin.token_created",
+        "system_admin.token_revoked",
 
         // Privilege and membership.
         "member_role_changed",
@@ -176,6 +178,7 @@ public static class AuditActions
 
         // Tenant configuration.
         "tenant.quota_changed",
+        "tenant.usage_limits_changed",
         "tenant.setting.change",
         "org_settings_updated",
         "proxy_settings_updated",

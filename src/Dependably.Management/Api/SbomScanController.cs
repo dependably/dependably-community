@@ -114,15 +114,15 @@ public sealed class SbomScanController : ControllerBase
         // assumed: a 'user' discriminator over a token id names an actor the users join cannot
         // find, and the row then reads as anonymous. The label is populated for a service actor
         // only — a user's is an email, which the scrub sweeps do not cover in this column.
-        (string? actorKind, string? actorLabel) = actorId is null
-            ? (null, null)
+        var actor = actorId is null
+            ? null
             : await _ingest.ResolveActorAsync(orgId, actorId, ct);
 
         bool queued = _worker.TryEnqueue(orgId, resolvedVersionId);
 
         await _audit.LogActivityAsync(
             orgId, ecosystem: "system", purl: null, eventType: "sbom_rescan_requested",
-            actorId: actorId, actorKind: actorKind,
+            actorId: actorId, actorKind: actor?.Kind,
             // The nightly pass is only a partial safety net for a dropped rescan, so this says so
             // rather than promising full cover: its scanning half re-scans the components of any
             // version, but its re-evaluation half is bounded to is_latest versions, so a superseded
@@ -130,7 +130,7 @@ public sealed class SbomScanController : ControllerBase
             detail: queued
                 ? "queued"
                 : "queue full; the nightly SBOM pass rescans the components, and restamps the verdict only for the project's latest version",
-            sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actorLabel, ct: ct);
+            sourceIp: HttpContext.GetNormalizedRemoteIp(), actorLabel: actor?.Label, ct: ct);
 
         return Accepted(new { queued });
     }

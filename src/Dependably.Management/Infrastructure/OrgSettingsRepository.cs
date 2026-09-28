@@ -77,8 +77,8 @@ public sealed class OrgSettingsRepository
                 COALESCE(@policy, 'block'), COALESCE(@airGapped, 0), COALESCE(@requireMfa, 0),
                 COALESCE(@rpmUpstreamMode, 'passthrough'))
             ON CONFLICT(org_id) DO UPDATE SET
-                anonymous_pull      = COALESCE(@anonPull, anonymous_pull),
-                allowlist_mode      = COALESCE(@allowlist, allowlist_mode),
+                anonymous_pull      = COALESCE(@anonPull, org_settings.anonymous_pull),
+                allowlist_mode      = COALESCE(@allowlist, org_settings.allowlist_mode),
                 max_upload_bytes    = @maxBytes,
                 max_upload_bytes_pypi  = @maxBytesPyPi,
                 max_upload_bytes_npm   = @maxBytesNpm,
@@ -88,14 +88,14 @@ public sealed class OrgSettingsRepository
                 max_upload_bytes_oci   = @maxBytesOci,
                 max_upload_bytes_cargo = @maxBytesCargo,
                 max_upload_bytes_hex   = @maxBytesHex,
-                default_language    = COALESCE(@lang, default_language),
-                default_timezone    = COALESCE(@timezone, default_timezone),
-                version_overwrite_policy = COALESCE(@policy, version_overwrite_policy),
-                allow_version_overwrite  = CASE WHEN @legacyOverwrite IS NULL THEN allow_version_overwrite
+                default_language    = COALESCE(@lang, org_settings.default_language),
+                default_timezone    = COALESCE(@timezone, org_settings.default_timezone),
+                version_overwrite_policy = COALESCE(@policy, org_settings.version_overwrite_policy),
+                allow_version_overwrite  = CASE WHEN @legacyOverwrite IS NULL THEN org_settings.allow_version_overwrite
                                                 ELSE @legacyOverwrite END,
-                air_gapped          = COALESCE(@airGapped, air_gapped),
-                require_mfa         = COALESCE(@requireMfa, require_mfa),
-                rpm_upstream_mode   = COALESCE(@rpmUpstreamMode, rpm_upstream_mode)
+                air_gapped          = COALESCE(@airGapped, org_settings.air_gapped),
+                require_mfa         = COALESCE(@requireMfa, org_settings.require_mfa),
+                rpm_upstream_mode   = COALESCE(@rpmUpstreamMode, org_settings.rpm_upstream_mode)
             """,
             new
             {
@@ -154,11 +154,11 @@ public sealed class OrgSettingsRepository
             VALUES (@orgId, @keepVersions, @keepDays, @activityDays, @purgeUnlistedAfterDays,
                     @keepProjectVersions)
             ON CONFLICT(org_id) DO UPDATE SET
-                keep_versions             = CASE WHEN @keepVersionsSet = 1 THEN @keepVersions ELSE keep_versions END,
-                keep_days                 = CASE WHEN @keepDaysSet = 1 THEN @keepDays ELSE keep_days END,
-                activity_retention_days   = CASE WHEN @activityDaysSet = 1 THEN @activityDays ELSE activity_retention_days END,
-                purge_unlisted_after_days = CASE WHEN @purgeUnlistedAfterDaysSet = 1 THEN @purgeUnlistedAfterDays ELSE purge_unlisted_after_days END,
-                keep_project_versions     = CASE WHEN @keepProjectVersionsSet = 1 THEN @keepProjectVersions ELSE keep_project_versions END
+                keep_versions             = CASE WHEN @keepVersionsSet = 1 THEN @keepVersions ELSE org_settings.keep_versions END,
+                keep_days                 = CASE WHEN @keepDaysSet = 1 THEN @keepDays ELSE org_settings.keep_days END,
+                activity_retention_days   = CASE WHEN @activityDaysSet = 1 THEN @activityDays ELSE org_settings.activity_retention_days END,
+                purge_unlisted_after_days = CASE WHEN @purgeUnlistedAfterDaysSet = 1 THEN @purgeUnlistedAfterDays ELSE org_settings.purge_unlisted_after_days END,
+                keep_project_versions     = CASE WHEN @keepProjectVersionsSet = 1 THEN @keepProjectVersions ELSE org_settings.keep_project_versions END
             """,
             new
             {
@@ -211,27 +211,27 @@ public sealed class OrgSettingsRepository
                 COALESCE(@blockRevoked, 'warn'), COALESCE(@blockSsvcExploitation, 'off'),
                 COALESCE(@verifySbomSignatures, 'off'))
             ON CONFLICT(org_id) DO UPDATE SET
-                proxy_passthrough_enabled = COALESCE(@proxyEnabled, proxy_passthrough_enabled),
-                max_osv_score_tolerance   = COALESCE(@maxScore, max_osv_score_tolerance),
-                min_release_age_hours     = CASE WHEN @minAgeHoursSet = 1 THEN @minAgeHours ELSE min_release_age_hours END,
-                block_deprecated          = COALESCE(@blockDeprecated, block_deprecated),
-                block_revoked             = COALESCE(@blockRevoked, block_revoked),
-                block_malicious           = COALESCE(@blockMalicious, block_malicious),
-                block_malicious_live      = COALESCE(@blockMaliciousLive, block_malicious_live),
-                block_kev                 = COALESCE(@blockKev, block_kev),
-                max_epss_tolerance        = CASE WHEN @maxEpssSet = 1 THEN @maxEpss ELSE max_epss_tolerance END,
-                block_kev_ransomware      = COALESCE(@blockKevRansomware, block_kev_ransomware),
-                block_ssvc_exploitation   = COALESCE(@blockSsvcExploitation, block_ssvc_exploitation),
+                proxy_passthrough_enabled = COALESCE(@proxyEnabled, org_settings.proxy_passthrough_enabled),
+                max_osv_score_tolerance   = COALESCE(@maxScore, org_settings.max_osv_score_tolerance),
+                min_release_age_hours     = CASE WHEN @minAgeHoursSet = 1 THEN @minAgeHours ELSE org_settings.min_release_age_hours END,
+                block_deprecated          = COALESCE(@blockDeprecated, org_settings.block_deprecated),
+                block_revoked             = COALESCE(@blockRevoked, org_settings.block_revoked),
+                block_malicious           = COALESCE(@blockMalicious, org_settings.block_malicious),
+                block_malicious_live      = COALESCE(@blockMaliciousLive, org_settings.block_malicious_live),
+                block_kev                 = COALESCE(@blockKev, org_settings.block_kev),
+                max_epss_tolerance        = CASE WHEN @maxEpssSet = 1 THEN @maxEpss ELSE org_settings.max_epss_tolerance END,
+                block_kev_ransomware      = COALESCE(@blockKevRansomware, org_settings.block_kev_ransomware),
+                block_ssvc_exploitation   = COALESCE(@blockSsvcExploitation, org_settings.block_ssvc_exploitation),
                 max_epss_percentile_tolerance = CASE WHEN @maxEpssPercentileSet = 1
-                                                THEN @maxEpssPercentile ELSE max_epss_percentile_tolerance END,
-                block_install_scripts     = COALESCE(@blockInstallScripts, block_install_scripts),
-                verify_npm_signatures     = COALESCE(@verifyNpmSignatures, verify_npm_signatures),
-                verify_nuget_signatures   = COALESCE(@verifyNuGetSignatures, verify_nuget_signatures),
-                verify_pypi_attestations  = COALESCE(@verifyPyPiAttestations, verify_pypi_attestations),
-                verify_rpm_signatures     = COALESCE(@verifyRpmSignatures, verify_rpm_signatures),
-                verify_maven_signatures   = COALESCE(@verifyMavenSignatures, verify_maven_signatures),
-                verify_terraform_signatures = COALESCE(@verifyTerraformSignatures, verify_terraform_signatures),
-                verify_sbom_signatures    = COALESCE(@verifySbomSignatures, verify_sbom_signatures)
+                                                THEN @maxEpssPercentile ELSE org_settings.max_epss_percentile_tolerance END,
+                block_install_scripts     = COALESCE(@blockInstallScripts, org_settings.block_install_scripts),
+                verify_npm_signatures     = COALESCE(@verifyNpmSignatures, org_settings.verify_npm_signatures),
+                verify_nuget_signatures   = COALESCE(@verifyNuGetSignatures, org_settings.verify_nuget_signatures),
+                verify_pypi_attestations  = COALESCE(@verifyPyPiAttestations, org_settings.verify_pypi_attestations),
+                verify_rpm_signatures     = COALESCE(@verifyRpmSignatures, org_settings.verify_rpm_signatures),
+                verify_maven_signatures   = COALESCE(@verifyMavenSignatures, org_settings.verify_maven_signatures),
+                verify_terraform_signatures = COALESCE(@verifyTerraformSignatures, org_settings.verify_terraform_signatures),
+                verify_sbom_signatures    = COALESCE(@verifySbomSignatures, org_settings.verify_sbom_signatures)
             """,
             new
             {

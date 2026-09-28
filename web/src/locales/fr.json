@@ -814,6 +814,34 @@
       "expiresAt": "Expire le (optionnel)"
     }
   },
+  "systemTokens": {
+    "title": "Jetons API",
+    "newToken": "Nouveau jeton",
+    "tokenCreated": "Jeton créé — copiez-le maintenant, il ne sera plus affiché.",
+    "reach": "Authentifie uniquement la création, la liste, la suppression, la restauration et les changements de statut ou de quota des locataires.",
+    "columns": {
+      "name": "Nom",
+      "owner": "Propriétaire",
+      "description": "Description",
+      "created": "Créé le",
+      "expires": "Expire le",
+      "lastUsed": "Dernière utilisation"
+    },
+    "expired": "expiré",
+    "never": "jamais",
+    "empty": "Aucun jeton API",
+    "revokeConfirm": "Révoquer ce jeton API?",
+    "modal": {
+      "title": "Nouveau jeton API",
+      "name": "Nom",
+      "namePlaceholder": "p. ex. : approvisionnement Terraform",
+      "nameRequired": "Le nom est obligatoire.",
+      "description": "Description (optionnel)",
+      "descriptionPlaceholder": "p. ex. : pipeline CI qui approvisionne des locataires",
+      "expiresAt": "Expire le",
+      "expiresAtRequired": "Une date d'expiration est requise."
+    }
+  },
   "settings": {
     "title": "Paramètres",
     "tabs": {
@@ -2267,7 +2295,9 @@
     "badge": "système",
     "nav": {
       "tenants": "Locataires",
+      "usage": "Utilisation",
       "admins": "Administrateurs",
+      "tokens": "Jetons",
       "users": "Utilisateurs",
       "audit": "Audit",
       "observability": "Observabilité",
@@ -2284,6 +2314,7 @@
         "title": "Locataires",
         "active": "Actifs",
         "suspended": "Suspendus",
+        "readOnly": "Lecture seule",
         "softDeleted": "Suppr. douce",
         "total": "{count} au total"
       },
@@ -2299,6 +2330,11 @@
         "cache": "Cache",
         "registry": "Registre",
         "total": "{total} au total"
+      },
+      "usage": {
+        "title": "Utilisation (mois en cours)",
+        "monthToDate": "Mois UTC en cours à ce jour",
+        "unavailable": "Chiffres d'utilisation indisponibles."
       },
       "enrichmentCoverage": {
         "title": "Couverture d'enrichissement",
@@ -2435,6 +2471,7 @@
         "critical": "Critique",
         "reasons": {
           "suspended": "Locataire suspendu",
+          "read_only": "Locataire en lecture seule",
           "storage_quota_exceeded": "Quota de stockage dépassé",
           "storage_quota_near": "Quota de stockage presque atteint",
           "stats_stale": "Instantané de statistiques obsolète",
@@ -2446,12 +2483,15 @@
       "status": {
         "active": "Actif",
         "suspended": "Suspendu",
+        "readOnly": "Lecture seule",
         "softDeleted": "Suppression douce"
       },
       "actionsMenu": {
         "open": "Ouvrir le menu d'actions",
+        "viewUsage": "Voir l'utilisation",
         "editQuota": "Modifier le quota",
         "disable": "Désactiver",
+        "setReadOnly": "Passer en lecture seule",
         "enable": "Activer",
         "delete": "Supprimer",
         "restore": "Restaurer"
@@ -2463,6 +2503,8 @@
       "deleteConfirm": "Supprimer (suppression douce) le locataire {slug}? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).",
       "disableModalTitle": "Désactiver le locataire",
       "disableConfirm": "Désactiver {slug}? Le locataire sera entièrement verrouillé — accès aux protocoles, téléchargements, API de gestion et connexion — jusqu'à la réactivation. Les données existantes sont préservées.",
+      "readOnlyModalTitle": "Passer le locataire en lecture seule",
+      "readOnlyConfirm": "Passer {slug} en lecture seule? Les téléchargements continuent de fonctionner; les téléversements et les publications sont refusés. L'API de gestion et la connexion restent accessibles. Les données existantes sont préservées.",
       "enableModalTitle": "Réactiver le locataire",
       "enableConfirm": "Réactiver {slug}? L'accès aux protocoles, les téléchargements, l'API de gestion et la connexion reprendront immédiatement.",
       "statusUpdating": "Mise à jour…",
@@ -2515,6 +2557,7 @@
         "healthOk": "Aucun problème détecté.",
         "reasonDetail": {
           "suspended": "Locataire suspendu — tout accès est refusé (protocole, API de gestion et connexion).",
+          "read_only": "Locataire en lecture seule — les téléchargements continuent de fonctionner; les téléversements et les publications sont refusés.",
           "storage_quota_exceeded": "Quota de stockage dépassé.",
           "storage_quota_near": "Stockage proche de la limite du quota.",
           "stats_stale": "Instantané de statistiques obsolète.",
@@ -2522,6 +2565,90 @@
           "stats_frozen_non_active": "L'instantané de statistiques est figé parce que le locataire n'est pas actif. Il reprendra une fois le locataire réactivé.",
           "quarantine_pending": "{count} paquets en attente de révision de quarantaine."
         }
+      }
+    },
+    "usage": {
+      "title": "Utilisation",
+      "subtitle": "Volumes bruts en octets par locataire sur une plage de dates — aucune conversion d'unité, aucun tarif, aucun forfait.",
+      "from": "Du",
+      "to": "Au",
+      "effectiveRange": "Affichage {from} – {to}",
+      "downloadCsv": "Télécharger le CSV",
+      "exporting": "Exportation…",
+      "empty": "Aucune utilisation enregistrée pour cette plage.",
+      "orphanedOrg": "(organisation supprimée)",
+      "orphanedOrgTitle": "Cet identifiant d'organisation n'a plus de ligne locataire : {orgId}",
+      "columns": {
+        "tenant": "Locataire",
+        "egress": "Sortie d'artefacts",
+        "metadata": "Sortie de métadonnées",
+        "storage": "Stockage facturable (moy.)",
+        "snapshot": "Dernier instantané",
+        "requests": "Requêtes mesurées",
+        "metadataRequests": "Requêtes de métadonnées",
+        "artifacts": "Artefacts",
+        "dbRows": "Lignes de base de données"
+      },
+      "totals": {
+        "egress": "Sortie d'artefacts",
+        "redirect": "Livré par redirection",
+        "metadata": "Sortie de métadonnées",
+        "storage": "Stockage facturable (moy.)",
+        "requests": "Requêtes mesurées",
+        "metadataRequests": "Requêtes de métadonnées"
+      },
+      "ecosystems": {
+        "title": "Par écosystème",
+        "ecosystem": "Écosystème",
+        "meter": "Compteur",
+        "bytes": "Octets",
+        "redirectBytes": "Livré par redirection"
+      },
+      "meter": {
+        "egress_bytes": "Sortie d'artefacts",
+        "egress_metadata_bytes": "Sortie de métadonnées"
+      },
+      "signalsTitle": "Signaux d'exploitation, non facturés",
+      "signalsNote": "Les requêtes mesurées, le nombre d'artefacts et les lignes de base de données sont des signaux de capacité et d'abus destinés aux opérateurs. Ils ne sont jamais facturés. Les réponses HEAD, 304 et d'erreur ne sont pas mesurées, elles ne sont donc pas comptées. Les artefacts et les lignes de base de données proviennent du dernier instantané de stockage quotidien."
+    },
+    "tenantUsage": {
+      "back": "← Retour à Utilisation",
+      "title": "Utilisation — {slug}",
+      "granularity": "Granularité",
+      "day": "Jour",
+      "hour": "Heure",
+      "monthToDate": {
+        "title": "Mois en cours à ce jour"
+      },
+      "snapshot": {
+        "title": "Dernier instantané de stockage",
+        "billable": "Facturable",
+        "hosted": "Hébergé",
+        "oci": "OCI téléversé",
+        "cache": "Attribué au cache",
+        "capturedAt": "Capturé le {date}",
+        "none": "Aucun instantané de stockage capturé pour l'instant."
+      },
+      "series": {
+        "title": "Utilisation dans le temps",
+        "bucket": "Intervalle",
+        "redirect": "Livré par redirection",
+        "empty": "Aucune utilisation enregistrée pour cette plage.",
+        "requests": "Requêtes mesurées",
+        "metadataRequests": "Requêtes de métadonnées"
+      },
+      "signals": {
+        "title": "Signaux d'exploitation, non facturés",
+        "note": "Signaux de capacité et d'abus. Ils ne sont jamais facturés.",
+        "requests": "Requêtes mesurées (mois en cours)",
+        "metadataRequests": "Requêtes de métadonnées (mois en cours)",
+        "artifacts": "Artefacts",
+        "hostedVersions": "Versions hébergées",
+        "ociManifests": "Manifests OCI",
+        "ociBlobs": "Blobs OCI",
+        "cacheEntries": "Entrées du cache proxy",
+        "dbRows": "Lignes de base de données",
+        "noSnapshot": "Les comptes apparaissent après le premier instantané de stockage quotidien."
       }
     },
     "admins": {
@@ -2626,6 +2753,7 @@
         "detail": "Détail"
       },
       "apexTenant": "admin",
+      "tokenActor": "Jeton : {name}",
       "empty": "Aucun événement système.",
       "pageInfo": "Page {page} · {total} au total",
       "prev": "← Précédent",

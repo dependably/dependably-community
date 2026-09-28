@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Protocol.Provenance;
 using Dependably.Security;
@@ -163,6 +164,7 @@ public sealed class TerraformController : OrgScopedControllerBase
     // same index does not multiply through to the upstream.
     [HttpGet("/terraform/{**path}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.PerResponse, "terraform")]
     public async Task<IActionResult> HandleMirrorRequest(string? path, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -200,6 +202,10 @@ public sealed class TerraformController : OrgScopedControllerBase
         // fall back to and every document for a reserved address is a 404.
         bool reserved = await _svc.Reserved.IsReservedAsync(
             orgId, Ecosystem, ProviderName(request.Provider), ct);
+
+        HttpContext.ClassifyEgress(request.Kind is DocumentKind.VersionIndex or DocumentKind.VersionDocument
+            ? EgressKind.Metadata
+            : EgressKind.Artifact);
 
         return reserved ? NotFound() : request.Kind switch
         {
@@ -942,8 +948,17 @@ public sealed class TerraformController : OrgScopedControllerBase
         TerraformArchiveCoordinate coordinate, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
         var (orgId, providerName, version, _, filename, blobKey) = coordinate;
-        var cached = await _svc.Blobs.GetAsync(blobKey, ct);
-        if (cached is null)
+
+        // A provider archive is immutable (the registry's shasum pins it), so a hit may redirect.
+        // A redirect candidate probes for the blob rather than opening it, so a hit answered by a
+        // redirect does not open (and then discard) a stream from the object store; the probe is
+        // the only existence check the redirect makes. Terraform is proxy-only, so the archive is
+        // proxied bytes.
+        var probe = _svc.Presign is { } presign
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, Ecosystem, ct)
+            : null;
+        var cached = probe is null ? await _svc.Blobs.GetAsync(blobKey, ct) : null;
+        if (cached is null && probe is not { Exists: true })
         {
             return null;
         }
@@ -956,8 +971,24 @@ public sealed class TerraformController : OrgScopedControllerBase
         // per request until the pool is drained.
         if (await IsArchiveBlockedAsync(orgId, facts, settings, token, ct))
         {
-            await cached.DisposeAsync();
+            if (cached is not null)
+            {
+                await cached.DisposeAsync();
+            }
             return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        // The size is the coordinate row's, and with no row the archive streams.
+        var redirect = probe is not null && facts is not null
+            ? await _svc.Presign!.TryRedirectAsync(HttpContext, probe, facts.SizeBytes, ct)
+            : null;
+        if (redirect is null)
+        {
+            cached ??= await _svc.Blobs.GetAsync(blobKey, ct);
+            if (cached is null)
+            {
+                return null;
+            }
         }
 
         // Record the access on the hit too. Download counts, last_accessed_at (which drives LRU
@@ -966,7 +997,7 @@ public sealed class TerraformController : OrgScopedControllerBase
         await RecordCacheHitAsync(orgId, providerName, version, filename, blobKey, facts, ct);
 
         Response.Headers["X-Cache"] = "HIT";
-        return File(cached, "application/zip");
+        return redirect ?? File(cached!, "application/zip");
     }
 
     /// <summary>
@@ -1713,4 +1744,5 @@ public sealed record TerraformControllerServices(
     ProxyFetchService ProxyFetch,
     TimeProvider Time,
     ILogger<TerraformController> Logger,
-    TerraformProvenanceVerifier TerraformProvenance);
+    TerraformProvenanceVerifier TerraformProvenance,
+    BlobPresignService? Presign = null);

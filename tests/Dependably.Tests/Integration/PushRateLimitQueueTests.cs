@@ -125,7 +125,7 @@ public sealed class PushRateLimitQueueTests
     private sealed class PushRateLimitFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly Dictionary<string, string> _settings;
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
         private readonly InMemoryBlobStore _blobStore = new();
 
         public PushRateLimitFactory(Dictionary<string, string> settings) => _settings = settings;
@@ -137,14 +137,14 @@ public sealed class PushRateLimitQueueTests
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blobStore);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blobStore, _blobStore));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.Services.AddSingleton<IStartupFilter, LoopbackStartupFilter>();
 
@@ -177,7 +177,7 @@ public sealed class PushRateLimitQueueTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -189,8 +189,8 @@ public sealed class PushRateLimitQueueTests
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         /// <summary>

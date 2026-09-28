@@ -814,6 +814,34 @@
       "expiresAt": "Expires at (optional)"
     }
   },
+  "systemTokens": {
+    "title": "API Tokens",
+    "newToken": "New token",
+    "tokenCreated": "Token created — copy it now, it will not be shown again.",
+    "reach": "Authenticates only tenant create, list, delete, restore, and status/quota changes.",
+    "columns": {
+      "name": "Name",
+      "owner": "Owner",
+      "description": "Description",
+      "created": "Created",
+      "expires": "Expires",
+      "lastUsed": "Last used"
+    },
+    "expired": "expired",
+    "never": "never",
+    "empty": "No API tokens",
+    "revokeConfirm": "Revoke this API token?",
+    "modal": {
+      "title": "New API Token",
+      "name": "Name",
+      "namePlaceholder": "e.g. Terraform provisioning",
+      "nameRequired": "Name is required.",
+      "description": "Description (optional)",
+      "descriptionPlaceholder": "e.g. CI pipeline that provisions tenants",
+      "expiresAt": "Expires at",
+      "expiresAtRequired": "An expiry date is required."
+    }
+  },
   "settings": {
     "title": "Settings",
     "tabs": {
@@ -2267,7 +2295,9 @@
     "badge": "system",
     "nav": {
       "tenants": "Tenants",
+      "usage": "Usage",
       "admins": "Admins",
+      "tokens": "Tokens",
       "users": "Users",
       "audit": "Audit",
       "observability": "Observability",
@@ -2284,6 +2314,7 @@
         "title": "Tenants",
         "active": "Active",
         "suspended": "Suspended",
+        "readOnly": "Read-only",
         "softDeleted": "Soft-deleted",
         "total": "{count} total"
       },
@@ -2299,6 +2330,11 @@
         "cache": "Cache",
         "registry": "Registry",
         "total": "{total} total"
+      },
+      "usage": {
+        "title": "Usage (month to date)",
+        "monthToDate": "Current UTC month to date",
+        "unavailable": "Usage figures unavailable."
       },
       "enrichmentCoverage": {
         "title": "Enrichment coverage",
@@ -2435,6 +2471,7 @@
         "critical": "Critical",
         "reasons": {
           "suspended": "Tenant suspended",
+          "read_only": "Tenant read-only",
           "storage_quota_exceeded": "Storage quota exceeded",
           "storage_quota_near": "Storage quota near limit",
           "stats_stale": "Stats snapshot stale",
@@ -2446,12 +2483,15 @@
       "status": {
         "active": "Active",
         "suspended": "Suspended",
+        "readOnly": "Read-only",
         "softDeleted": "Soft-deleted"
       },
       "actionsMenu": {
         "open": "Open actions menu",
+        "viewUsage": "View usage",
         "editQuota": "Edit quota",
         "disable": "Disable",
+        "setReadOnly": "Set read-only",
         "enable": "Enable",
         "delete": "Delete",
         "restore": "Restore"
@@ -2463,6 +2503,8 @@
       "deleteConfirm": "Soft-delete tenant {slug}? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days).",
       "disableModalTitle": "Disable tenant",
       "disableConfirm": "Disable {slug}? The tenant will be fully locked out — protocol access, downloads, the management API, and login — until re-enabled. Existing data is preserved.",
+      "readOnlyModalTitle": "Set tenant read-only",
+      "readOnlyConfirm": "Set {slug} to read-only? Downloads keep working; uploads and publishes are refused. The management API and login stay reachable. Existing data is preserved.",
       "enableModalTitle": "Re-enable tenant",
       "enableConfirm": "Re-enable {slug}? Protocol access, downloads, the management API, and login will resume immediately.",
       "statusUpdating": "Updating…",
@@ -2515,6 +2557,7 @@
         "healthOk": "No issues detected.",
         "reasonDetail": {
           "suspended": "Tenant is suspended — all access is refused (protocol, management API, and login).",
+          "read_only": "Tenant is read-only — downloads keep working; uploads and publishes are refused.",
           "storage_quota_exceeded": "Storage quota exceeded.",
           "storage_quota_near": "Storage near quota limit.",
           "stats_stale": "Statistics snapshot is stale.",
@@ -2522,6 +2565,90 @@
           "stats_frozen_non_active": "Statistics snapshot is frozen because the tenant is not active — it resumes once the tenant is reinstated.",
           "quarantine_pending": "{count} packages pending quarantine review."
         }
+      }
+    },
+    "usage": {
+      "title": "Usage",
+      "subtitle": "Raw byte counts per tenant over a date range — no unit conversion, no rate, no plan.",
+      "from": "From",
+      "to": "To",
+      "effectiveRange": "Showing {from} – {to}",
+      "downloadCsv": "Download CSV",
+      "exporting": "Exporting…",
+      "empty": "No usage recorded for this range.",
+      "orphanedOrg": "(deleted org)",
+      "orphanedOrgTitle": "This org id no longer has a tenant row: {orgId}",
+      "columns": {
+        "tenant": "Tenant",
+        "egress": "Artefact egress",
+        "metadata": "Metadata egress",
+        "storage": "Billable storage (avg)",
+        "snapshot": "Latest snapshot",
+        "requests": "Metered requests",
+        "metadataRequests": "Metadata requests",
+        "artifacts": "Artefacts",
+        "dbRows": "Database rows"
+      },
+      "totals": {
+        "egress": "Artefact egress",
+        "redirect": "Redirect-delivered",
+        "metadata": "Metadata egress",
+        "storage": "Billable storage (avg)",
+        "requests": "Metered requests",
+        "metadataRequests": "Metadata requests"
+      },
+      "ecosystems": {
+        "title": "By ecosystem",
+        "ecosystem": "Ecosystem",
+        "meter": "Meter",
+        "bytes": "Bytes",
+        "redirectBytes": "Redirect-delivered"
+      },
+      "meter": {
+        "egress_bytes": "Artefact egress",
+        "egress_metadata_bytes": "Metadata egress"
+      },
+      "signalsTitle": "Operator signals, not billed",
+      "signalsNote": "Metered requests, artefact counts and database rows are capacity and abuse signals for operators. They are never billed. HEAD, 304 and error responses are not metered, so they are not counted. Artefacts and database rows come from the latest daily storage snapshot."
+    },
+    "tenantUsage": {
+      "back": "← Back to Usage",
+      "title": "Usage — {slug}",
+      "granularity": "Granularity",
+      "day": "Day",
+      "hour": "Hour",
+      "monthToDate": {
+        "title": "Month to date"
+      },
+      "snapshot": {
+        "title": "Latest storage snapshot",
+        "billable": "Billable",
+        "hosted": "Hosted",
+        "oci": "OCI uploaded",
+        "cache": "Cache-attributed",
+        "capturedAt": "Captured {date}",
+        "none": "No storage snapshot captured yet."
+      },
+      "series": {
+        "title": "Usage over time",
+        "bucket": "Bucket",
+        "redirect": "Redirect-delivered",
+        "empty": "No usage recorded for this range.",
+        "requests": "Metered requests",
+        "metadataRequests": "Metadata requests"
+      },
+      "signals": {
+        "title": "Operator signals, not billed",
+        "note": "Capacity and abuse signals. They are never billed.",
+        "requests": "Metered requests (month to date)",
+        "metadataRequests": "Metadata requests (month to date)",
+        "artifacts": "Artefacts",
+        "hostedVersions": "Hosted versions",
+        "ociManifests": "OCI manifests",
+        "ociBlobs": "OCI blobs",
+        "cacheEntries": "Proxy-cache entries",
+        "dbRows": "Database rows",
+        "noSnapshot": "Counts appear after the first daily storage snapshot."
       }
     },
     "admins": {
@@ -2626,6 +2753,7 @@
         "detail": "Detail"
       },
       "apexTenant": "admin",
+      "tokenActor": "Token: {name}",
       "empty": "No system events yet.",
       "pageInfo": "Page {page} · {total} total",
       "prev": "← Prev",

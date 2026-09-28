@@ -20,6 +20,11 @@
   let healthLoading = true
   let healthError = ''
 
+  // Fleet-wide month-to-date usage tile — same query the Usage page's date picker defaults to,
+  // loaded independently so a slow/failed usage query never blocks the rest of the dashboard.
+  let usageTotals = null
+  let usageLoading = true
+
   async function load() {
     loading = true
     error = ''
@@ -27,6 +32,21 @@
       data = await systemApi.getDashboard()
     } catch (e) { error = e.message }
     finally { loading = false }
+  }
+
+  async function loadUsage() {
+    usageLoading = true
+    try {
+      // pageSize=1: the tile only reads the fleet totals object, not the per-tenant rows.
+      const resp = await systemApi.getFleetUsage({ pageSize: 1 })
+      usageTotals = resp.totals
+    } catch {
+      // A failed usage fetch must not block the rest of the dashboard — the tile simply stays
+      // unrendered, the same posture Risk.svelte's enrichment strip takes on its own fetch.
+      usageTotals = null
+    } finally {
+      usageLoading = false
+    }
   }
 
   async function loadHealth() {
@@ -56,7 +76,7 @@
     } catch (e) { suspectAnchorsError = e.message }
   }
 
-  onMount(() => { load(); loadHealth() })
+  onMount(() => { load(); loadHealth(); loadUsage() })
 
   function fmtDuration(ms) {
     if (ms === null || ms === undefined) return '—'
@@ -268,6 +288,7 @@
         <div class="stat-grid">
           <div class="stat"><div class="stat-value">{data.tenants.active}</div><div class="stat-label">{$t('system.dashboard.tenants.active')}</div></div>
           <div class="stat"><div class="stat-value warn">{data.tenants.suspended}</div><div class="stat-label">{$t('system.dashboard.tenants.suspended')}</div></div>
+          <div class="stat"><div class="stat-value warn">{data.tenants.readOnly}</div><div class="stat-label">{$t('system.dashboard.tenants.readOnly')}</div></div>
           <div class="stat"><div class="stat-value muted">{data.tenants.softDeleted}</div><div class="stat-label">{$t('system.dashboard.tenants.softDeleted')}</div></div>
         </div>
         <div class="stat-foot">{$t('system.dashboard.tenants.total', { values: { count: data.tenants.total } })}</div>
@@ -292,6 +313,23 @@
           <div class="stat"><div class="stat-value">{$formatBytes(data.storage?.byTier?.registry ?? 0)}</div><div class="stat-label">{$t('system.dashboard.storage.registry')}</div></div>
         </div>
         <div class="stat-foot">{$t('system.dashboard.storage.total', { values: { total: $formatBytes(data.storage?.totalBytes ?? 0) } })}</div>
+      </section>
+
+      <section class="card clickable" on:click={() => navigate('system-usage')}
+               role="link" tabindex="0"
+               on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate('system-usage') }}>
+        <h2>{$t('system.dashboard.usage.title')}</h2>
+        {#if usageLoading}
+          <span class="spinner"></span>
+        {:else if usageTotals}
+          <div class="stat-grid">
+            <div class="stat"><div class="stat-value">{$formatBytes(usageTotals.egressBytes)}</div><div class="stat-label">{$t('system.usage.totals.egress')}</div></div>
+            <div class="stat"><div class="stat-value">{$formatBytes(usageTotals.billableStorageBytes)}</div><div class="stat-label">{$t('system.usage.totals.storage')}</div></div>
+          </div>
+          <div class="stat-foot">{$t('system.dashboard.usage.monthToDate')}</div>
+        {:else}
+          <p class="muted">{$t('system.dashboard.usage.unavailable')}</p>
+        {/if}
       </section>
 
       <section class="card">

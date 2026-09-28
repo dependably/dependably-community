@@ -269,29 +269,25 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         {
             orgId = (await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+            string now = TimeProvider.System.GetUtcNow().ToUtcIso();
             await conn.ExecuteAsync("""
                 INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy, created_at)
-                VALUES ('p-target', @orgId, 'npm', 'acme-purge-target', 'acme-purge-target', 1,
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+                VALUES ('p-target', @orgId, 'npm', 'acme-purge-target', 'acme-purge-target', 1, @now);
                 INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy, created_at)
-                VALUES ('p-bystander', @orgId, 'npm', 'acme-purge-bystander', 'acme-purge-bystander', 0,
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'));
-                """, new { orgId });
+                VALUES ('p-bystander', @orgId, 'npm', 'acme-purge-bystander', 'acme-purge-bystander', 0, @now);
+                """, new { orgId, now });
 
             await conn.ExecuteAsync("""
                 INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, first_fetch, origin)
                 VALUES ('v-proxy-1', 'p-target', '1.0.0', 'pkg:npm/acme-purge-target@1.0.0',
-                        'proxy/sha256/aaa', 100, 'aaa',
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'proxy');
+                        'proxy/sha256/aaa', 100, 'aaa', 1, 'proxy');
                 INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, first_fetch, origin)
                 VALUES ('v-proxy-2', 'p-target', '2.0.0', 'pkg:npm/acme-purge-target@2.0.0',
-                        'proxy/sha256/bbb', 100, 'bbb',
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'proxy');
+                        'proxy/sha256/bbb', 100, 'bbb', 1, 'proxy');
                 INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, first_fetch, origin)
                 VALUES ('v-private', 'p-bystander', '1.0.0', 'pkg:npm/acme-purge-bystander@1.0.0',
-                        'hosted/private/ccc', 100, 'ccc',
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'uploaded');
-                """);
+                        'hosted/private/ccc', 100, 'ccc', 0, 'uploaded');
+                """, new { now });
         }
 
         await _factory.BlobStore.PutAsync("proxy/sha256/aaa", new MemoryStream([1, 2, 3]));
@@ -573,15 +569,14 @@ public sealed class ClaimsControllerTests : IClassFixture<DependablyFactory>, IA
         {
             orgId = (await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
+            string now = TimeProvider.System.GetUtcNow().ToUtcIso();
             await conn.ExecuteAsync("""
                 INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy, created_at)
-                VALUES ('p-mixed', @orgId, 'npm', 'acme-mixed-transition', 'acme-mixed-transition', 1,
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+                VALUES ('p-mixed', @orgId, 'npm', 'acme-mixed-transition', 'acme-mixed-transition', 1, @now);
                 INSERT INTO package_versions (id, package_id, version, purl, blob_key, size_bytes, checksum_sha256, first_fetch, origin)
                 VALUES ('v-mixed', 'p-mixed', '1.0.0', 'pkg:npm/acme-mixed-transition@1.0.0',
-                        'proxy/sha256/ddd', 100, 'ddd',
-                        strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'proxy');
-                """, new { orgId });
+                        'proxy/sha256/ddd', 100, 'ddd', 1, 'proxy');
+                """, new { orgId, now });
         }
         await _factory.BlobStore.PutAsync("proxy/sha256/ddd", new MemoryStream([1, 2, 3]));
 

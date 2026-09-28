@@ -1,4 +1,5 @@
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -91,6 +92,10 @@ public sealed class OrphanBlobReconcilerService : ScheduledBackgroundService
     /// </summary>
     public async Task<ReconcileSummary> RunOnceAsync(CancellationToken ct = default)
     {
+        // xtenant: a blob is orphaned only when no tenant references it, so the reference scan
+        // spans every tenant.
+        using var ownerScope = DbScope.CrossTenant("orphan blob reconciler");
+
         if (_airGap.IsJobDisabled("orphan-reconciler"))
         {
             _logger.LogInformation(

@@ -55,7 +55,10 @@ public sealed class OciBlobReclaimer
     public async Task<bool> IsOrgClosureCompleteAsync(string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        var (mediaTypesClause, parameters) = DapperInClause.Expand("mediaType", OciManifestParser.AcceptedMediaTypes.ToList());
+        parameters.AddDynamicParams(new { orgId });
         // xtenant: org_id filter scopes the completeness check to the caller's tenant.
+        // rawsql: mediaTypesClause is a parameterized IN (@mediaType0, …) list built in C# by DapperInClause.
         bool anyUnknown = await conn.ExecuteScalarAsync<bool>(
             """
             SELECT EXISTS(
@@ -65,8 +68,8 @@ public sealed class OciBlobReclaimer
                   AND NOT EXISTS (
                       SELECT 1 FROM oci_manifest_blobs g
                       WHERE g.org_id = b.org_id AND g.manifest_digest = b.digest))
-            """,
-            new { orgId, mediaTypes = OciManifestParser.AcceptedMediaTypes.ToArray() });
+            """.Replace("@mediaTypes", mediaTypesClause, StringComparison.Ordinal),
+            parameters);
 
         return !anyUnknown;
     }

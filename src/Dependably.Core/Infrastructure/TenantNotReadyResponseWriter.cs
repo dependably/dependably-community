@@ -5,8 +5,8 @@ using Dependably.Storage;
 namespace Dependably.Infrastructure;
 
 /// <summary>
-/// Writes the structured HTTP response for a tenant that is not ready for a request — 404 / 423 /
-/// 503 RFC 7807 problem+json, or the OCI Distribution Spec error envelope on <c>/v2/</c> routes.
+/// Writes the structured HTTP response for a tenant that is not ready for a request — 402 / 404 /
+/// 423 / 503 RFC 7807 problem+json, or the OCI Distribution Spec error envelope on <c>/v2/</c> routes.
 ///
 /// <para>
 /// Shared by two callers with different control-flow shapes. <see cref="TenantNotReadyExceptionMiddleware"/>
@@ -32,8 +32,18 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public static class TenantNotReadyResponseWriter
 {
-    public static async Task WriteAsync(HttpContext context, TenantNotReadyReason reason)
+    /// <summary>
+    /// Writes the refusal for <paramref name="reason"/>. <paramref name="usageCapInfoUrl"/> is read
+    /// only for <see cref="TenantNotReadyReason.UsageCapReached"/>: when set it becomes the problem
+    /// <c>type</c> and a <c>Link: &lt;…&gt;; rel="help"</c> header, and the OCI error's
+    /// <c>detail</c>, so a client can follow it to where the operator explains the cap. Callers pass
+    /// only an absolute http(s) URL (<see cref="ParseUsageCapInfoUrl"/>).
+    /// </summary>
+    public static async Task WriteAsync(
+        HttpContext context, TenantNotReadyReason reason, string? usageCapInfoUrl = null)
     {
+        string? infoUrl = reason == TenantNotReadyReason.UsageCapReached ? usageCapInfoUrl : null;
+
         if (context.Response.HasStarted)
         {
             // Nothing safe to do: status/headers can no longer change. Leave the response as the
@@ -43,7 +53,7 @@ public static class TenantNotReadyResponseWriter
 
         if (context.Request.Path.StartsWithSegments("/v2", StringComparison.OrdinalIgnoreCase))
         {
-            await WriteOciErrorAsync(context, reason);
+            await WriteOciErrorAsync(context, reason, infoUrl);
             return;
         }
 
@@ -57,6 +67,11 @@ public static class TenantNotReadyResponseWriter
             context.Response.Headers.RetryAfter = retryAfter;
         }
 
+        if (infoUrl is not null)
+        {
+            context.Response.Headers.Link = $"<{infoUrl}>; rel=\"help\"";
+        }
+
         // Response.Clear() drops the request-derived headers SecurityHeadersMiddleware set on the
         // way in — CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy, HSTS, Cache-Control
         // on registry paths — restored from the snapshot taken above (see
@@ -68,17 +83,34 @@ public static class TenantNotReadyResponseWriter
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.ContentType = "application/problem+json";
 
-        string payload = JsonSerializer.Serialize(new
+        // "detail" is omitted entirely for every other reason (never emitted as a null-valued
+        // key) — the reason-only discipline the class doc comment describes. ReadOnlyWrite and
+        // UsageCapReached are the exceptions: each already carries no more information than "this
+        // write is refused because of the org's posture", so spelling that out is not a new
+        // disclosure. Neither names which meter reached its cap.
+        var body = new Dictionary<string, object?>
         {
-            type = "about:blank",
-            title,
-            status,
-            reason = reason.ToString(),
-        });
+            ["type"] = infoUrl ?? "about:blank",
+            ["title"] = title,
+            ["status"] = status,
+            ["reason"] = reason.ToString(),
+        };
+        if (reason == TenantNotReadyReason.ReadOnlyWrite)
+        {
+            body["detail"] =
+                "The organization is read-only. Downloads keep working; uploads and publishes are refused.";
+        }
+        else if (reason == TenantNotReadyReason.UsageCapReached)
+        {
+            body["detail"] =
+                "The organization has reached a usage cap. Downloads keep working; uploads and publishes are refused.";
+        }
+
+        string payload = JsonSerializer.Serialize(body);
         await context.Response.WriteAsync(payload);
     }
 
-    private static async Task WriteOciErrorAsync(HttpContext context, TenantNotReadyReason reason)
+    private static async Task WriteOciErrorAsync(HttpContext context, TenantNotReadyReason reason, string? infoUrl)
     {
         // Fixed, generic messages only — never the raw orgs.status value or provisioning state.
         // "not available" covers suspended/archived/deleting alike rather than naming "suspended"
@@ -87,6 +119,10 @@ public static class TenantNotReadyResponseWriter
         {
             TenantNotReadyReason.StatusInactive =>
                 (StatusCodes.Status403Forbidden, OciErrorCode.DENIED, "Organization is not available."),
+            TenantNotReadyReason.ReadOnlyWrite =>
+                (StatusCodes.Status403Forbidden, OciErrorCode.DENIED, "Organization is read-only; uploads are refused."),
+            TenantNotReadyReason.UsageCapReached =>
+                (StatusCodes.Status403Forbidden, OciErrorCode.DENIED, "Organization has reached a usage cap; uploads are refused."),
             TenantNotReadyReason.NotFound =>
                 (StatusCodes.Status404NotFound, OciErrorCode.NAME_UNKNOWN, "Tenant not found."),
             TenantNotReadyReason.ProvisioningPending or TenantNotReadyReason.ProvisioningFailed =>
@@ -105,9 +141,27 @@ public static class TenantNotReadyResponseWriter
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.ContentType = "application/json";
 
-        var body = new OciErrorResponse([new OciError(code, message)]);
+        if (infoUrl is not null)
+        {
+            context.Response.Headers.Link = $"<{infoUrl}>; rel=\"help\"";
+        }
+
+        var body = new OciErrorResponse([new OciError(
+            code, message, infoUrl is null ? null : new Dictionary<string, string> { ["infoUrl"] = infoUrl })]);
         await context.Response.WriteAsync(JsonSerializer.Serialize(body));
     }
+
+    /// <summary>
+    /// <paramref name="configured"/> (<c>USAGE_CAP_INFO_URL</c>) as an absolute http(s) URL, or
+    /// null when it is unset or anything else. A relative or non-web value is dropped rather than
+    /// echoed into a response header.
+    /// </summary>
+    public static string? ParseUsageCapInfoUrl(string? configured) =>
+        !string.IsNullOrWhiteSpace(configured)
+        && Uri.TryCreate(configured.Trim(), UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp)
+            ? uri.AbsoluteUri
+            : null;
 
     private static (int status, string title, string? retryAfter) Map(TenantNotReadyReason reason) =>
         reason switch
@@ -116,6 +170,10 @@ public static class TenantNotReadyResponseWriter
                 (StatusCodes.Status404NotFound, "Tenant not found", null),
             TenantNotReadyReason.StatusInactive =>
                 (StatusCodes.Status423Locked, "Tenant is not active", null),
+            TenantNotReadyReason.ReadOnlyWrite =>
+                (StatusCodes.Status423Locked, "Organization is read-only", null),
+            TenantNotReadyReason.UsageCapReached =>
+                (StatusCodes.Status402PaymentRequired, "Usage cap reached", null),
             TenantNotReadyReason.ProvisioningPending =>
                 (StatusCodes.Status503ServiceUnavailable, "Tenant registry is still being provisioned", "30"),
             TenantNotReadyReason.ProvisioningFailed =>

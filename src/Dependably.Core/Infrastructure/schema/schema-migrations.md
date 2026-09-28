@@ -93,8 +93,9 @@ answered the question that matters, because a database whose rewrite silently no
 corrupt — it reports `ok`. `SchemaIntegrityTests` still runs `integrity_check`, which is the right
 place for it: a fresh, empty database where it is cheap.
 
-Precedents: `expand_role_check_with_auditor` (adds `'auditor'` to `users.role` / `invites.role`) and
-`expand_block_deprecated_check` (widens `org_settings.block_deprecated` to `'block_new'`/`'block_all'`).
+Precedents: `expand_role_check_with_auditor` (adds `'auditor'` to `users.role` / `invites.role`),
+`expand_block_deprecated_check` (widens `org_settings.block_deprecated` to `'block_new'`/`'block_all'`),
+and `expand_org_status_check_with_read_only` (adds `'read_only'` to `orgs.status`).
 When the new value also supersedes an old one, follow the CHECK widen with a normal transactional data
 migration to rewrite legacy rows — e.g. `migrate_block_deprecated_to_block_all` rewrites the retired
 `'block'` value to `'block_all'`, ordered *after* the CHECK widen so the new value is permitted.

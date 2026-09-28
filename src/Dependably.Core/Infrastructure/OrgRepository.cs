@@ -222,30 +222,32 @@ public sealed class OrgRepository
     /// Bucketed counts of orgs for the sysadmin dashboard. One round-trip; soft-deleted overrides
     /// status (a row with deleted_at NOT NULL counts as soft-deleted regardless of its status).
     /// 'archived' and 'deleting' are enterprise-only states and intentionally not surfaced —
-    /// community queries collapse them into the active/suspended/soft-deleted view.
+    /// community queries collapse them into the active/suspended/read-only/soft-deleted view.
     /// </summary>
     // xtenant: dashboard rollup spans every tenant by design.
-    public async Task<(int Active, int Suspended, int SoftDeleted)> CountByStatusAsync(CancellationToken ct = default)
+    public async Task<(int Active, int Suspended, int ReadOnly, int SoftDeleted)> CountByStatusAsync(CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        return await conn.QuerySingleAsync<(int Active, int Suspended, int SoftDeleted)>(
+        return await conn.QuerySingleAsync<(int Active, int Suspended, int ReadOnly, int SoftDeleted)>(
             """
             SELECT
                 COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'active'    THEN 1 ELSE 0 END), 0) AS Active,
                 COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'suspended' THEN 1 ELSE 0 END), 0) AS Suspended,
+                COALESCE(SUM(CASE WHEN deleted_at IS NULL AND status = 'read_only' THEN 1 ELSE 0 END), 0) AS ReadOnly,
                 COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL                       THEN 1 ELSE 0 END), 0) AS SoftDeleted
             FROM orgs
             """);
     }
 
     /// <summary>
-    /// Toggle the tenant lifecycle gate between <c>'active'</c> and <c>'suspended'</c>. Other states
-    /// (<c>'archived'</c>, <c>'deleting'</c>) are enterprise-only and rejected. Soft-deleted tenants
-    /// are not updated — use restore first. Returns true when a row was changed.
+    /// Toggle the tenant lifecycle gate between <c>'active'</c>, <c>'suspended'</c>, and
+    /// <c>'read_only'</c>. Other states (<c>'archived'</c>, <c>'deleting'</c>) are enterprise-only
+    /// and rejected. Soft-deleted tenants are not updated — use restore first. Returns true when a
+    /// row was changed.
     /// </summary>
     public async Task<bool> UpdateOrgStatusAsync(string orgId, string status, CancellationToken ct = default)
     {
-        if (status is not ("active" or "suspended"))
+        if (status is not ("active" or "suspended" or "read_only"))
         {
             return false;
         }
@@ -326,7 +328,7 @@ public sealed class OrgRepository
             VALUES (@orgId, @mode, COALESCE(@publishMode, 'off'))
             ON CONFLICT(org_id) DO UPDATE SET
                 license_enforcement_mode = @mode,
-                license_publish_enforcement_mode = COALESCE(@publishMode, license_publish_enforcement_mode)
+                license_publish_enforcement_mode = COALESCE(@publishMode, org_settings.license_publish_enforcement_mode)
             """,
             new { orgId, mode, publishMode });
         InvalidateSettingsCache(orgId);

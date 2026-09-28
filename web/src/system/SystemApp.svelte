@@ -16,7 +16,10 @@
   import SystemSettings from './SystemSettings.svelte'
   import SystemProfile from './SystemProfile.svelte'
   import SystemAdmins from './SystemAdmins.svelte'
+  import SystemTokens from './SystemTokens.svelte'
   import SystemBanners from './SystemBanners.svelte'
+  import SystemUsage from './SystemUsage.svelte'
+  import SystemTenantUsage from './SystemTenantUsage.svelte'
 
   useRouter('system')
 
@@ -118,7 +121,9 @@
            held navigation still lights its link the instant it is clicked. -->
       <div class="nav-links">
         <button class="nav-link" class:active={$activeRoute.page === 'system-tenants'} on:click={() => navigate('system-tenants')}>{$t('system.nav.tenants')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-usage' || $activeRoute.page === 'system-tenant-usage'} on:click={() => navigate('system-usage')}>{$t('system.nav.usage')}</button>
         <button class="nav-link" class:active={$activeRoute.page === 'system-admins'} on:click={() => navigate('system-admins')}>{$t('system.nav.admins')}</button>
+        <button class="nav-link" class:active={$activeRoute.page === 'system-tokens'} on:click={() => navigate('system-tokens')}>{$t('system.nav.tokens')}</button>
         <button class="nav-link" class:active={$activeRoute.page === 'system-users'} on:click={() => navigate('system-users')}>{$t('system.nav.users')}</button>
         <button class="nav-link" class:active={$activeRoute.page === 'system-audit'} on:click={() => navigate('system-audit')}>{$t('system.nav.audit')}</button>
         <button class="nav-link" class:active={$activeRoute.page === 'system-banners'} on:click={() => navigate('system-banners')}>{$t('system.nav.banners')}</button>
@@ -136,13 +141,19 @@
       <!-- `pageToken` goes to the pages that fetch on arrival: it is how they hold the transition
            open until their data lands. Pages without an initial fetch take none and are committed
            on the auto-commit frame. -->
-      <RouteView let:page let:token>
+      <RouteView let:page let:params let:token>
         {#if page === 'system-dashboard'}
           <SystemDashboard pageToken={token} />
         {:else if page === 'system-tenants'}
           <SystemTenants pageToken={token} />
+        {:else if page === 'system-usage'}
+          <SystemUsage pageToken={token} />
+        {:else if page === 'system-tenant-usage'}
+          <SystemTenantUsage {params} pageToken={token} />
         {:else if page === 'system-admins'}
           <SystemAdmins pageToken={token} />
+        {:else if page === 'system-tokens'}
+          <SystemTokens pageToken={token} />
         {:else if page === 'system-users'}
           <SystemUserLookup />
         {:else if page === 'system-audit'}

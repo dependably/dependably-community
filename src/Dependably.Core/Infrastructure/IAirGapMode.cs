@@ -51,6 +51,10 @@ internal static class BackgroundJobs
             "stats-refresh",
             "saml-cert-expiry",
             "license-backfill",
+            "usage-rollup-hourly",
+            "usage-rollup-daily",
+            "usage-storage-snapshot",
+            "usage-reconcile-weekly",
         };
 
     /// <summary>

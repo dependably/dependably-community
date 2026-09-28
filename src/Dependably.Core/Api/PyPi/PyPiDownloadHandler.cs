@@ -27,7 +27,8 @@ public sealed class PyPiDownloadHandler(
     ReservedNamespaceService reserved,
     UpstreamRegistryResolver registries,
     PyPiProxyFetcher proxyFetcher,
-    TimeProvider time)
+    TimeProvider time,
+    BlobPresignService? presign = null)
 {
     /// <summary>
     /// HEAD /packages/{file} — returns headers (size, checksum, content-type) without opening
@@ -482,23 +483,33 @@ public sealed class PyPiDownloadHandler(
             }
         }
 
-        var blob = await blobs.GetAsync(BlobKeys.StoreKey(hit.File.BlobKey), ct);
-        if (blob is null)
+        string storeKey = BlobKeys.StoreKey(hit.File.BlobKey);
+        var redirect = presign is null
+            ? null
+            : await presign.TryRedirectAsync(
+                httpContext, blobs, storeKey, hit.File.SizeBytes, BlobOrigins.FromColumn(hit.Version.Origin), "pypi", ct);
+        Stream? blob = null;
+        if (redirect is null)
         {
-            return null;
+            blob = await blobs.GetAsync(storeKey, ct);
+            if (blob is null)
+            {
+                return null;
+            }
+
+            httpContext.Response.Headers["X-Cache"] = "HIT";
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(hit.Version.Purl);
+            if (hit.File.ChecksumSha256 is not null)
+            {
+                httpContext.Response.Headers.ETag = $"\"sha256:{hit.File.ChecksumSha256}\"";
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
-        httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(hit.Version.Purl);
-        if (hit.File.ChecksumSha256 is not null)
-        {
-            httpContext.Response.Headers.ETag = $"\"sha256:{hit.File.ChecksumSha256}\"";
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
         await audit.LogActivityAsync(orgId, "pypi", hit.Version.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(hit.Version.Id, ct);
-        return new FileStreamResult(blob, "application/octet-stream") { FileDownloadName = file };
+        return redirect ?? new FileStreamResult(blob!, "application/octet-stream") { FileDownloadName = file };
     }
 
     private async Task<IActionResult?> TryServeProxyCachedBlobAsync(
@@ -519,22 +530,31 @@ public sealed class PyPiDownloadHandler(
         }
 
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
-        var blob = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
-        if (blob is null)
+        string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
+        var redirect = presign is null
+            ? null
+            : await presign.TryRedirectAsync(httpContext, blobs, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "pypi", ct);
+        Stream? blob = null;
+        if (redirect is null)
         {
-            return null;
+            blob = await blobs.GetAsync(storeKey, ct);
+            if (blob is null)
+            {
+                return null;
+            }
+
+            httpContext.Response.Headers["X-Cache"] = "HIT";
+            if (caFacts.Purl is not null)
+            {
+                httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
+            }
+            if (!string.IsNullOrEmpty(caFacts.ContentHash))
+            {
+                httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
-        httpContext.Response.Headers["X-Cache"] = "HIT";
-        if (caFacts.Purl is not null)
-        {
-            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
-        }
-        if (!string.IsNullOrEmpty(caFacts.ContentHash))
-        {
-            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
         if (caFacts.Purl is not null)
         {
             await audit.LogActivityAsync(orgId, "pypi", caFacts.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
@@ -543,6 +563,6 @@ public sealed class PyPiDownloadHandler(
         // Increment per-tenant download count on the global plane. Enqueued off the request
         // path — the row already exists (seeded durably at first-fetch).
         await tenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
-        return new FileStreamResult(blob, "application/octet-stream") { FileDownloadName = file };
+        return redirect ?? new FileStreamResult(blob!, "application/octet-stream") { FileDownloadName = file };
     }
 }

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit.Events;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Security;
 
@@ -155,7 +156,13 @@ public sealed class AuthDenialAuditFlushService : BackgroundService
         {
             foreach (var tally in window.Entries)
             {
-                await WriteAsync(tally, ct);
+                // A tally with a tenant writes under that tenant; an org-less one is written
+                // instance-scoped, which AuditRepository opens as the owner.
+                using (tally.Key.OrgId is { Length: > 0 } orgId ? DbScope.ForOrg(orgId) : null)
+                {
+                    await WriteAsync(tally, ct);
+                }
+
                 written++;
             }
         }

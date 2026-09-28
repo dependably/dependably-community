@@ -108,7 +108,7 @@ public sealed class KestrelConnectionCeilingTests
     private sealed class CeilingFactory : WebApplicationFactory<Program>
     {
         private readonly Dictionary<string, string> _settings;
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         public CeilingFactory(Dictionary<string, string> settings)
         {
@@ -130,14 +130,14 @@ public sealed class KestrelConnectionCeilingTests
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(new InMemoryBlobStore());
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(new InMemoryBlobStore(), new InMemoryBlobStore()));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.WebHost.UseTestServer();
             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
@@ -154,17 +154,17 @@ public sealed class KestrelConnectionCeilingTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
         protected override void Dispose(bool disposing)
         {
+            base.Dispose(disposing);
             if (disposing)
             {
-                _metadataStore.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                _db.DisposeAsync().AsTask().GetAwaiter().GetResult();
             }
-            base.Dispose(disposing);
         }
     }
 }

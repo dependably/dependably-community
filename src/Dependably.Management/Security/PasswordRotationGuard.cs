@@ -64,6 +64,16 @@ public sealed class PasswordRotationGuard : IAsyncAuthorizationFilter
             return;
         }
 
+        // A system API token's `sub` names the token itself, not a system_admins row — password
+        // rotation is a first-factor login concern, and minting the token already required an
+        // interactive session in good standing. Without this, the fallback below would read the
+        // token id against system_admins, find no row, and silently pass — this makes that
+        // pass-through deliberate and reviewable instead of accidental.
+        if (user.Identities.Any(i => i.AuthenticationType == SystemTokenDefaults.Scheme))
+        {
+            return;
+        }
+
         string? sub = user.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
             ?? user.FindFirst("sub")?.Value;
         if (sub is null)

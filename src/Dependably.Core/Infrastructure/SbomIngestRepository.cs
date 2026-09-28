@@ -1064,7 +1064,7 @@ public sealed class SbomIngestRepository
     /// CI token does, and labelling a user's upload as a service actor writes an actor id the
     /// service-token join can never resolve.
     /// </summary>
-    public async Task<(string Kind, string? Label)> ResolveActorAsync(
+    public async Task<ResolvedActor> ResolveActorAsync(
         string orgId, string actorId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -1074,13 +1074,23 @@ public sealed class SbomIngestRepository
             cancellationToken: ct));
         if (userId is not null)
         {
-            return (ActorKinds.User, null);
+            return new ResolvedActor(ActorKinds.User, Label: null);
         }
 
         string? tokenName = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
             "SELECT name FROM service_tokens WHERE id = @actorId AND org_id = @orgId",
             new { actorId, orgId },
             cancellationToken: ct));
-        return tokenName is not null ? (ActorKinds.Service, tokenName) : (ActorKinds.User, null);
+        return tokenName is not null
+            ? new ResolvedActor(ActorKinds.Service, tokenName)
+            : new ResolvedActor(ActorKinds.User, Label: null);
     }
 }
+
+/// <summary>
+/// The actor kind and audit label <see cref="SbomIngestRepository.ResolveActorAsync"/> resolves
+/// for an audit write. <see cref="Label"/> is the service token's name for a service actor and
+/// NULL for anything else, so a caller passes <c>actorLabel: actor.Label</c> rather than a
+/// value of its own.
+/// </summary>
+public sealed record ResolvedActor(string Kind, string? Label);

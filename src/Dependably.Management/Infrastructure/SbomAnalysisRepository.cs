@@ -446,13 +446,16 @@ public sealed class SbomAnalysisRepository
         }
 
         await using var conn = await _db.OpenAsync(ct);
+        var (actorIds, actorIdsParams) = DapperInClause.Expand("userIds", userIds.ToList());
+        actorIdsParams.AddDynamicParams(new { orgId });
+        // rawsql: actorIds is a parameterized IN (@userIds0, …) list built in C# by DapperInClause.
         var rows = await conn.QueryAsync<(string Id, string Email)>(new CommandDefinition(
             """
             SELECT id AS Id, email AS Email
             FROM users
             WHERE tenant_id = @orgId AND id IN @userIds
-            """,
-            new { orgId, userIds }, cancellationToken: ct));
+            """.Replace("@userIds", actorIds, StringComparison.Ordinal),
+            actorIdsParams, cancellationToken: ct));
 
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (id, email) in rows)

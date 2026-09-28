@@ -777,8 +777,8 @@ public sealed class ProjectsController : OrgScopedControllerBase
             return new AuditActor(null, null, null);
         }
 
-        (string kind, string? label) = await _ingest.ResolveActorAsync(orgId, actorId, ct);
-        return new AuditActor(actorId, kind, label);
+        var resolved = await _ingest.ResolveActorAsync(orgId, actorId, ct);
+        return new AuditActor(actorId, resolved.Kind, resolved.Label);
     }
 
     private static object VersionPayload(ProjectVersionSummary v) => new
@@ -816,7 +816,11 @@ public sealed class ProjectsController : OrgScopedControllerBase
 
         try
         {
-            var registry = await _storage.GetRegistryAsync(orgId, ct);
+            // forWrite: false — this cleanup follows a project row that is already deleted
+            // (management-plane action, admitted for a read-only org); a blob a read-only org
+            // can't reclaim here is left for OrphanBlobReconcilerService, same as any other
+            // cleanup failure this catch already tolerates.
+            var registry = await _storage.GetRegistryAsync(orgId, forWrite: false, ct);
             foreach (string key in blobKeys)
             {
                 await registry.DeleteAsync(BlobKeys.StoreKey(key), ct);

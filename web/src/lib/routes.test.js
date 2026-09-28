@@ -157,6 +157,10 @@ describe('routes — tenant table', () => {
     expect(searchFor('project-detail', { id: 'proj-1' })).toBe('')
     expect(searchFor('project-version', { id: 'proj-1', versionId: 'latest' })).toBe('')
   })
+
+  it('the system per-tenant usage path does not resolve in tenant mode', () => {
+    expect(routeFor('/tenants/acme/usage')).toBeNull()
+  })
 })
 
 describe('routes — system table', () => {
@@ -186,6 +190,30 @@ describe('routes — system table', () => {
     expect(routeFor('/project/proj-1')).toBeNull()
     expect(routeFor('/project/proj-1/version/ver-1')).toBeNull()
     expect(pathFor('project-detail', { id: 'proj-1' })).toBe('/')
+  })
+
+  it('pathFor and routeFor round-trip the fleet usage page', () => {
+    expect(pathFor('system-usage')).toBe('/usage')
+    expect(routeFor('/usage')).toEqual({ page: 'system-usage', params: {} })
+  })
+
+  it('pathFor builds the per-tenant usage path with a URL-encoded slug', () => {
+    expect(pathFor('system-tenant-usage', { slug: 'acme co' })).toBe('/tenants/acme%20co/usage')
+  })
+
+  it('routeFor parses the per-tenant usage path and decodes the slug', () => {
+    expect(routeFor('/tenants/acme-co/usage')).toEqual({
+      page: 'system-tenant-usage',
+      params: { slug: 'acme-co' },
+    })
+    expect(routeFor('/tenants/acme%20co/usage')).toEqual({
+      page: 'system-tenant-usage',
+      params: { slug: 'acme co' },
+    })
+  })
+
+  it('searchFor returns "" for system-tenant-usage — its slug lives in the path and its own range/granularity state is URL-synced independently', () => {
+    expect(searchFor('system-tenant-usage', { slug: 'acme', from: '2026-09-01' })).toBe('')
   })
 })
 

@@ -53,6 +53,12 @@ internal static class TenantHealthProjection
             status = Promote(status, "warn");
         }
 
+        if (org.Status == "read_only")
+        {
+            reasons.Add("read_only");
+            status = Promote(status, "warn");
+        }
+
         string? quotaReason = QuotaReason(org);
         if (quotaReason is not null)
         {

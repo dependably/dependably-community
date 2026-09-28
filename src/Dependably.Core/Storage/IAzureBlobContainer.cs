@@ -33,8 +33,8 @@ public interface IAzureBlobContainer
 
     /// <summary>
     /// Mints a read-only service SAS URL for <paramref name="key"/> expiring at
-    /// <paramref name="expiresAt"/>. Returns <c>null</c> when the blob does not exist or when no
-    /// signing credential is available.
+    /// <paramref name="expiresAt"/>. Returns <c>null</c> when no signing credential is available.
+    /// It makes no existence check; the presign seam has already made one.
     /// </summary>
     Task<Uri?> TryGenerateReadSasUriAsync(string key, DateTimeOffset expiresAt, CancellationToken ct);
 

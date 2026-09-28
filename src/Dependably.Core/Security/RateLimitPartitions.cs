@@ -120,7 +120,9 @@ public static class RateLimitPartitions
     /// series per distinct caller — an attacker varying source IPs against a rate-limited
     /// route would grow the TSDB working set without bound. The identity of a throttled
     /// caller belongs on the audit record and the log line, where high cardinality is cheap;
-    /// the metric answers "which class of partition is being throttled, how often".
+    /// the metric answers "which class of partition is being throttled, how often". A rejection by
+    /// the tenant dimension (<see cref="GetTenantPartitionKey"/>) is labelled <c>tenant</c> by the
+    /// rejection callback instead, whichever of the two tenant partitions refused it.
     /// </summary>
     public static string GetMetricLabel(
         HttpContext httpContext, int ipv6PrefixBits = IpAddressExtensions.DefaultIpv6PartitionPrefixBits)
@@ -190,7 +192,7 @@ public static class RateLimitPartitions
             return GlobalScope.Deferred;
         }
 
-        if (path is not null && path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase))
+        if (IsManagementApiPath(path))
         {
             // Management plane: the per-principal ceiling applies regardless of any endpoint policy.
             return GlobalScope.ManagementApi;
@@ -213,6 +215,71 @@ public static class RateLimitPartitions
             ? GlobalScope.ProtocolDefault
             : GlobalScope.Deferred;
     }
+
+    /// <summary>Partition-key prefix for the per-tenant budget.</summary>
+    public const string TenantPartitionPrefix = "tenant:";
+
+    /// <summary>Partition-key prefix for a <c>downloads_throttled</c> tenant.</summary>
+    public const string TenantThrottledPartitionPrefix = "tenant-throttled:";
+
+    /// <summary>
+    /// The tenant-dimension partition for a request, or null when the tenant limiter does not apply
+    /// to it. It applies only to a protocol controller action (<see cref="IsProtocolControllerRequest"/>)
+    /// on a resolved tenant: never the
+    /// management plane, the frontend and docs assets, or the exempt operator probes
+    /// (<c>/health</c>, <c>/ready</c>, <c>/metrics</c>, <c>/version</c>, <c>/edge/status</c>), which
+    /// single mode resolves to the one tenant and must stay reachable. Under a
+    /// <c>downloads_throttled</c> usage posture the key is <c>tenant-throttled:{id}</c>, whether or
+    /// not the budget is on; otherwise it is <c>tenant:{id}</c> when
+    /// <paramref name="tenantBudgetEnabled"/>, else null. The key carries the org id, so it is for the
+    /// limiter and the denial audit only — never a metric attribute.
+    /// </summary>
+    public static string? GetTenantPartitionKey(HttpContext httpContext, bool tenantBudgetEnabled)
+    {
+        if (httpContext.Items[Infrastructure.TenantContext.HttpItemsKey] is not Infrastructure.TenantContext
+            {
+                IsTenant: true, TenantId: { Length: > 0 } tenantId,
+            } tenant)
+        {
+            return null;
+        }
+
+        bool throttled = tenant.UsagePosture == Infrastructure.Usage.UsagePostures.DownloadsThrottled;
+        return !IsTenantProtocolRequest(httpContext) ? null
+            : throttled ? TenantThrottledPartitionPrefix + tenantId
+            : tenantBudgetEnabled ? TenantPartitionPrefix + tenantId
+            : null;
+    }
+
+    // A protocol controller action, outside the exempt operator probes.
+    private static bool IsTenantProtocolRequest(HttpContext httpContext) =>
+        !Infrastructure.TenantStatusEnforcementMiddleware.IsExemptPath(httpContext.Request.Path)
+        && IsProtocolControllerRequest(httpContext);
+
+    /// <summary>
+    /// True when the request is routed to a registry protocol controller action — one of the
+    /// controllers <see cref="Infrastructure.Edge.EdgeProtocolSurface"/> classifies as protocol,
+    /// the explicit, gate-enforced list every controller must be sorted into. The classification
+    /// is by endpoint, not path prefix: a management controller routed outside <c>/api/v1/</c>
+    /// (SAML's <c>/saml/acs</c> sign-in POST) is management plane, and a request that routed to no
+    /// controller (the SPA, static assets, a 404) is neither. Needs the routed endpoint, so it
+    /// is only meaningful after <c>UseRouting</c>; the rate limiter and the tenant status gate
+    /// both run after it.
+    /// </summary>
+    public static bool IsProtocolControllerRequest(HttpContext httpContext) =>
+        httpContext.GetEndpoint()?.Metadata.GetMetadata<ControllerActionDescriptor>() is { ControllerTypeInfo: { } controller }
+        && Infrastructure.Edge.EdgeProtocolSurface.IsProtocol(controller.AsType());
+
+    /// <summary>
+    /// True for a request under the management API prefix (<c>/api/v1/</c>) — the same
+    /// path-based rule <see cref="ClassifyGlobalScope"/> uses to route management traffic to the
+    /// per-principal ceiling regardless of endpoint policy. Shared here so any other caller
+    /// needing a management-vs-protocol plane distinction (e.g.
+    /// <c>TenantStatusEnforcementMiddleware</c>'s read-only write gate) reuses this one
+    /// classification instead of growing its own ad-hoc prefix check that can drift from it.
+    /// </summary>
+    public static bool IsManagementApiPath(string? path) =>
+        path is not null && path.StartsWith("/api/v1/", StringComparison.OrdinalIgnoreCase);
 
     private static string? ExtractRawTokenIfAny(HttpContext ctx)
     {

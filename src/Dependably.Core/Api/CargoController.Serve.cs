@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -27,6 +28,7 @@ public sealed partial class CargoController
     /// </summary>
     [HttpGet("/cargo/{**path}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.PerResponse, "cargo")]
     public async Task<IActionResult> GetCatchAll(string path, CancellationToken ct)
     {
         // Download: api/v1/crates/{name}/{version}/download
@@ -41,6 +43,7 @@ public sealed partial class CargoController
             {
                 string name = inner[..lastSlash];
                 string version = inner[(lastSlash + 1)..];
+                HttpContext.ClassifyEgress(EgressKind.Artifact);
                 return await GetCrateAsync(name, version, ct);
             }
         }
@@ -50,6 +53,7 @@ public sealed partial class CargoController
         if (nameSlash >= 0)
         {
             string name = path[(nameSlash + 1)..];
+            HttpContext.ClassifyEgress(EgressKind.Metadata);
             return await GetIndexAsync(name, ct);
         }
 
@@ -291,38 +295,9 @@ public sealed partial class CargoController
             ?? BlobKeys.Cargo(orgId, name, version);
         string storeKey = BlobKeys.StoreKey(blobKey);
 
-        // Cache hit path.
-        if (await _blobs.ExistsAsync(storeKey, ct))
+        if (await TryServeCachedCrateAsync(orgId, name, version, storeKey, token, settings, ct) is { } hit)
         {
-            // Claim recheck + block gate both run before the cached bytes are served, so a
-            // local_only transition or an operator block (or OSV finding) on a crate takes
-            // effect on every subsequent download, not only on a never-before-fetched version.
-            // Proxy crates carry their policy state on the global plane (cache_artifact);
-            // hosted crates on their package_versions row — only proxy-origin crates are
-            // claim-gated, since local_only must still serve the org's own published crates.
-            var gateDecision = await EvaluateCrateCacheHitGateAsync(orgId, name, version, token, settings, ct);
-            if (gateDecision == CrateCacheHitGateDecision.ClaimRefused)
-            {
-                return NotFound();
-            }
-            if (gateDecision == CrateCacheHitGateDecision.Blocked)
-            {
-                return StatusCode(StatusCodes.Status403Forbidden);
-            }
-
-            var cachedStream = await _blobs.GetAsync(storeKey, ct);
-            if (cachedStream is not null)
-            {
-                // name and version are validated by PathSafeValidator.ValidateUpstreamSegment
-                // before reaching this path; Serilog renders structured parameters, not concatenated strings.
-                _logger.LogDebug(
-                    "Cargo cache hit: {Name} {Version} for org {OrgId}.", name, version, orgId);
-                // A cached blob may be a hosted (published) crate or a proxied one; only
-                // proxied accesses belong in the shared cache index. Gate on the version's
-                // origin so hosted crates stay out of cache_artifact / tenant_artifact_access.
-                await RecordProxiedCacheHitAsync(orgId, name, version, storeKey, ct);
-                return File(cachedStream, "application/octet-stream", $"{name}-{version}.crate");
-            }
+            return hit;
         }
 
         // Cache miss — proxy fetch. A reserved crate name, or a name ClaimResolver resolves to
@@ -362,6 +337,85 @@ public sealed partial class CargoController
                 Status = StatusCodes.Status503ServiceUnavailable,
             });
         }
+    }
+
+    /// <summary>
+    /// Serves a crate already in the store — by presigned redirect when one is allowed, else by
+    /// stream — after the claim recheck and block gate, or returns null on a miss so the caller
+    /// proxies it from upstream.
+    /// </summary>
+    private async Task<IActionResult?> TryServeCachedCrateAsync(
+        string orgId, string name, string version, string storeKey,
+        TokenRecord? token, OrgSettings settings, CancellationToken ct)
+    {
+        // A read that may be redirected asks through the presign probe, whose answer is both the
+        // hit-or-miss decision and the redirect's existence check, so a redirected hit asks the
+        // store once. Any other read asks the store directly.
+        var probe = _presign is null ? null : await _presign.ProbeAsync(HttpContext, _blobs, storeKey, "cargo", ct);
+        if (!(probe?.Exists ?? await _blobs.ExistsAsync(storeKey, ct)))
+        {
+            return null;
+        }
+
+        // Claim recheck + block gate both run before the cached bytes are served, so a
+        // local_only transition or an operator block (or OSV finding) on a crate takes
+        // effect on every subsequent download, not only on a never-before-fetched version.
+        // Proxy crates carry their policy state on the global plane (cache_artifact);
+        // hosted crates on their package_versions row — only proxy-origin crates are
+        // claim-gated, since local_only must still serve the org's own published crates.
+        var gateDecision = await EvaluateCrateCacheHitGateAsync(orgId, name, version, token, settings, ct);
+        if (gateDecision == CrateCacheHitGateDecision.ClaimRefused)
+        {
+            return NotFound();
+        }
+        if (gateDecision == CrateCacheHitGateDecision.Blocked)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        var redirect = probe is null ? null : await TryRedirectCrateAsync(orgId, name, version, probe, ct);
+        var cachedStream = redirect is null ? await _blobs.GetAsync(storeKey, ct) : null;
+        if (redirect is null && cachedStream is null)
+        {
+            return null;
+        }
+
+        // name and version are validated by PathSafeValidator.ValidateUpstreamSegment
+        // before reaching this path; Serilog renders structured parameters, not concatenated strings.
+        _logger.LogDebug(
+            "Cargo cache hit: {Name} {Version} for org {OrgId}.", name, version, orgId);
+        // A cached blob may be a hosted (published) crate or a proxied one; only
+        // proxied accesses belong in the shared cache index. Gate on the version's
+        // origin so hosted crates stay out of cache_artifact / tenant_artifact_access.
+        await RecordProxiedCacheHitAsync(orgId, name, version, storeKey, ct);
+        return redirect ?? File(cachedStream!, "application/octet-stream", $"{name}-{version}.crate");
+    }
+
+    /// <summary>
+    /// The presigned-redirect decision for a cached <c>.crate</c>. A crate version is immutable —
+    /// crates.io never lets one be republished, and a yank hides it from resolution without
+    /// changing its bytes — so every cached crate may redirect. Origin and size come from the
+    /// org's own <c>package_versions</c> row when there is one (a hosted crate, or a proxied
+    /// crate recorded on the version plane), and otherwise from the global-plane
+    /// <c>cache_artifact</c> row, which is proxied by definition. With neither, the crate streams.
+    /// The probe already found the crate present, so signing does not ask the store again.
+    /// </summary>
+    private async Task<IActionResult?> TryRedirectCrateAsync(
+        string orgId, string name, string version, RedirectProbe probe, CancellationToken ct)
+    {
+        var pkg = await _packages.GetByPurlNameAsync(orgId, "cargo", name, ct);
+        var hosted = pkg is null ? null : await _packages.GetVersionAsync(pkg.Id, version, ct);
+        if (hosted is not null)
+        {
+            return await _presign!.TryRedirectAsync(
+                HttpContext, probe, hosted.SizeBytes, BlobOrigins.FromColumn(hosted.Origin), ct);
+        }
+
+        var cached = await _cacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "cargo", name, version, $"{name}-{version}.crate", ct);
+        return cached is null
+            ? null
+            : await _presign!.TryRedirectAsync(HttpContext, probe, cached.SizeBytes, BlobOrigin.Proxied, ct);
     }
 
     // Walks the configured upstream URLs in priority order, fetching the crate from the first

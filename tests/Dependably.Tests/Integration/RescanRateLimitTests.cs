@@ -116,7 +116,7 @@ public sealed class RescanRateLimitTests
     private sealed class RescanRateLimitFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly Dictionary<string, string> _settings;
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
         private readonly InMemoryBlobStore _blobStore = new();
 
         public RescanRateLimitFactory(Dictionary<string, string> settings) => _settings = settings;
@@ -128,14 +128,14 @@ public sealed class RescanRateLimitTests
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blobStore);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blobStore, _blobStore));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             // No advisories, always "reached" — the rescan call completes fast and
             // deterministically without ever touching the network.
@@ -171,7 +171,7 @@ public sealed class RescanRateLimitTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -183,8 +183,8 @@ public sealed class RescanRateLimitTests
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         public async Task PushNpmPackage(string name, string version)
@@ -211,7 +211,7 @@ public sealed class RescanRateLimitTests
             // this test targets. Clear it so every rescan call in this class is a fresh,
             // never-scanned version — isolating the per-caller ceiling as the only thing that
             // can produce a 429.
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             await conn.ExecuteAsync("""
                 UPDATE package_versions SET vuln_checked_at = NULL
                 WHERE id = (
@@ -229,7 +229,7 @@ public sealed class RescanRateLimitTests
         /// </summary>
         public async Task<string> CreateAdminJwtAsync()
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
 
             string orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")

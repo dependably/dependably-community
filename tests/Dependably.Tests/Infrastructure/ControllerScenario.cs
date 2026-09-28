@@ -353,6 +353,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             Dependably.Tests.Infrastructure.TestEnrichment.NoConnection()));
 
         var systemAdmins = new SystemAdminRepository(db);
+        var systemTokens = new SystemTokenRepository(db, Clock);
         var tokens = new TokenRepository(db, Clock);
         var invites = new InviteRepository(db, Clock);
         var allowlist = new AllowlistRepository(db, Clock);
@@ -397,7 +398,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             cacheArtifacts, tenantAccess)
         { ControllerContext = ctx };
         var envelope = _masterKeyConfigured ? TestEnvelope.Configured() : TestEnvelope.Unconfigured();
-        var system = new SystemController(orgs, systemAdmins, db, audit, problems,
+        var system = new SystemController(orgs, systemAdmins, systemTokens, db, audit, problems,
             new ConfigurationBuilder().Build(),
             Clock, envelope, NullLogger<SystemController>.Instance,
             tenantCache: null, requireMfa: null, systemEvents: systemEvents)

@@ -45,8 +45,8 @@ public sealed partial class CardinalityBudgetTests
         "ecosystem",    // the fixed ecosystem list (npm|pypi|nuget|maven|rpm|oci|go|cargo|apk)
         "outcome",      // the closed vocabulary pinned by OutcomeValueTests
         "reason",       // per-instrument bounded reason vocabularies
-        "policy",       // rate-limit policy names declared by [EnableRateLimiting]
-        "partition",    // partition KIND only (token|user|ip|unknown), never the partition key
+        "policy",       // rate-limit policy names declared by [EnableRateLimiting], plus "tenant"
+        "partition",    // partition KIND only (token|user|ip|tenant|unknown), never the partition key
         "decision",     // allow|reject
         "cause",        // rate-limit failure-posture cause
         "job_name",     // the fixed background-job name set

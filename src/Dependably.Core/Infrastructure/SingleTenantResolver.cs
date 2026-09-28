@@ -26,7 +26,7 @@ public sealed class SingleTenantResolver : ITenantResolver
 
         // Active tenants only — if the operator soft-deletes the single tenant, the install
         // becomes Uninitialized (503) until restore. Order is for determinism on the unlikely
-        // edge of multiple rows. Status flows through to TenantContext so
+        // edge of multiple rows. Usage posture rides along for the usage-cap gate. Status flows through to TenantContext so
         // TenantStatusEnforcementMiddleware can refuse a suspended/archived/deleting single
         // tenant the same way it refuses any other status; the operator plane is unreachable in
         // single mode regardless (RouteScopeFilter's system scope requires TenantContext.Apex,
@@ -34,9 +34,9 @@ public sealed class SingleTenantResolver : ITenantResolver
         // than a special case. Recovery differs by mode, though: multi mode restores via
         // system_admin's PATCH /api/v1/system/tenants/{slug}/status; single mode has no
         // API-reachable operator plane at all, so recovery there is a direct DB edit.
-        var (Id, Slug, Status) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status)>(
-            "SELECT id, slug, status FROM orgs WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 1");
+        var (Id, Slug, Status, UsagePosture) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status, string UsagePosture)>(
+            "SELECT id, slug, status, usage_posture FROM orgs WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 1");
 
-        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug, Status);
+        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug, Status, UsagePosture);
     }
 }

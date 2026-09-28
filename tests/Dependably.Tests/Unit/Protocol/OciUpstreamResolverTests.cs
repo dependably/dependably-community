@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Amazon.S3;
 using Dapper;
 using Dependably.Configuration;
 using Dependably.Infrastructure;
@@ -1091,6 +1092,117 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.True(result!.Streamed);
         Assert.Equal(blobBytes, client.Written);
         Assert.Equal(0, permitsAsked);
+    }
+
+    // ── FetchBlobAsync — cache miss into an S3 cache tier ─────────────────────
+
+    // Parts small enough to put a test blob across several of them; the fake S3 holds them to the
+    // same minimum, as AWS does at 5 MiB.
+    private const int S3TestPartSize = 64 * 1024;
+
+    // An upstream answer declaring its length, the shape every registry serves a layer in and the
+    // one that opens the client mirror.
+    private static HttpResponseMessage DeclaredLengthBlobResponse(byte[] blobBytes, int maxBytesPerRead = int.MaxValue)
+    {
+        var resp = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(
+                new Dependably.Tests.Unit.Storage.S3BlobStoreUnseekableStreamTests.UnseekableStream(blobBytes, maxBytesPerRead)),
+        };
+        resp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+        resp.Content.Headers.ContentLength = blobBytes.Length;
+        return resp;
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_CacheMiss_S3CacheTier_StreamsToClientAndCachesVerifiedBlob()
+    {
+        // The proxied-pull path against the real S3 SDK. The digest-verifying pass-through the
+        // resolver hands the store cannot seek or report a length, which the SDK refuses
+        // client-side for a single PutObject ("Could not determine content length"), so the
+        // store has to upload such a body in parts. The blob spans several parts so both the
+        // staging write and the promotion go multipart.
+        byte[] blobBytes = RandomBytes(200_000);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+
+        var s3 = new FakeS3Service { MinPartSizeBytes = S3TestPartSize };
+        using var sdk = s3.CreateClient();
+        await using var cache = new S3BlobStore(sdk, s3.Bucket, S3TestPartSize);
+        var resolver = BuildStreamingResolver(new SingleResponseFactory(DeclaredLengthBlobResponse(blobBytes)), cache);
+
+        var client = new RecordingSinkStream();
+        var sink = new OciBlobStreamSink(
+            BeginAsync: (_, _, _) => Task.FromResult<Stream>(client),
+            AbortAsync: () => Task.CompletedTask,
+            AllowSynchronousWrites: () => { });
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", digest, default, sink);
+
+        Assert.NotNull(result);
+        Assert.True(result!.Streamed);
+        Assert.Equal(blobBytes, client.Written);
+        Assert.Equal(blobBytes, s3.GetObject(BlobKeys.OciBlob("sha256", sha256)));
+        Assert.DoesNotContain(s3.Keys, k => k.StartsWith("oci/_staging/", StringComparison.Ordinal));
+        Assert.Equal(0, s3.OpenMultipartUploads);
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_CacheMiss_S3CacheTier_TricklingUpstream_UploadsFullParts()
+    {
+        // An upstream that hands over a few bytes per read, as a slow network does. The staging
+        // upload must still send full parts (S3 refuses an undersized part anywhere but last), and
+        // the blob must land intact under its content-addressed key.
+        byte[] blobBytes = RandomBytes((S3TestPartSize * 2) + 999);
+        string sha256 = Sha256Hex(blobBytes);
+
+        var s3 = new FakeS3Service { MinPartSizeBytes = S3TestPartSize };
+        using var sdk = s3.CreateClient();
+        await using var cache = new S3BlobStore(sdk, s3.Bucket, S3TestPartSize);
+        var resolver = BuildStreamingResolver(
+            new SingleResponseFactory(DeclaredLengthBlobResponse(blobBytes, maxBytesPerRead: 7)), cache);
+
+        var result = await resolver.FetchBlobAsync(_orgId, "library/ubuntu", "sha256:" + sha256, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(blobBytes, s3.GetObject(BlobKeys.OciBlob("sha256", sha256)));
+        var staging = s3.CompletedPartSizes[0];
+        Assert.Equal([S3TestPartSize, S3TestPartSize, 999], staging);
+    }
+
+    [Fact]
+    public async Task FetchBlobAsync_CacheMiss_S3CacheTier_PartFailureFailsThatPullOnly_RetryCaches()
+    {
+        // Mixed outcome across two pulls of the same blob: the first pull's staging upload loses a
+        // part mid-transfer, the second goes through. The failed pull must surface as a failure,
+        // never a cached, recorded blob built from a partial upload, and leave nothing behind
+        // (no staging object, no open multipart upload), so the retry starts clean and caches.
+        byte[] blobBytes = RandomBytes(200_000);
+        string sha256 = Sha256Hex(blobBytes);
+        string digest = "sha256:" + sha256;
+        string blobKey = BlobKeys.OciBlob("sha256", sha256);
+
+        var s3 = new FakeS3Service { MinPartSizeBytes = S3TestPartSize };
+        using var sdk = s3.CreateClient();
+        await using var cache = new S3BlobStore(sdk, s3.Bucket, S3TestPartSize);
+
+        s3.FailNextUploadPart(2);
+        var failing = BuildStreamingResolver(new SingleResponseFactory(DeclaredLengthBlobResponse(blobBytes)), cache);
+        await Assert.ThrowsAsync<AmazonS3Exception>(
+            () => failing.FetchBlobAsync(_orgId, "library/ubuntu", digest, default));
+
+        Assert.Null(s3.GetObject(blobKey));
+        Assert.Empty(s3.Keys);
+        Assert.Equal(0, s3.OpenMultipartUploads);
+
+        var retrying = BuildStreamingResolver(new SingleResponseFactory(DeclaredLengthBlobResponse(blobBytes)), cache);
+        var result = await retrying.FetchBlobAsync(_orgId, "library/ubuntu", digest, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(blobBytes, s3.GetObject(blobKey));
+        Assert.Equal([blobKey], s3.Keys);
+        Assert.Equal(0, s3.OpenMultipartUploads);
     }
 
     [Fact]

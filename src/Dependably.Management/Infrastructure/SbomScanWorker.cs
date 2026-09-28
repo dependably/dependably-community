@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -186,6 +187,8 @@ public sealed class SbomScanWorker : BackgroundService
 
     private async Task ScanOneAsync(SbomScanRequest request, CancellationToken ct)
     {
+        using var tenantScope = DbScope.ForOrg(request.OrgId);
+
         if (!await OrgIsScannableAsync(request, ct))
         {
             return;

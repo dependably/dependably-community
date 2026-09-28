@@ -60,6 +60,13 @@ public sealed class OciOptions
     /// memory. It is deliberately still bounded rather than unlimited, so a hostile or
     /// misreporting upstream cannot stream without end into the cache volume.
     /// </para>
+    ///
+    /// <para>
+    /// On an S3 cache tier the blob is uploaded in fixed 8 MiB parts, and S3 accepts at most
+    /// 10,000 parts per object, so that backend cannot store a proxied blob larger than
+    /// <see cref="Dependably.Storage.S3BlobStore.MaxUnknownLengthObjectBytes"/> (~78 GiB) whatever
+    /// this cap says.
+    /// </para>
     /// </summary>
     public long MaxBlobProxyBytes { get; set; } = 10L * 1024 * 1024 * 1024;
 

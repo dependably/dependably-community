@@ -40,6 +40,15 @@ public static partial class ServiceCollectionExtensions
         services.AddScoped<NuGetSymbolIndexer>();
         services.AddSingleton<StatsSnapshotRepository>();
         services.AddSingleton<OrgStatsHistoryRepository>();
+        // Usage metering: the raw event record, its rollups, the daily storage capture, and the
+        // per-meter caps with the usage posture computed from them.
+        services.AddSingleton<Usage.UsageEventRepository>();
+        services.AddSingleton<Usage.UsageRollupRepository>();
+        services.AddSingleton<Usage.StorageSnapshotRepository>();
+        services.AddSingleton<Usage.StoredBytesRepository>();
+        services.AddSingleton<Usage.StoredByteReconciler>();
+        services.AddSingleton<Usage.UsageReportRepository>();
+        services.AddSingleton<Usage.UsagePostureRepository>();
         services.AddSingleton<TokenRepository>();
         // Async batched activity writer. The hosted service drains the channel into
         // batched INSERTs so the download/push hot paths no longer block on a SQLite

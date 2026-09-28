@@ -190,7 +190,9 @@ public sealed class TenantArtifactAccessRepository
     /// </summary>
     public async Task<int> CountRemainingAsync(string cacheArtifactId, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: the shared cache_artifact is released only when no tenant still holds it; a
+        // tenant-bound count would see only the caller's rows.
+        await using var conn = await _db.OpenCrossTenantAsync("shared cache artifact reference count", ct);
         // xtenant: deliberately cross-tenant — the whole point is counting every org's claim.
         return await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM tenant_artifact_access WHERE cache_artifact_id = @cacheArtifactId",

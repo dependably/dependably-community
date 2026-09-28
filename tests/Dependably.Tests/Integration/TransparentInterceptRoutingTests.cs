@@ -1,5 +1,11 @@
 using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using Dependably.Tests.Infrastructure;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Dependably.Tests.Integration;
 
@@ -14,11 +20,13 @@ namespace Dependably.Tests.Integration;
 /// returns 200 when reached with the path unrewritten. Three route-outcome cases:
 ///   - localhost (unmapped) + HOST_ROUTING set → 200 (no rewrite for this host)
 ///   - localhost + HOST_ROUTING unset    → 200 (middleware is no-op when map is empty)
-///   - mapped host + HOST_ROUTING set    → rewritten to <c>/npm/health</c>, which DOES
-///     have a matching route (<c>NpmController</c>'s <c>/npm/{package}</c> treats "health"
-///     as a package name and answers 200, not a framework 404 — an earlier version of this
-///     doc comment assumed a 404, which <see cref="MappedHost_SecurityHeadersClassifyOnTheRewrittenPath_ThroughTheRealPipeline"/>
-///     found does not hold); that case is proven on response headers instead of status code.
+///   - mapped host + HOST_ROUTING set    → rewritten to <c>/npm/health</c>, which
+///     <c>NpmController</c>'s <c>/npm/{package}</c> treats as a package name; that case is
+///     proven on response headers, not status code.
+/// Which controller actually answers an intercepted request is proven separately, per mapped
+/// ecosystem, by <see cref="MappedHost_ReachesThePrefixedProtocolController_ForEveryEcosystem"/>:
+/// a header-only assertion cannot tell the rewritten route from whatever endpoint the original
+/// path matched.
 /// Every mapped host is also always accepted by host filtering (regardless of BASE_URL) —
 /// those hostnames are the entire point of transparent intercept; localhost stands in for
 /// "any host the filter would accept but the map doesn't recognise" without also having to
@@ -36,13 +44,14 @@ public sealed class TransparentInterceptRoutingTests
     /// must live in the <c>HostRoutingEnv</c> collection so they don't run in parallel
     /// with anything that also reads the env var.
     /// </summary>
-    private static async Task WithHostRoutingAsync(string? hostRouting, Func<DependablyFactory, Task> body)
+    private static async Task WithHostRoutingAsync(
+        string? hostRouting, Func<DependablyFactory, Task> body, Action<IServiceCollection>? serviceOverrides = null)
     {
         string? prior = Environment.GetEnvironmentVariable("HOST_ROUTING");
         Environment.SetEnvironmentVariable("HOST_ROUTING", hostRouting);
         try
         {
-            await using var factory = new DependablyFactory();
+            await using var factory = new DependablyFactory { ServiceOverrides = serviceOverrides };
             await factory.InitializeAsync();
             await body(factory);
         }
@@ -163,6 +172,233 @@ public sealed class TransparentInterceptRoutingTests
                     resp.Headers.CacheControl?.ToString(),
                     ignoreCase: true);
             });
+    }
+
+    private const string AllEcosystemsHostRouting =
+        "registry.npmjs.org=npm,pypi.org=pypi,api.nuget.org=nuget,repo.maven.apache.org=maven,"
+        + "rpm.example.test=rpm,registry-1.docker.io=oci,repo.hex.pm=hex";
+
+    /// <summary>
+    /// One intercepted request per mapped ecosystem: the bare-host path a stock client sends, the
+    /// prefixed path the rewrite must route it to, and a signal only the target controller
+    /// produces (routing to the original, unprefixed path yields the SPA fallback, a 404, or a
+    /// 405 — never these). The pypi <c>/simple/</c> case is the path-dependent pass-through: the
+    /// prefix resolves to empty and the unprefixed route is already the served one.
+    /// </summary>
+    private sealed record InterceptCase(
+        string Ecosystem, string Host, string Method, string BarePath, string PrefixedPath,
+        HttpStatusCode Status, string? RequiredHeader, string? BodyMarker);
+
+    private static readonly InterceptCase[] InterceptCases =
+    [
+        new("npm", "registry.npmjs.org", "GET", "/-/ping", "/npm/-/ping", HttpStatusCode.OK, null, "{}"),
+        new("nuget", "api.nuget.org", "GET", "/v3/index.json", "/nuget/v3/index.json", HttpStatusCode.OK, null, "SearchQueryService"),
+        new("oci", "registry-1.docker.io", "GET", "/", "/v2/", HttpStatusCode.Unauthorized, "Docker-Distribution-API-Version", "\"UNAUTHORIZED\""),
+        new("pypi upload", "pypi.org", "POST", "/legacy/", "/pypi/legacy/", HttpStatusCode.Unauthorized, "WWW-Authenticate", null),
+        new("pypi simple", "pypi.org", "GET", "/simple/", "/simple/", HttpStatusCode.Unauthorized, "WWW-Authenticate", null),
+        new("maven", "repo.maven.apache.org", "GET", "/com/example/foo/maven-metadata.xml", "/maven/com/example/foo/maven-metadata.xml", HttpStatusCode.Unauthorized, "WWW-Authenticate", null),
+        new("rpm", "rpm.example.test", "POST", "/upload", "/rpm/upload", HttpStatusCode.Unauthorized, "WWW-Authenticate", null),
+        new("hex", "repo.hex.pm", "GET", "/api/users/me", "/hex/api/users/me", HttpStatusCode.Unauthorized, null, "\"Unauthorized\""),
+    ];
+
+    private sealed record Reply(HttpStatusCode Status, string? ContentType, HttpResponseHeaders Headers, string Body);
+
+    private static async Task<Reply> SendAsync(HttpClient client, string method, string url)
+    {
+        using var req = new HttpRequestMessage(new HttpMethod(method), url);
+        using var resp = await client.SendAsync(req);
+        string body = await resp.Content.ReadAsStringAsync();
+        return new Reply(resp.StatusCode, resp.Content.Headers.ContentType?.MediaType, resp.Headers, body);
+    }
+
+    /// <summary>
+    /// Proves the rewritten request is served by the prefixed protocol controller, not by the
+    /// endpoint the original path matched. Endpoint routing selects the endpoint from
+    /// <c>Request.Path</c> once, when the routing middleware runs; a rewrite placed after that
+    /// point changes the path the downstream middleware see but not the endpoint that executes.
+    /// Each case compares the intercepted response with the same request sent to the prefixed
+    /// path directly on an unmapped host (the oracle), and checks a signal unique to the target
+    /// controller so a matching pair of generic 404s cannot pass.
+    /// </summary>
+    [Fact]
+    public async Task MappedHost_ReachesThePrefixedProtocolController_ForEveryEcosystem()
+    {
+        await WithHostRoutingAsync(AllEcosystemsHostRouting, async factory =>
+        {
+            var client = factory.CreateClient();
+            var failures = new List<string>();
+
+            foreach (var c in InterceptCases)
+            {
+                var direct = await SendAsync(client, c.Method, $"http://localhost{c.PrefixedPath}");
+                var intercepted = await SendAsync(client, c.Method, $"http://{c.Host}{c.BarePath}");
+
+                if (direct.Status != c.Status)
+                {
+                    failures.Add($"{c.Ecosystem}: oracle {c.Method} {c.PrefixedPath} answered {(int)direct.Status}, expected {(int)c.Status}");
+                }
+
+                string label = $"{c.Ecosystem}: {c.Method} http://{c.Host}{c.BarePath}";
+                if (intercepted.Status != c.Status)
+                {
+                    failures.Add($"{label} answered {(int)intercepted.Status}, expected {(int)c.Status} from {c.PrefixedPath}");
+                    continue;
+                }
+
+                if (intercepted.ContentType != direct.ContentType)
+                {
+                    failures.Add($"{label} content type '{intercepted.ContentType}' differs from the direct route's '{direct.ContentType}'");
+                }
+
+                if (c.RequiredHeader is { } header && !intercepted.Headers.Contains(header))
+                {
+                    failures.Add($"{label} is missing the {header} header {c.PrefixedPath} emits");
+                }
+
+                if (c.BodyMarker is { } marker && !intercepted.Body.Contains(marker, StringComparison.Ordinal))
+                {
+                    failures.Add($"{label} body lacks '{marker}': {intercepted.Body}");
+                }
+            }
+
+            Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+        });
+    }
+
+    /// <summary>
+    /// The tenant-status gate and the rate limiter classify a request by its routed endpoint
+    /// (<c>RateLimitPartitions.IsProtocolControllerRequest</c>), so an intercepted request must be
+    /// routed on its rewritten path before they run. Mixed outcome through one host: while the org
+    /// is active, a bare-host npm publish reaches <c>NpmController</c> and succeeds; once the org
+    /// is read-only, the same bare-host publish is classified as a protocol-plane write and
+    /// refused with the read-only reason instead of falling through to a non-protocol endpoint.
+    /// </summary>
+    [Fact]
+    public async Task MappedHost_NpmPublish_ReachesController_AndReadOnlyGateClassifiesItAsProtocolWrite()
+    {
+        await WithHostRoutingAsync(AllEcosystemsHostRouting, async factory =>
+        {
+            string token = await factory.CreateToken("push");
+            using var client = factory.CreateClientWithBearer(token);
+
+            string activeName = $"icpt-active-{Guid.NewGuid():N}"[..20];
+            using (var activeResp = await client.PutAsync(
+                $"http://registry.npmjs.org/{activeName}",
+                new StringContent(NpmFixtures.BuildPublishBody(activeName, "1.0.0"), Encoding.UTF8, "application/json")))
+            {
+                Assert.Equal(HttpStatusCode.OK, activeResp.StatusCode);
+            }
+
+            await factory.SetOrgStatus("default", "read_only");
+
+            string blockedName = $"icpt-block-{Guid.NewGuid():N}"[..20];
+            using var roResp = await client.PutAsync(
+                $"http://registry.npmjs.org/{blockedName}",
+                new StringContent(NpmFixtures.BuildPublishBody(blockedName, "1.0.0"), Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.Locked, roResp.StatusCode);
+            using var doc = JsonDocument.Parse(await roResp.Content.ReadAsStringAsync());
+            Assert.Equal("ReadOnlyWrite", doc.RootElement.GetProperty("reason").GetString());
+        });
+    }
+
+    /// <summary>
+    /// The headless edge root composes its own pipeline, so it needs the same guarantee: an
+    /// intercepted request is routed on the rewritten path. The npm ping's <c>{}</c> JSON body is
+    /// produced only by <c>NpmController</c>; the unprefixed <c>/-/ping</c> matches no edge route.
+    /// </summary>
+    [Fact]
+    public async Task EdgeRoot_MappedHost_ReachesThePrefixedProtocolController()
+    {
+        string? prior = Environment.GetEnvironmentVariable("HOST_ROUTING");
+        Environment.SetEnvironmentVariable("HOST_ROUTING", AllEcosystemsHostRouting);
+        try
+        {
+            await using var factory = new EdgeFactory();
+            using var client = factory.CreateClient();
+
+            var nuget = await SendAsync(client, "GET", "http://api.nuget.org/v3/index.json");
+            Assert.Equal(HttpStatusCode.OK, nuget.Status);
+            Assert.Contains("SearchQueryService", nuget.Body, StringComparison.Ordinal);
+
+            var ping = await SendAsync(client, "GET", "http://registry.npmjs.org/-/ping");
+            Assert.Equal(HttpStatusCode.OK, ping.Status);
+            Assert.Equal("application/json", ping.ContentType);
+            Assert.Equal("{}", ping.Body);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HOST_ROUTING", prior);
+        }
+    }
+
+    // Documentation range (RFC 5737): never loopback, never in the default metrics allowlist.
+    private static readonly IPAddress NonAllowlistedPeer = IPAddress.Parse("203.0.113.7");
+
+    /// <summary>
+    /// Sets <c>Connection.RemoteIpAddress</c> to <see cref="NonAllowlistedPeer"/>. Registered
+    /// through <c>ServiceOverrides</c>, after the factory's loopback filter, so it runs inside it
+    /// and its address is the one the pipeline sees.
+    /// </summary>
+    private sealed class NonAllowlistedPeerFilter : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            app.Use(async (ctx, n) =>
+            {
+                ctx.Connection.RemoteIpAddress = NonAllowlistedPeer;
+                await n();
+            });
+            next(app);
+        };
+    }
+
+    /// <summary>
+    /// The operator surfaces gated by path — <c>/metrics</c> and <c>/version</c> (the metrics IP
+    /// allowlist in <c>MetricsAccessMiddleware</c> and the <c>/version</c> handler) and the
+    /// management Swagger shell (<c>ManagementDocsAllowlistMiddleware</c>) — must stay gated when
+    /// the request arrives on a mapped host. The gates classify on the rewritten path
+    /// (<c>/npm/metrics</c> is not <c>/metrics</c>), so the endpoint that executes must be chosen
+    /// from that same rewritten path; routed on the bare path, a non-allowlisted peer reaches the
+    /// Prometheus exposition and the docs shell simply by sending <c>Host: registry.npmjs.org</c>.
+    /// Each case first confirms, on an unmapped host, that the peer really is refused.
+    /// </summary>
+    [Fact]
+    public async Task MappedHost_DoesNotBypassThePathBasedOperatorSurfaceGates()
+    {
+        await WithHostRoutingAsync(
+            AllEcosystemsHostRouting,
+            async factory =>
+            {
+                var client = factory.CreateClient();
+                var failures = new List<string>();
+
+                foreach (string path in new[] { "/metrics", "/version", "/api/v1/docs/" })
+                {
+                    var control = await SendAsync(client, "GET", $"http://localhost{path}");
+                    if (control.Status != HttpStatusCode.Forbidden)
+                    {
+                        failures.Add($"control: {path} from {NonAllowlistedPeer} on localhost answered {(int)control.Status}, expected 403");
+                    }
+
+                    var mapped = await SendAsync(client, "GET", $"http://registry.npmjs.org{path}");
+                    bool leaked = path switch
+                    {
+                        "/metrics" => mapped.Body.Contains("# TYPE", StringComparison.Ordinal)
+                            || mapped.Body.Contains("# HELP", StringComparison.Ordinal),
+                        "/version" => mapped.Status == HttpStatusCode.OK
+                            && mapped.Body.Contains("\"version\"", StringComparison.Ordinal),
+                        _ => mapped.Status == HttpStatusCode.OK && mapped.ContentType == "text/html",
+                    };
+                    if (leaked)
+                    {
+                        failures.Add($"{path} on registry.npmjs.org from {NonAllowlistedPeer} was served ({(int)mapped.Status} {mapped.ContentType}): {mapped.Body[..Math.Min(120, mapped.Body.Length)]}");
+                    }
+                }
+
+                Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+            },
+            services => services.AddSingleton<IStartupFilter, NonAllowlistedPeerFilter>());
     }
 }
 

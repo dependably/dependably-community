@@ -29,16 +29,22 @@ CREATE TABLE IF NOT EXISTS orgs (
     -- TenantHardDeleteService cascade-deletes rows where deleted_at < now() - 30 days.
     deleted_at  TEXT
         CHECK (deleted_at IS NULL OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR deleted_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
-    -- Tenant lifecycle gate. 'active' is the only state that admits a request: every
+    -- Tenant lifecycle gate. 'active' is the only state that admits every request: every
     -- ITenantResolver selects this column into TenantContext.Status, and
     -- TenantStatusEnforcementMiddleware refuses a non-active tenant before it reaches a
     -- controller (protocol plane, management API, and login alike), while
     -- ITenantStorageResolver.GetRegistryAsync applies the same check independently as defence
-    -- in depth. system_admin flips 'suspended' via PATCH /api/v1/system/tenants/{slug}/status;
-    -- 'archived'/'deleting' get the identical refusal but currently have no operator-facing
-    -- trigger in community.
+    -- in depth. system_admin flips 'suspended'/'read_only' via
+    -- PATCH /api/v1/system/tenants/{slug}/status; 'archived'/'deleting' get the identical
+    -- full-lockout refusal but currently have no operator-facing trigger in community.
+    -- 'read_only' is a narrower posture than the other three: TenantStatusEnforcementMiddleware
+    -- admits GET/HEAD/OPTIONS on every plane and any write on the management plane, refusing
+    -- only a state-changing request on the protocol plane (publish/upload/delete/yank) — an old
+    -- binary predating this value still fails closed, because its blanket `!= 'active'` check
+    -- reads 'read_only' as a full lockout, which is a strict subset of the narrower refusal this
+    -- release applies, so it is safe mid-cutover.
     status      TEXT NOT NULL DEFAULT 'active'
-                CHECK (status IN ('active','suspended','archived','deleting')),
+                CHECK (status IN ('active','suspended','archived','deleting','read_only')),
     -- Reserved for future multi-region routing. Fully dormant in community.
     region      TEXT,
     -- Per-tenant entitlement document (audit_retention, sso_enforced, sbom_signing,
@@ -54,6 +60,15 @@ CREATE TABLE IF NOT EXISTS orgs (
     -- PackagePublishService before the blob put — exceeding the cap returns 413. Noisy-neighbour
     -- guard for multi-tenant pool deployments; trivially satisfied in single-tenant installs.
     storage_quota_bytes INTEGER,
+    -- Usage-cap posture, recomputed by the hourly usage rollup from org_usage_caps and the org's
+    -- month-to-date usage, and by PATCH /api/v1/system/tenants/{slug}/usage-limits for the org it
+    -- changes. Every ITenantResolver selects it into TenantContext.UsagePosture.
+    -- 'uploads_refused': a capped meter is at or above 100 %; TenantStatusEnforcementMiddleware
+    -- refuses protocol-plane POST/PUT/PATCH with 402. 'downloads_throttled': a capped egress meter
+    -- is at or above 110 %; writes are refused the same way and the org's protocol-plane requests
+    -- draw on the small tenant-throttled rate-limit budget. An org with no caps stays 'normal'.
+    usage_posture TEXT NOT NULL DEFAULT 'normal'
+        CHECK (usage_posture IN ('normal','uploads_refused','downloads_throttled')),
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
@@ -361,6 +376,23 @@ CREATE TABLE IF NOT EXISTS system_admins (
     token_version INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+-- Instance-scoped API tokens for the system-admin tenant-lifecycle endpoints. No org_id: the
+-- table is instance-level, not tenant-scoped, and stays outside OrgIdFilteringComplianceTests.
+-- personal-data: excluded — created_by is an authorship-provenance stamp on an operator-plane row; system_admins itself is excluded from the tenant self-service export for the same reason
+CREATE TABLE IF NOT EXISTS system_tokens (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    token_hash  TEXT NOT NULL UNIQUE,
+    created_by  TEXT NOT NULL REFERENCES system_admins(id) ON DELETE CASCADE,
+    description TEXT,            -- optional free-text label set at creation time.
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    expires_at  TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_used_at TEXT    -- updated (throttled ~60s) when the token authenticates a request.
+        CHECK (last_used_at IS NULL OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_used_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS packages (
@@ -900,6 +932,21 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
 CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
     ON upstream_registry(org_id, ecosystem, position);
 
+-- Per-(org, ecosystem) record that the org has at some point configured an upstream carrying a
+-- credential (UpstreamRegistryRepository.IsCredentialFree is false). Nothing records which upstream
+-- supplied a given proxied object, so once an org has fetched through a credentialed upstream its
+-- proxied objects for that ecosystem can never be shown to be public: a row here keeps them off
+-- the CloudFront edge-cacheable prefix even after the credentialed upstream is deleted. Written
+-- when such an upstream is added or seeded, and converged from upstream_registry on every boot.
+-- Rows are never removed except with the org; there is deliberately no API to clear one.
+CREATE TABLE IF NOT EXISTS upstream_credential_history (
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem     TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (first_seen_at IS NULL OR first_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR first_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR first_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    PRIMARY KEY (org_id, ecosystem)
+);
+
 -- Per-(org, ecosystem, package name) upstream source pin. The first upstream to successfully
 -- serve a proxied name binds that name to that upstream host; a later proxy fetch resolving the
 -- same name from a DIFFERENT upstream host is refused. This is the non-OCI analogue of OCI
@@ -1331,6 +1378,7 @@ CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON service_tokens(token_hash)
 CREATE INDEX IF NOT EXISTS idx_user_tokens_org ON user_tokens(org_id);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON user_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_service_tokens_org ON service_tokens(org_id);
+CREATE INDEX IF NOT EXISTS idx_system_tokens_created_by ON system_tokens(created_by);
 CREATE INDEX IF NOT EXISTS idx_quarantine_version ON quarantine(package_version_id);
 CREATE INDEX IF NOT EXISTS idx_quarantine_decided_by ON quarantine(decided_by);
 CREATE INDEX IF NOT EXISTS idx_invites_created_by ON invites(created_by);
@@ -2225,6 +2273,122 @@ CREATE TABLE IF NOT EXISTS org_stats_history (
 -- RetentionService.PruneStatsHistoryAsync) — without this index that sweep is a full-table scan,
 -- the same reasoning as idx_audit_event_occurred_at.
 CREATE INDEX IF NOT EXISTS idx_org_stats_history_day ON org_stats_history (day);
+
+-- Usage metering. The raw, append-only record of what each org consumed, and the rollups a
+-- billing system reads. Measurement only: nothing here knows a plan, an allowance, or a price —
+-- that interpretation belongs to whatever rates the rollups.
+--
+-- None of these tables references orgs. A metering row must outlive its org's hard delete so
+-- the final period can still be invoiced; the rows carry no personal data (an org id, a meter,
+-- a byte count), so surviving the org erases nothing a data subject is owed.
+--
+-- One row per metered response. event_id is minted once per request and is the idempotency key:
+-- a writer that retries a batch inserts with ON CONFLICT (event_id) DO NOTHING, so a replay can
+-- never double-count. delivery separates bytes the app streamed from bytes it handed to the
+-- object store or CDN with a redirect; a redirect records the object's full size when it is
+-- issued, and object_ref names the object so the figure can be reconciled against the store's
+-- own access logs. quantity is bytes for every meter defined today.
+CREATE TABLE IF NOT EXISTS usage_events (
+    event_id    TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL,
+    meter       TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes')),
+    delivery    TEXT NOT NULL DEFAULT 'streamed' CHECK (delivery IN ('streamed', 'redirect')),
+    quantity    INTEGER NOT NULL CHECK (quantity >= 0),
+    source      TEXT NOT NULL,
+    object_ref  TEXT,
+    occurred_at TEXT NOT NULL
+        CHECK (occurred_at IS NULL OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+CREATE INDEX IF NOT EXISTS idx_usage_events_org_occurred ON usage_events (org_id, occurred_at);
+-- Serves the hourly rollup and the retention sweep, which both range over occurred_at across
+-- every org.
+CREATE INDEX IF NOT EXISTS idx_usage_events_occurred ON usage_events (occurred_at);
+
+-- Hourly totals per (org, meter), recomputed from usage_events over a lookback window. A
+-- recompute replaces a bucket's totals outright, so running it twice yields the same rows.
+-- redirect_quantity is the part of quantity that was delivered by redirect. request_count is the
+-- number of metered events in the bucket, an operator capacity signal and never a billed meter;
+-- buckets rolled up before the column existed read 0.
+CREATE TABLE IF NOT EXISTS usage_hourly (
+    org_id            TEXT NOT NULL,
+    meter             TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes')),
+    bucket            TEXT NOT NULL
+        CHECK (bucket GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:00:00Z'),
+    quantity          INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+    redirect_quantity INTEGER NOT NULL DEFAULT 0 CHECK (redirect_quantity >= 0),
+    request_count     INTEGER NOT NULL DEFAULT 0,
+    computed_at       TEXT NOT NULL
+        CHECK (computed_at IS NULL OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    PRIMARY KEY (org_id, meter, bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_hourly_bucket ON usage_hourly (bucket);
+
+-- Daily totals per (org, meter): the table a billing system reads. The egress meters are sums of
+-- usage_hourly; storage_bytes is the day's high-water mark of billable storage, and a write to it
+-- only ever raises the stored value, so a recompute or a second capture in the same day cannot
+-- lower the mark. request_count is the sum of the hourly request_count for the egress meters and
+-- 0 for storage_bytes.
+CREATE TABLE IF NOT EXISTS usage_daily (
+    org_id            TEXT NOT NULL,
+    meter             TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes')),
+    bucket            TEXT NOT NULL
+        CHECK (bucket GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    quantity          INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+    redirect_quantity INTEGER NOT NULL DEFAULT 0 CHECK (redirect_quantity >= 0),
+    request_count     INTEGER NOT NULL DEFAULT 0,
+    computed_at       TEXT NOT NULL
+        CHECK (computed_at IS NULL OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR computed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    PRIMARY KEY (org_id, meter, bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_bucket ON usage_daily (bucket);
+
+-- One storage capture per org per UTC day; the last capture of the day wins. billable_bytes is
+-- what a customer pays to store: uploaded artifacts only, from org_billable_storage_bytes.
+-- cache_attributed_bytes is the proxy-cache share of org_storage_bytes, recorded for analysis and
+-- never billed.
+-- The count columns are operator capacity and abuse signals, never billed meters:
+--   hosted_version_count  uploaded non-OCI package versions;
+--   oci_manifest_count    uploaded OCI manifests and indexes (oci_blobs rows of a manifest media type);
+--   oci_blob_count        the other uploaded oci_blobs rows (layers and configs);
+--   cache_entry_count     proxy-cache entries the org reaches (its tenant_artifact_access rows);
+--   db_row_count          rows across a fixed list of org-scoped growth tables
+--                         (StorageSnapshotRepository.DbFootprintTables); tables with no org_id
+--                         cannot be attributed to an org and are excluded.
+-- hosted_version_count + oci_manifest_count is the org's artefact count.
+CREATE TABLE IF NOT EXISTS storage_snapshot (
+    org_id                 TEXT NOT NULL,
+    day_utc                TEXT NOT NULL
+        CHECK (day_utc GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    hosted_bytes           INTEGER NOT NULL DEFAULT 0,
+    oci_uploaded_bytes     INTEGER NOT NULL DEFAULT 0,
+    cache_attributed_bytes INTEGER NOT NULL DEFAULT 0,
+    billable_bytes         INTEGER NOT NULL DEFAULT 0,
+    hosted_version_count   INTEGER NOT NULL DEFAULT 0,
+    oci_manifest_count     INTEGER NOT NULL DEFAULT 0,
+    oci_blob_count         INTEGER NOT NULL DEFAULT 0,
+    cache_entry_count      INTEGER NOT NULL DEFAULT 0,
+    db_row_count           INTEGER NOT NULL DEFAULT 0,
+    captured_at            TEXT NOT NULL
+        CHECK (captured_at IS NULL OR captured_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR captured_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR captured_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    PRIMARY KEY (org_id, day_utc)
+);
+CREATE INDEX IF NOT EXISTS idx_storage_snapshot_day ON storage_snapshot (day_utc);
+
+-- Per-meter usage caps an operator sets through PATCH /api/v1/system/tenants/{slug}/usage-limits.
+-- Quantities only, in each meter's own unit: bytes for egress_bytes, egress_metadata_bytes and
+-- storage_bytes, uploaded artefacts for artifact_count. No row for a meter means that meter is not
+-- capped, and an org with no rows is metered but never enforced. The hourly usage rollup compares
+-- each cap with the org's month-to-date usage and writes the result to orgs.usage_posture.
+-- Configuration, not metering, so the rows go with their org on hard delete.
+CREATE TABLE IF NOT EXISTS org_usage_caps (
+    org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    meter        TEXT NOT NULL
+        CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes', 'artifact_count')),
+    cap_quantity INTEGER NOT NULL CHECK (cap_quantity > 0),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    PRIMARY KEY (org_id, meter)
+);
 
 -- npm dist-tag registry. One row per (package, tag); tag names are freeform strings
 -- npm sends on `npm publish --tag <tag>`. UNIQUE(package_id, tag) enforces one version

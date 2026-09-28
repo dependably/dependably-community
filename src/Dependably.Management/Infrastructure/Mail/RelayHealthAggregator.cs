@@ -47,7 +47,9 @@ public sealed class RelayHealthAggregator
 
     public async Task<RelayHealthView> GetAsync(CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: one shared SMTP transport, so its health is one fact about every tenant's
+        // email channel — including when a single-mode tenant request asks for it.
+        await using var conn = await _db.OpenCrossTenantAsync("instance relay health", ct);
 
         var affected = new { enabled = 1, failed = "failed" };
 

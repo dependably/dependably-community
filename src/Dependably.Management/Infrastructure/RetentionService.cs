@@ -1,5 +1,7 @@
 using Dapper;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
+using Dependably.Infrastructure.Usage;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure;
@@ -28,6 +30,13 @@ namespace Dependably.Infrastructure;
 ///   - org_stats_history: delete rows older than STATS_HISTORY_RETENTION_DAYS (365) — the storage
 ///     limit on the dashboard's daily trend history. Observational only, same posture as the
 ///     table itself: nothing downstream of this sweep gates or reports on the rows it deletes.
+///   - usage_events: delete rows older than 396 days — a fixed, unconditional horizon, not the
+///     per-org activity_retention_days knob (usage_events is a billing input shared by every org's
+///     invoice history, not a per-tenant activity log). 396 days covers a full trailing year plus
+///     a month of slack for late billing disputes/reruns.
+///   - usage_hourly: delete buckets older than 425 days (~14 months) — hourly granularity is not
+///     needed past the horizon usage_daily (kept indefinitely) already answers at day granularity;
+///     also a fixed horizon, unconditional on any per-org setting.
 ///   - JWT revocations / invites / SAML one-shots: expiry prunes.
 /// Respects the shutdown CancellationToken — stops at the next checkpoint.
 /// </summary>
@@ -82,6 +91,45 @@ public sealed class RetentionService : ScheduledBackgroundService
         }
     }
 
+    // Fixed, unconditional retention horizons for the two usage-metering tables this sweep
+    // bounds. Neither is affected by any org's activity_retention_days: usage_events/usage_hourly
+    // are billing inputs shared across every org's invoice, not a per-tenant activity log.
+    internal const int UsageEventsRetentionDays = 396;
+    internal const int UsageHourlyRetentionDays = 425;
+
+    /// <summary>
+    /// Deletes usage_events rows older than <see cref="UsageEventsRetentionDays"/> (396 days) —
+    /// a fixed horizon, the same for every org regardless of activity_retention_days.
+    /// </summary>
+    internal async Task PruneUsageEventsAsync(CancellationToken ct)
+    {
+        var cutoff = _time.GetUtcNow().AddDays(-UsageEventsRetentionDays);
+        int deleted = await _usageEvents.PruneOlderThanAsync(cutoff, ct);
+        if (deleted > 0)
+        {
+            _logger.LogInformation(
+                "Retention GC: pruned {Count} usage_events row(s) older than {Days} days.",
+                deleted, UsageEventsRetentionDays);
+        }
+    }
+
+    /// <summary>
+    /// Deletes usage_hourly buckets older than <see cref="UsageHourlyRetentionDays"/> (425 days,
+    /// ~14 months) — a fixed horizon, the same for every org regardless of activity_retention_days.
+    /// usage_daily (kept indefinitely) already answers at day granularity past this point.
+    /// </summary>
+    internal async Task PruneUsageHourlyAsync(CancellationToken ct)
+    {
+        var cutoff = _time.GetUtcNow().AddDays(-UsageHourlyRetentionDays);
+        int deleted = await _usageRollups.PruneHourlyOlderThanAsync(cutoff, ct);
+        if (deleted > 0)
+        {
+            _logger.LogInformation(
+                "Retention GC: pruned {Count} usage_hourly row(s) older than {Days} days.",
+                deleted, UsageHourlyRetentionDays);
+        }
+    }
+
     /// <summary>
     /// Injected dependencies for <see cref="RetentionService"/>. Bundles all DI services into
     /// one record so the constructor stays within the parameter-count gate (S107).
@@ -102,7 +150,9 @@ public sealed class RetentionService : ScheduledBackgroundService
         Mail.EmailOutboxRepository EmailOutbox,
         Mail.EmailOutboxPolicy EmailOutboxPolicy,
         OrgStatsHistoryRepository StatsHistory,
-        BackgroundJobRunRepository JobRuns);
+        BackgroundJobRunRepository JobRuns,
+        UsageEventRepository UsageEvents,
+        UsageRollupRepository UsageRollups);
 
     private readonly IMetadataStore _db;
     private readonly IBlobStore _blobs;
@@ -120,6 +170,8 @@ public sealed class RetentionService : ScheduledBackgroundService
     private readonly Mail.EmailOutboxPolicy _emailOutboxPolicy;
     private readonly OrgStatsHistoryRepository _statsHistory;
     private readonly BackgroundJobRunRepository _jobRuns;
+    private readonly UsageEventRepository _usageEvents;
+    private readonly UsageRollupRepository _usageRollups;
 
     protected override string CronEnvKey => "GC_SCHEDULE";
     protected override string DefaultCron => "0 3 * * *";
@@ -150,6 +202,8 @@ public sealed class RetentionService : ScheduledBackgroundService
         _emailOutboxPolicy = deps.EmailOutboxPolicy;
         _statsHistory = deps.StatsHistory;
         _jobRuns = deps.JobRuns;
+        _usageEvents = deps.UsageEvents;
+        _usageRollups = deps.UsageRollups;
     }
 
     protected override Task RunTickAsync(CancellationToken ct) => RunGcPassAsync(ct);
@@ -159,6 +213,10 @@ public sealed class RetentionService : ScheduledBackgroundService
     // here, not in a per-table helper.
     internal async Task RunGcPassAsync(CancellationToken ct)
     {
+        // xtenant: an instance-wide retention sweep: it walks every org and counts shared-blob
+        // references across tenants.
+        using var ownerScope = DbScope.CrossTenant("retention sweep");
+
         // A headless edge node holds no durable registry tier and no per-tenant retention
         // policy, so GC is inert there — edge mode force-disables retention (not in the allowlist).
         if (_airGap.IsJobDisabled("retention"))
@@ -278,6 +336,11 @@ public sealed class RetentionService : ScheduledBackgroundService
         // highest-volume writer is a 60-second timer, so without this sweep it grows without bound
         // and its own readers slow down as it does.
         await PruneBackgroundJobRunsAsync(ct);
+
+        // Delete usage_events/usage_hourly rows past their fixed, unconditional horizons — a
+        // billing input bounded the same way for every org, never by activity_retention_days.
+        await PruneUsageEventsAsync(ct);
+        await PruneUsageHourlyAsync(ct);
 
         _logger.LogInformation("Retention GC pass complete.");
     }

@@ -3,6 +3,7 @@ using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -26,6 +27,7 @@ public sealed partial class RpmController
     [HttpGet("/rpm/packages/{file}")]
     [HttpHead("/rpm/packages/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "rpm")]
     public async Task<IActionResult> Download(string file, CancellationToken ct)
     {
         // ValidateUpstreamSegment (not Validate): the filename is composed into the upstream
@@ -123,22 +125,29 @@ public sealed partial class RpmController
         var hitStore = versionMatch.Version.Origin == "proxy"
             ? _svc.BlobStore.Cache
             : _svc.BlobStore.Registry;
-        var stream = await hitStore.GetAsync(blobKey, ct);
-        if (stream is null)
+        var redirect = await TryRedirectPackageAsync(
+            hitStore, blobKey, versionMatch.Version.SizeBytes, BlobOrigins.FromColumn(versionMatch.Version.Origin), ct);
+        Stream? stream = null;
+        if (redirect is null)
         {
-            return NotFound();
+            stream = await hitStore.GetAsync(blobKey, ct);
+            if (stream is null)
+            {
+                return NotFound();
+            }
+
+            Response.Headers["X-Cache"] = "HIT";
+            if (uploadedEtag is not null)
+            {
+                Response.Headers.ETag = uploadedEtag;
+                Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
-        Response.Headers["X-Cache"] = "HIT";
-        if (uploadedEtag is not null)
-        {
-            Response.Headers.ETag = uploadedEtag;
-            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
         await _svc.Audit.LogActivityAsync(orgId, "rpm", versionMatch.Version.Purl, "download",
             token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         await _svc.Packages.IncrementDownloadCountAsync(versionMatch.Version.Id, ct);
-        return File(stream, "application/x-rpm", file);
+        return redirect ?? File(stream!, "application/x-rpm", file);
     }
 
     /// <summary>
@@ -180,17 +189,23 @@ public sealed partial class RpmController
         }
 
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey routes to cache tier.
-        var stream = await _svc.BlobStore.Cache.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
-        if (stream is null)
+        string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
+        var redirect = await TryRedirectPackageAsync(_svc.BlobStore.Cache, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, ct);
+        Stream? stream = null;
+        if (redirect is null)
         {
-            return NotFound();
-        }
+            stream = await _svc.BlobStore.Cache.GetAsync(storeKey, ct);
+            if (stream is null)
+            {
+                return NotFound();
+            }
 
-        Response.Headers["X-Cache"] = "HIT";
-        if (cachedEtag is not null)
-        {
-            Response.Headers.ETag = cachedEtag;
-            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            Response.Headers["X-Cache"] = "HIT";
+            if (cachedEtag is not null)
+            {
+                Response.Headers.ETag = cachedEtag;
+                Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
         string purl = caFacts.Purl ?? string.Empty;
@@ -199,8 +214,20 @@ public sealed partial class RpmController
         // Increment per-tenant download count on the global plane. Enqueued off the request
         // path — the row already exists (seeded durably at first-fetch).
         await _svc.TenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, _svc.Time.GetUtcNow(), ct);
-        return File(stream, "application/x-rpm", file);
+        return redirect ?? File(stream!, "application/x-rpm", file);
     }
+
+    /// <summary>
+    /// The presigned-redirect decision for a cached <c>.rpm</c>. A package is addressed by its
+    /// NEVRA filename and content-hashed in repodata, so it is immutable; repodata itself is
+    /// served by a different action and never reaches this. The HEAD twin shares the download
+    /// action, and the seam refuses HEAD, so a HEAD keeps its header-only answer.
+    /// </summary>
+    private async Task<IActionResult?> TryRedirectPackageAsync(
+        IBlobStore store, string storeKey, long sizeBytes, BlobOrigin origin, CancellationToken ct)
+        => _svc.Presign is not { } presign
+            ? null
+            : await presign.TryRedirectAsync(HttpContext, store, storeKey, sizeBytes, origin, "rpm", ct);
 
     // Bound on how much of a staged RPM the signature verifier will read. Generous (the blob is
     // already staged and bounded by the upstream size limit); the verifier streams the covered
@@ -516,6 +543,7 @@ public sealed partial class RpmController
     /// </remarks>
     [HttpGet("/rpm/Packages/{bucket}/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "rpm")]
     public Task<IActionResult> DownloadNested(string bucket, string file, CancellationToken ct)
         => Download(file, ct);
 
@@ -525,6 +553,7 @@ public sealed partial class RpmController
     [HttpGet("/rpm/repodata/{file}")]
     [HttpHead("/rpm/repodata/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Metadata, "rpm")]
     public async Task<IActionResult> Repodata(string file, CancellationToken ct)
     {
         // ValidateUpstreamSegment (not Validate): the filename is embedded verbatim in the
@@ -946,6 +975,7 @@ public sealed partial class RpmController
     [HttpHead("/rpm/repodata/RPM-GPG-KEY")]
     [HttpHead("/rpm/repodata/repomd.xml.key")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Metadata, "rpm")]
     public async Task<IActionResult> GpgKey(CancellationToken ct)
     {
         string orgId = CurrentTenantId();

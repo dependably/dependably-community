@@ -135,7 +135,10 @@ public sealed class EmailOutboxRepository
         CancellationToken ct)
     {
         var now = _time.GetUtcNow();
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: MaxDepth bounds the whole instance's outbox, so the depth probe counts every
+        // tenant's rows; the row it inserts names its own org_id, which may be none for operator
+        // mail.
+        await using var conn = await _db.OpenCrossTenantAsync("outbox depth bound", ct);
 
         if (await CountNonTerminalAsync(conn, ct) >= policy.MaxDepth)
         {
@@ -415,7 +418,8 @@ public sealed class EmailOutboxRepository
     public async Task<EmailOutboxBacklog> GetBacklogAsync(CancellationToken ct = default)
     {
         var nonTerminal = new { pending = EmailOutboxStates.Pending, sending = EmailOutboxStates.Sending };
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: an instance-wide gauge over every tenant's mail and the operator's org-less mail.
+        await using var conn = await _db.OpenCrossTenantAsync("instance email backlog gauge", ct);
 
         // Four plain aggregates rather than one CASE-projecting statement: under SQLite a bare
         // `CASE … THEN <text column> END` projection loses its declared type and comes back as a

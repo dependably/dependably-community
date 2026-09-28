@@ -140,7 +140,7 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
         // Run the hard-delete pass directly (not waiting on cron).
         var svc = _factory.Services.GetServices<IHostedService>()
             .OfType<TenantHardDeleteService>().Single();
-        await svc.RunPassAsync(default);
+        await TestHarnessDbScope.AsHostAsync(() => svc.RunPassAsync(default));
 
         // Verify cascade: orgs row is gone.
         await using (var conn = await db.OpenAsync())
@@ -174,7 +174,7 @@ public sealed class SoftDeleteTenantTests : IClassFixture<DependablyMultiFactory
         // Soft-delete just happened — well within the 30-day grace.
         var svc = _factory.Services.GetServices<IHostedService>()
             .OfType<TenantHardDeleteService>().Single();
-        await svc.RunPassAsync(default);
+        await TestHarnessDbScope.AsHostAsync(() => svc.RunPassAsync(default));
 
         var db = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await db.OpenAsync();

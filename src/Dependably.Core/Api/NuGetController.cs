@@ -1,5 +1,6 @@
 using Dependably.Api.NuGetProtocol;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Usage;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -34,6 +35,7 @@ public partial class NuGetController : ControllerBase
     [HttpGet("/nuget/v3/index.json")]
     [HttpGet("/nuget/index.json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> ServiceIndex(CancellationToken ct) =>
         Task.FromResult(_serviceIndex.Handle(HttpContext));
 
@@ -50,6 +52,7 @@ public partial class NuGetController : ControllerBase
     /// </summary>
     [HttpGet("/nuget/query")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> Search(
         [FromQuery] string? q,
         [FromQuery] int skip = 0,
@@ -72,6 +75,7 @@ public partial class NuGetController : ControllerBase
     /// </summary>
     [HttpGet("/nuget/autocomplete")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> Autocomplete(
         [FromQuery] string? q,
         [FromQuery] string? id,
@@ -101,6 +105,7 @@ public partial class NuGetController : ControllerBase
     [HttpGet("/nuget/registration5-gz-semver1/{id}/")]
     [HttpGet("/nuget/registration5-gz-semver1/{id}/index.json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> RegistrationIndex(string id, CancellationToken ct)
         => _registration.RegistrationIndexAsync(HttpContext, CurrentTenantId(), id, semVer2: false, ct);
 
@@ -110,6 +115,7 @@ public partial class NuGetController : ControllerBase
     [HttpGet("/nuget/registration5-gz-semver2/{id}/")]
     [HttpGet("/nuget/registration5-gz-semver2/{id}/index.json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> RegistrationIndexSemVer2(string id, CancellationToken ct)
         => _registration.RegistrationIndexAsync(HttpContext, CurrentTenantId(), id, semVer2: true, ct);
 
@@ -122,6 +128,7 @@ public partial class NuGetController : ControllerBase
     [HttpGet("/nuget/registration5-semver1/{id}/{version}.json")]
     [HttpGet("/nuget/registration5-gz-semver1/{id}/{version}.json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> RegistrationLeaf(string id, string version, CancellationToken ct)
         => _registration.RegistrationLeafAsync(HttpContext, CurrentTenantId(), id, version, semVer2: false, ct);
 
@@ -129,6 +136,7 @@ public partial class NuGetController : ControllerBase
     [HttpGet("/nuget/registration5-semver2/{id}/{version}.json")]
     [HttpGet("/nuget/registration5-gz-semver2/{id}/{version}.json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> RegistrationLeafSemVer2(string id, string version, CancellationToken ct)
         => _registration.RegistrationLeafAsync(HttpContext, CurrentTenantId(), id, version, semVer2: true, ct);
 
@@ -137,12 +145,14 @@ public partial class NuGetController : ControllerBase
     /// <summary>GET /nuget/flatcontainer/{id}/index.json — version list</summary>
     [HttpGet("/nuget/flatcontainer/{id}/index.json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "nuget")]
     public Task<IActionResult> FlatcontainerVersions(string id, CancellationToken ct)
         => _flatContainer.FlatcontainerVersionsAsync(HttpContext, CurrentTenantId(), id, ct);
 
     /// <summary>GET /nuget/flatcontainer/{id}/{version}/{file} — package download</summary>
     [HttpGet("/nuget/flatcontainer/{id}/{version}/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "nuget")]
     public Task<IActionResult> Flatcontainer(string id, string version, string file, CancellationToken ct)
         => _flatContainer.FlatcontainerDownloadAsync(HttpContext, CurrentTenantId(), id, version, file, ct);
 
@@ -193,6 +203,7 @@ public partial class NuGetController : ControllerBase
     /// <summary>GET /nuget/symbols/{id}/{version}/{file}</summary>
     [HttpGet("/nuget/symbols/{id}/{version}/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "nuget")]
     public Task<IActionResult> GetSymbols(string id, string version, string file, CancellationToken ct)
         => _publishHandler.GetSymbolsAsync(HttpContext, CurrentTenantId(), id, version, file, ct);
 
@@ -207,6 +218,7 @@ public partial class NuGetController : ControllerBase
     /// </summary>
     [HttpGet("/nuget/symbols/{pdbName}/{key:regex(^[[0-9a-fA-F]]{{40}}$)}/{pdbNameEcho}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "nuget")]
     public Task<IActionResult> GetSymbolFile(string pdbName, string key, string pdbNameEcho, CancellationToken ct)
         => _publishHandler.GetSymbolFileAsync(HttpContext, CurrentTenantId(), pdbName, key, ct);
 

@@ -27,17 +27,28 @@ public sealed class GlobalTenantStorageResolver : ITenantStorageResolver
 
     public IBlobStore Cache => _tiered.Cache;
 
-    public async Task<IBlobStore> GetRegistryAsync(string tenantId, CancellationToken ct = default)
+    public async Task<IBlobStore> GetRegistryAsync(string tenantId, bool forWrite = false, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
 
         // Gate 1: tenant lifecycle status. The CHECK constraint on orgs.status keeps this
-        // bounded to active|suspended|archived|deleting; anything but 'active' refuses.
-        // The query returns null when the org row is missing — that's also a refusal.
+        // bounded to active|suspended|archived|deleting|read_only. The query returns null when
+        // the org row is missing — that's also a refusal.
         string status = await conn.QuerySingleOrDefaultAsync<string?>(
             "SELECT status FROM orgs WHERE id = @tenantId",
             new { tenantId }) ?? throw new TenantNotReadyException(tenantId, TenantNotReadyReason.NotFound, "tenant not found");
-        if (status != "active")
+        if (status == "read_only")
+        {
+            // Narrower than the other non-active values: a read intent is admitted (the org's
+            // existing registry-tier artefacts stay servable), a write intent is refused — same
+            // defence-in-depth posture as TenantStatusEnforcementMiddleware's protocol-plane write
+            // gate, independent of whichever surface called this resolver.
+            if (forWrite)
+            {
+                throw new TenantNotReadyException(tenantId, TenantNotReadyReason.ReadOnlyWrite, "status='read_only'");
+            }
+        }
+        else if (status != "active")
         {
             throw new TenantNotReadyException(tenantId, TenantNotReadyReason.StatusInactive, $"status='{status}'");
         }

@@ -237,7 +237,9 @@ public sealed class CacheArtifactRepository
     public async Task<bool> BlobKeyReferencedElsewhereAsync(
         string blobKey, string excludingId, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: a blob is referenced elsewhere if any tenant's binding names it; a tenant-bound
+        // count would miss the others and let the caller delete a blob still in use.
+        await using var conn = await _db.OpenCrossTenantAsync("shared cache blob reference count", ct);
         // xtenant: a physical blob is shared across tenants, so whether it is still referenced is
         // deliberately asked of every org's rows and bindings — scoping to one tenant would let a
         // delete strand another tenant's bytes.
@@ -275,7 +277,11 @@ public sealed class CacheArtifactRepository
     public async Task<TenantProxyEviction> EvictTenantProxyVersionsForNameAsync(
         string orgId, string ecosystem, string name, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: the shared cache_artifact row may be deleted only when no tenant's access row
+        // remains, and its FK cascade reaches every tenant; a tenant-bound NOT EXISTS would see
+        // only the caller's (just removed) rows. Each statement still filters the caller's own rows
+        // by org_id.
+        await using var conn = await _db.OpenCrossTenantAsync("tenant proxy eviction", ct);
 
         // taa.blob_key comes back alongside ca.blob_key rather than coalesced into it: the two are
         // reclaimed on different conditions. The shared key goes only when no tenant retains

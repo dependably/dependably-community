@@ -379,7 +379,13 @@ public sealed class PackagePublishService : IPackagePublishService
         string blobKey = BlobKeys.HostedArtifact(
             request.OrgId, request.Ecosystem, request.PurlName, request.Version, sha256, request.Filename);
 
-        var registry = await _storage.GetRegistryAsync(request.OrgId, ct);
+        // forWrite: true — the single hosted-publish path for every ecosystem that flows through
+        // this service. TenantStatusEnforcementMiddleware already refuses a read-only org's
+        // protocol-plane publish before it reaches here; this is the storage-layer backstop that
+        // also covers the management-plane bulk-import path (ImportController), which the
+        // middleware's plane-level allowance for /api/v1/ writes does not — importing still writes
+        // real hosted artefact bytes, which is exactly what a read-only org must not grow.
+        var registry = await _storage.GetRegistryAsync(request.OrgId, forWrite: true, ct);
         try
         {
             await registry.PutAsync(blobKey, artifactStream, ct);

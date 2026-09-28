@@ -1,3 +1,5 @@
+using Dependably.Infrastructure.RowLevelSecurity;
+
 namespace Dependably.Infrastructure;
 
 /// <summary>
@@ -35,6 +37,28 @@ public sealed class SubdomainTenantMiddleware
     {
         var ctx = await resolver.ResolveAsync(context, context.RequestAborted);
         context.Items[TenantContext.HttpItemsKey] = ctx;
-        await _next(context);
+
+        // Bind the rest of the request's database work to the resolved tenant under Postgres
+        // row-level security. Declaring it as a DbScope rather than leaving it to the HttpContext
+        // lookup is what carries the tenant into work the request starts but does not await to
+        // completion — a cache rebuild that outlives the request that began it. Shared work keyed
+        // across tenants (the blob-keyed upstream fetch) declares its own org instead.
+        using (DeclareRequestScope(ctx))
+        {
+            await _next(context);
+        }
     }
+
+    /// <summary>
+    /// The row-level-security scope a request runs under: its tenant for a tenant host, the
+    /// cross-tenant scope for the apex (system-admin) surface, and none for an uninitialized
+    /// installation, whose tenant-scoped reads raise rather than guess a tenant.
+    /// </summary>
+    private static IDisposable? DeclareRequestScope(TenantContext ctx) => ctx switch
+    {
+        { IsTenant: true, TenantId: { Length: > 0 } tenantId } => DbScope.ForOrg(tenantId),
+        // xtenant: the apex surface is the system administrator's, cross-tenant by design.
+        { IsApex: true } => DbScope.CrossTenant("apex request"),
+        _ => null,
+    };
 }

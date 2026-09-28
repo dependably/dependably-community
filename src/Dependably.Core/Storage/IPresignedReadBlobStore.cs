@@ -34,10 +34,11 @@ public interface IPresignedReadBlobStore
 
     /// <summary>
     /// Mints a GET-only URL for <paramref name="key"/> valid until <paramref name="expiresAt"/>.
-    /// Returns <c>null</c> when the blob does not exist or when this store cannot sign — both
-    /// mean "fall back to streaming", never "fail the request". Implementations verify existence
-    /// before signing so an evicted blob keeps the streaming path's fall-through behaviour
-    /// instead of handing the client a URL that 404s at the object store.
+    /// Returns <c>null</c> when this store cannot sign, which means "fall back to streaming",
+    /// never "fail the request". Implementations only mint and make no existence check:
+    /// <see cref="BlobPresignService"/> is the one caller, and it has already established that
+    /// the blob is present, so an evicted blob keeps the streaming path's fall-through behaviour
+    /// without a second round-trip to the object store per redirect.
     /// </summary>
     Task<Uri?> TryCreatePresignedReadUrlAsync(string key, DateTimeOffset expiresAt, CancellationToken ct = default);
 }

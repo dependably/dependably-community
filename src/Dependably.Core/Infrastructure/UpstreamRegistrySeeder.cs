@@ -117,6 +117,11 @@ public static class UpstreamRegistrySeeder
                 storedSecret = envelope.Protect(d.Secret);
             }
 
+            if (!UpstreamRegistryRepository.IsCredentialFree(d.AuthType ?? "anonymous", d.Username, storedSecret is not null, d.Url))
+            {
+                await UpstreamRegistryRepository.RecordCredentialedAsync(conn, orgId, d.Ecosystem, tx, ct);
+            }
+
             await conn.ExecuteAsync(new CommandDefinition(
                 """
                 INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type, username, secret)

@@ -4,9 +4,12 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using Dapper;
+using Dependably.Infrastructure.Observability;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Protocol;
 using Dependably.Storage;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 
 namespace Dependably.Infrastructure;
 
@@ -92,7 +95,8 @@ public sealed partial class SchemaInitializer
         Func<CancellationToken, Task>? afterBaseSchema = null, CancellationToken ct = default)
     {
         string sql = await ReadSchemaAsync(_db.Provider, ct);
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: schema DDL and one-time migrations run as the owner and span every tenant.
+        await using var conn = await _db.OpenCrossTenantAsync("schema apply and migrations", ct);
 
         // Serialize the entire apply across processes so replicas booting together against one
         // Postgres run the DDL and the one-time migrations exactly once instead of racing them
@@ -100,7 +104,11 @@ public sealed partial class SchemaInitializer
         bool locked = await TryAcquireMigrationLockAsync(conn, ct);
         try
         {
+            // Before the schema: the views are declared security_invoker under enforcement, which
+            // Postgres older than 15 rejects, so an unsupported server must be ruled out first.
+            await RuleOutUnsupportedServerAsync(conn, ct);
             await ApplySchemaAsync(conn, sql, ct, afterBaseSchema);
+            await ApplyRowLevelSecurityAsync(conn, ct);
         }
         finally
         {
@@ -109,6 +117,88 @@ public sealed partial class SchemaInitializer
                 await ReleaseMigrationLockAsync(conn);
             }
         }
+    }
+
+    // A defaulted enforce on Postgres older than 15 cannot declare its views security_invoker; fall
+    // back before the view DDL runs. An explicit enforce continues, and boot verification refuses it.
+    private async Task RuleOutUnsupportedServerAsync(DbConnection conn, CancellationToken ct)
+    {
+        if (EnforcedRowLevelSecurity is not { Explicit: false })
+        {
+            return;
+        }
+
+        int version = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT current_setting('server_version_num')::int", cancellationToken: ct));
+        if (version < PostgresRowLevelSecurityInstaller.MinimumServerVersionNum)
+        {
+            FallBackToOwnerSessions(
+                $"Postgres server_version_num {version} is below {PostgresRowLevelSecurityInstaller.MinimumServerVersionNum}.");
+        }
+    }
+
+    // The default never blocks startup: run with row-level security off, exactly as before the
+    // backstop existed, and say why.
+    private void FallBackToOwnerSessions(string reason)
+    {
+        ((NpgsqlMetadataStore)_db).FallBackToOwnerSessions(reason);
+        DependablyMeter.RecordRowLevelSecurityEnforced(false);
+        _logger.LogWarning(
+            "Postgres row-level security is on by default for this multi-tenant deployment but could not be "
+            + "enabled, so the node runs without it and the application's org_id filter remains the isolation "
+            + "layer: {Reason} Fix the cause to enable it, or set {Setting}=off to acknowledge running without it.",
+            reason, RowLevelSecurityOptions.ModeKey);
+    }
+
+    /// <summary>Row-level security settings when the store enforces them; null otherwise.</summary>
+    private RowLevelSecurityOptions? EnforcedRowLevelSecurity =>
+        _db is NpgsqlMetadataStore { RowLevelSecurity.Enforced: true } pg ? pg.RowLevelSecurity : null;
+
+    // Last, after every table, migration and view exists: coverage is derived from the live
+    // catalogue, so it has to see the final shape — including a table a reshape just recreated
+    // without its policy. Then refuse to boot on anything that would leave the backstop open.
+    private async Task ApplyRowLevelSecurityAsync(DbConnection conn, CancellationToken ct)
+    {
+        if (EnforcedRowLevelSecurity is not { } options)
+        {
+            return;
+        }
+
+        var problems = new List<string>();
+        try
+        {
+            await PostgresRowLevelSecurityInstaller.ApplyAsync(conn, options);
+            problems.AddRange(await PostgresRowLevelSecurityInstaller.FindProblemsAsync(conn, options));
+            if (problems.Count == 0)
+            {
+                problems.AddRange(await PostgresRowLevelSecurityInstaller.ProbeTenantSessionAsync(_db, options, ct));
+            }
+        }
+        catch (PostgresException ex) when (!options.Explicit && !ex.IsTransient)
+        {
+            // A defaulted enforce on a database that refuses to host it — typically a connecting
+            // role without CREATEROLE — falls back below; an explicit enforce lets the error stop
+            // boot. A dropped connection or a transient server error is not a refusal: it stops
+            // boot too, so a blip can never switch the backstop off for the life of the process.
+            problems.Add($"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        if (problems.Count > 0)
+        {
+            if (options.Explicit)
+            {
+                throw new InvalidOperationException(
+                    $"{RowLevelSecurityOptions.ModeKey}=enforce, but row-level security would not hold: "
+                    + string.Join(" ", problems));
+            }
+
+            FallBackToOwnerSessions(string.Join(" ", problems));
+            return;
+        }
+
+        DependablyMeter.RecordRowLevelSecurityEnforced(true);
+        _logger.LogInformation(
+            "Postgres row-level security enforced: tenant connections run as {RlsRole}", options.RoleName);
     }
 
     private async Task ApplySchemaAsync(
@@ -155,12 +245,10 @@ public sealed partial class SchemaInitializer
         await _spdxSeeder.RunAsync(conn, ct);
     }
 
-    // Phase 2 — the ledgered one-time migrations, in the order the comments below justify. The
-    // sequence is load-bearing: several entries state explicitly why they must follow the one
-    // above them, so entries are appended, never reordered.
-    private async Task ApplyOneTimeMigrationsAsync(DbConnection conn)
+    // The repairs that run on every boot rather than once per database. Each is unledgered for
+    // the reason its comment gives, and they run before any ledgered migration.
+    private async Task RunUnledgeredRepairsAsync(DbConnection conn)
     {
-
         // Canonicalize stored account emails and install the case-insensitive unique indexes.
         // Deliberately not a ledgered one-shot and deliberately not part of the base schema file:
         // a database already holding case-variant duplicate accounts cannot take the index, and it
@@ -208,6 +296,14 @@ public sealed partial class SchemaInitializer
         // this database still admits the retired spelling, so a one-shot recorded as applied would
         // leave cutover-window rows wrong forever. See SchemaInitializer.VexJustificationVocabulary.cs.
         await NormalizeVexJustificationVocabularyAsync(conn);
+    }
+
+    // Phase 2 — the ledgered one-time migrations, in the order the comments below justify. The
+    // sequence is load-bearing: several entries state explicitly why they must follow the one
+    // above them, so entries are appended, never reordered.
+    private async Task ApplyOneTimeMigrationsAsync(DbConnection conn)
+    {
+        await RunUnledgeredRepairsAsync(conn);
 
         await RunOnceAsync(conn, "reset_nuget_vuln_checked_at", ResetNuGetVulnCheckedAtAsync);
         await RunOnceAsync(conn, "fix_npm_purl_encoding", FixNpmPurlEncodingAsync);
@@ -260,6 +356,10 @@ public sealed partial class SchemaInitializer
         // CHECK permits the 'block_all' value the data rewrite writes.
         await RunOnceAsync(conn, "expand_block_deprecated_check", ExpandBlockDeprecatedCheckAsync, transactional: false);
         await RunOnceAsync(conn, "migrate_block_deprecated_to_block_all", MigrateBlockDeprecatedToBlockAllAsync);
+        // transactional: false — same writable_schema + schema_version-bump shape as the other
+        // CHECK widens above; idempotent on both providers, so an un-recorded partial run is
+        // repeated harmlessly next boot.
+        await RunOnceAsync(conn, "expand_org_status_check_with_read_only", ExpandOrgStatusCheckWithReadOnlyAsync, transactional: false);
         await RunOnceAsync(conn, "migrate_maven_reserved_prefixes_to_table", MigrateMavenReservedPrefixesToTableAsync);
         await RunOnceAsync(conn, "drop_redundant_pkg_version_vulns_version_index", DropRedundantPkgVersionVulnsVersionIndexAsync);
         // Drop the global UNIQUE on package_versions.purl. The constraint was added when purl was a
@@ -430,7 +530,8 @@ public sealed partial class SchemaInitializer
         // and unreclaimable. This fresh ledger entry re-runs the identical, idempotent backfill+delete
         // once more to catalogue them onto the cache plane and drop the package_versions rows; on a DB
         // with none it is a no-op.
-        // xtenant: cross-tenant one-shot; cache_artifact is global and the delete keys on the proxy discriminator.
+        // xtenant: cross-tenant one-shot; cache_artifact is global and the delete keys on the proxy
+        // discriminator.
         await RunOnceAsync(conn, "migrate_proxy_versions_to_cache_plane_2", MigrateProxyVersionsToCachePlaneAsync, transactional: false);
         await RunOnceAsync(conn, "delete_migrated_proxy_package_versions_2", DeleteMigratedProxyPackageVersionsAsync);
 
@@ -498,6 +599,21 @@ public sealed partial class SchemaInitializer
         await RunOnceAsync(
             conn, "expand_signature_status_check_unanchored", ExpandSignatureStatusCheckAsync,
             transactional: false);
+
+        // Widen the Postgres numeric columns whose declared type is narrower there than on SQLite
+        // (SchemaInitializer.NumericColumns.cs): INTEGER byte counts and caps to BIGINT, so a value
+        // over 2 GiB is storable, and REAL scores and thresholds to DOUBLE PRECISION, so a policy
+        // threshold round-trips exactly. Fresh installs get the wide types from the CREATE TABLE
+        // blocks. Last, so every table it widens exists in its current shape.
+        await RunOnceAsync(
+            conn, "widen_postgres_numeric_columns", WidenPostgresNumericColumnsAsync, transactional: false);
+
+        // Record in upstream_credential_history every credentialed upstream the retained audit log
+        // shows was ever added, including ones deleted before the table existed. Once is enough for
+        // the full trail; the every-boot convergence re-reads recent events for the blue-green
+        // window. See SchemaInitializer.UpstreamCredentialHistory.cs.
+        await RunOnceAsync(
+            conn, "backfill_upstream_credential_history_from_audit", BackfillUpstreamCredentialHistoryFromAuditAsync);
     }
 
     // Phase 3 — the views (which need every table and column to exist) and the convergence sweeps
@@ -538,6 +654,13 @@ public sealed partial class SchemaInitializer
         // UPDATE is idempotent (WHERE first_seen_at IS NULL) and index-free but cheap: it matches
         // nothing once every row already carries a value.
         await BackfillFindingsFirstSeenAtAsync(conn);
+
+        // Records every (org, ecosystem) that has a credentialed upstream in
+        // upstream_credential_history, so its proxied objects never become edge-cacheable once
+        // that upstream is deleted. Every boot rather than once, for the blue-green reason above:
+        // the previous release writes credentialed upstreams without recording them. See
+        // SchemaInitializer.UpstreamCredentialHistory.cs.
+        await ConvergeUpstreamCredentialHistoryAsync(conn);
     }
 
     // Projects oci_blobs.license_spdx onto whichever catalogue row the image cast — the
@@ -1399,6 +1522,63 @@ public sealed partial class SchemaInitializer
         // gained the column through a plain ALTER ADD COLUMN, where this rewrite no-ops by design.
         await VerifyCheckAdmitsAsync(
             conn, "org_settings", "block_deprecated", "block_all", allowMissingCheck: true);
+    }
+
+    // Extend the orgs.status CHECK constraint to include 'read_only' — the billing-dunning
+    // posture between 'active' and full lockout: TenantStatusEnforcementMiddleware admits
+    // GET/HEAD/OPTIONS on every plane and any write on the management plane for it, refusing only
+    // a state-changing protocol-plane request. New databases pick this up from the CREATE TABLE
+    // statements in Schema.sql / Schema.pg.sql; this migration brings existing databases in line.
+    //
+    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers an install that
+    // never carried one.
+    //
+    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern. The
+    // literal REPLACE is exact because the stored text is verbatim what Schema.sql emitted, and it
+    // is a no-op on any database whose orgs table does not carry the narrower clause.
+    private Task ExpandOrgStatusCheckWithReadOnlyAsync(DbConnection conn)
+    {
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
+                ALTER TABLE orgs DROP CONSTRAINT IF EXISTS orgs_status_check;
+                ALTER TABLE orgs ADD  CONSTRAINT orgs_status_check
+                    CHECK (status IN ('active', 'suspended', 'archived', 'deleting', 'read_only'));
+                """)
+            : ExpandOrgStatusCheckWithReadOnlySqliteAsync(conn);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
+        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
+                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
+                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
+    private static async Task ExpandOrgStatusCheckWithReadOnlySqliteAsync(DbConnection conn)
+    {
+        const string oldCheck = "CHECK (status IN ('active','suspended','archived','deleting'))";
+        const string newCheck = "CHECK (status IN ('active','suspended','archived','deleting','read_only'))";
+
+        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
+        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
+        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
+        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
+        try
+        {
+            await conn.ExecuteAsync("""
+                UPDATE sqlite_schema
+                SET sql = REPLACE(sql, @old, @new)
+                WHERE type = 'table' AND name = 'orgs'
+                """, new { old = oldCheck, @new = newCheck });
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+        }
+        // allowMissingCheck: a database that gained orgs.status through the additive ALTER ADD
+        // COLUMN carries no CHECK on it at all, so this rewrite no-ops by design there, and every
+        // status write is validated by SystemController instead.
+        await VerifyCheckAdmitsAsync(conn, "orgs", "status", "read_only", allowMissingCheck: true);
     }
 
     // Extend the alert.type CHECK constraint to include 'sbom_policy_violation', the alert an

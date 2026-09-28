@@ -16,7 +16,9 @@ namespace Dependably.Infrastructure.Migration;
 ///
 /// <para>Both default <c>--source</c> to <c>DB_PATH</c> and <c>--target</c> to
 /// <c>DB_CONNECTION_STRING</c>, so a container already configured for either provider needs only
-/// the missing half on the command line.</para>
+/// the missing half on the command line. The <c>DB_CONNECTION_STRING</c> fallback takes
+/// <c>DB_USERNAME</c> / <c>DB_PASSWORD</c> overrides exactly as the web host does
+/// (<see cref="PostgresConnectionString"/>); an explicit <c>--target</c> is used verbatim.</para>
 /// </summary>
 public static class DatabaseMigrationCommand
 {
@@ -182,7 +184,8 @@ public static class DatabaseMigrationCommand
             "  Dependably {VerifyVerb} [--source <sqlite-path>] [--target <postgres-conn>]\n" +
             "\n" +
             "  --source       Path to the SQLite database. Defaults to DB_PATH.\n" +
-            "  --target       Postgres connection string. Defaults to DB_CONNECTION_STRING.\n" +
+            "  --target       Postgres connection string, used verbatim. Defaults to DB_CONNECTION_STRING\n" +
+            "                 with DB_USERNAME / DB_PASSWORD applied.\n" +
             "  --force        Replace data already present in the target. Destructive.\n" +
             "  --skip-verify  Copy without the verification pass (run {VerifyVerb} separately).",
             MigrateVerb, VerifyVerb, VerifyVerb);
@@ -223,7 +226,7 @@ public static class DatabaseMigrationCommand
                 sourcePath ?? configuration["DB_PATH"],
                 "No SQLite source. Pass --source <path> or set DB_PATH.");
             string resolvedTarget = Require(
-                target ?? configuration["DB_CONNECTION_STRING"],
+                target ?? PostgresConnectionString.FromConfiguration(configuration),
                 "No Postgres target. Pass --target <connection-string> or set DB_CONNECTION_STRING.");
 
             return verb == VerifyVerb && (force || skipVerification)

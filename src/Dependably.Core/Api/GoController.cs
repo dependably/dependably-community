@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -103,6 +104,7 @@ public sealed class GoController : OrgScopedControllerBase
     /// </summary>
     [HttpGet("/go/{**path}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.PerResponse, "go")]
     public async Task<IActionResult> HandleGoRequest(string path, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -125,6 +127,7 @@ public sealed class GoController : OrgScopedControllerBase
         // client verifies the transparency-log signatures itself, so bytes pass through untouched.
         if (path.StartsWith("sumdb/", StringComparison.OrdinalIgnoreCase))
         {
+            HttpContext.ClassifyEgress(EgressKind.Metadata);
             return await ServeSumDbAsync(orgId, path["sumdb/".Length..], settings, ct);
         }
 
@@ -141,6 +144,12 @@ public sealed class GoController : OrgScopedControllerBase
     private async Task<IActionResult> DispatchAsync(
         string path, string orgId, OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
+        // Only the module zip is artifact bytes; @latest, @v/list, .info, and .mod are the metadata
+        // the go client resolves it through.
+        HttpContext.ClassifyEgress(path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+            ? EgressKind.Artifact
+            : EgressKind.Metadata);
+
         // @latest: {module}/@latest
         if (path.EndsWith("/@latest", StringComparison.OrdinalIgnoreCase))
         {
@@ -312,31 +321,9 @@ public sealed class GoController : OrgScopedControllerBase
             return BadRequest($"Invalid version: {versionError}");
         }
 
-        string blobKey = BlobKeys.Go(orgId, module, version, ext);
-
-        // Cache HIT — serve from blob store.
-        var cached = await _svc.Blobs.GetAsync(blobKey, ct);
-        if (cached is not null)
+        if (await TryServeCachedArtifactAsync(orgId, module, version, ext, settings, token, ct) is { } hit)
         {
-            // Block gate runs before the cached bytes are served. Only the .zip (the module code)
-            // is recorded on the global plane, so it is the artefact an operator block / OSV
-            // finding attaches to; a blocked module stops serving on every subsequent download,
-            // not only at never-before-fetched time. The .info / .mod metadata sidecars carry no
-            // cache_artifact row and no block state, so they fall through unblocked.
-            if (ext == "zip"
-                && await IsGoZipBlockedAsync(orgId, module, version, settings, token, ct))
-            {
-                return StatusCode(StatusCodes.Status403Forbidden);
-            }
-
-            Response.Headers["X-Cache"] = "HIT";
-            if (ext == "zip")
-            {
-                // The .zip is the primary cached artefact; record the hit so the eviction
-                // pipeline and vulnerability-response query see this tenant's access.
-                await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl: null, ct);
-            }
-            return File(cached, ContentTypeFor(ext));
+            return hit;
         }
 
         // Cache MISS — refuse the upstream fetch when proxying is off (ProxyPassthroughEffective
@@ -346,6 +333,82 @@ public sealed class GoController : OrgScopedControllerBase
         return proxyOff || await _svc.Reserved.IsReservedAsync(orgId, "golang", module, ct)
             ? NotFound()
             : await ServeArtifactFromUpstreamsAsync(orgId, module, version, ext, token, ct);
+    }
+
+    /// <summary>
+    /// Cache HIT — serves an artefact already in the blob store, by presigned redirect when one is
+    /// allowed, else by stream, after the block gate; returns null on a miss so the caller fetches
+    /// upstream.
+    /// </summary>
+    private async Task<IActionResult?> TryServeCachedArtifactAsync(
+        string orgId, string module, string version, string ext,
+        OrgSettings? settings, TokenRecord? token, CancellationToken ct)
+    {
+        string blobKey = BlobKeys.Go(orgId, module, version, ext);
+
+        // A module .zip that may be redirected is probed for rather than opened, so a hit answered
+        // by a redirect does not open (and then discard) a stream from the object store; the probe
+        // is the only existence check the redirect makes. Go has no hosted publish path, so a
+        // cached zip is always proxied bytes.
+        var probe = ext == "zip" && _svc.Presign is { } presign
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, "go", ct)
+            : null;
+        var cached = probe is null ? await _svc.Blobs.GetAsync(blobKey, ct) : null;
+        if (cached is null && probe is not { Exists: true })
+        {
+            return null;
+        }
+
+        // Block gate runs before the cached bytes are served. Only the .zip (the module code)
+        // is recorded on the global plane, so it is the artefact an operator block / OSV
+        // finding attaches to; a blocked module stops serving on every subsequent download,
+        // not only at never-before-fetched time. The .info / .mod metadata sidecars carry no
+        // cache_artifact row and no block state, so they fall through unblocked.
+        if (ext == "zip"
+            && await IsGoZipBlockedAsync(orgId, module, version, settings, token, ct))
+        {
+            if (cached is not null)
+            {
+                await cached.DisposeAsync();
+            }
+
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        var redirect = probe is not null ? await TryRedirectZipAsync(orgId, module, version, probe, ct) : null;
+        if (redirect is null)
+        {
+            cached ??= await _svc.Blobs.GetAsync(blobKey, ct);
+        }
+
+        if (redirect is null && cached is null)
+        {
+            return null;
+        }
+
+        Response.Headers["X-Cache"] = "HIT";
+        if (ext == "zip")
+        {
+            // The .zip is the primary cached artefact; record the hit so the eviction
+            // pipeline and vulnerability-response query see this tenant's access.
+            await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl: null, ct);
+        }
+        return redirect ?? File(cached!, ContentTypeFor(ext));
+    }
+
+    /// <summary>
+    /// The presigned-redirect decision for a cached module <c>.zip</c>, the only Go artefact that
+    /// redirects. A module version's zip is immutable — the checksum database pins it — while
+    /// <c>@v/list</c> and <c>@latest</c> move, and <c>.info</c>/<c>.mod</c> are classified as the
+    /// metadata the client resolves through, so all four stream. The size comes from this org's
+    /// recorded row; with no recorded size the zip streams. The probe already found the zip
+    /// present, so signing does not ask the store again.
+    /// </summary>
+    private async Task<IActionResult?> TryRedirectZipAsync(
+        string orgId, string module, string version, RedirectProbe probe, CancellationToken ct)
+    {
+        var (_, sizeBytes) = await ResolveZipContentMetadataAsync(orgId, module, version, ct);
+        return await _svc.Presign!.TryRedirectAsync(HttpContext, probe, sizeBytes, ct);
     }
 
     /// <summary>
@@ -833,9 +896,15 @@ public sealed class GoController : OrgScopedControllerBase
     /// cache plane at all — <see cref="RecordZipFirstFetchOrRefuseAsync"/> turns that into a 503.
     /// </summary>
     private async Task<string?> RecordZipCacheAccessAsync(
-        string orgId, string module, string version, string blobKey, string? upstreamUrl, CancellationToken ct)
+        string orgId, string module, string version, string blobKey, string? upstreamUrl, CancellationToken ct,
+        long stagedLength = 0)
     {
         var (contentHash, sizeBytes) = await ResolveZipContentMetadataAsync(orgId, module, version, ct);
+        if (sizeBytes <= 0 && stagedLength > 0)
+        {
+            // A genuine first fetch has no index row to read a size from; the staged bytes do.
+            sizeBytes = stagedLength;
+        }
 
         string filename = $"{version}.zip";
         string? cacheArtifactId = await _svc.CacheRecorder.RecordAccessAsync(
@@ -902,7 +971,8 @@ public sealed class GoController : OrgScopedControllerBase
         string orgId, string module, string version, string blobKey, string upstreamUrl,
         Stream staged, CancellationToken ct)
     {
-        string? cacheArtifactId = await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct);
+        long stagedLength = await _svc.Blobs.GetStagedSizeAsync(staged, BlobKeys.StoreKey(blobKey), ct);
+        string? cacheArtifactId = await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct, stagedLength);
         if (cacheArtifactId is not null)
         {
             return cacheArtifactId;
@@ -1107,4 +1177,5 @@ public sealed record GoControllerServices(
     GoLatestFetchCoordinator LatestCoordinator,
     ReservedNamespaceService Reserved,
     BlockGateService BlockGate,
-    LicenseRepository Licenses);
+    LicenseRepository Licenses,
+    BlobPresignService? Presign = null);

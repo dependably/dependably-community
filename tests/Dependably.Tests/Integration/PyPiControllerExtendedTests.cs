@@ -1215,6 +1215,7 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
 
                 string malId = $"MAL-2026-{Guid.NewGuid():N}";
                 string vulnId = Guid.NewGuid().ToString("N");
+                string now = TimeProvider.System.GetUtcNow().ToUtcIso();
                 await conn.ExecuteAsync(
                     """
                     INSERT INTO vulnerabilities
@@ -1222,18 +1223,16 @@ public sealed class PyPiControllerExtendedTests : IClassFixture<DependablyFactor
                          modified_at, fetched_at)
                     VALUES
                         (@vulnId, @malId, 'pypi', @name, NULL, NULL,
-                         'Malicious code in package',
-                         strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                         strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                         'Malicious code in package', @now, @now)
                     """,
-                    new { vulnId, malId, name });
+                    new { vulnId, malId, name, now });
                 string pvvId = Guid.NewGuid().ToString("N");
                 await conn.ExecuteAsync(
                     "INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind) VALUES (@pvvId, @versionId, @vulnId, 'package_version')",
                     new { pvvId, versionId, vulnId });
                 await conn.ExecuteAsync(
-                    "UPDATE package_versions SET vuln_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @versionId",
-                    new { versionId });
+                    "UPDATE package_versions SET vuln_checked_at = @now WHERE id = @versionId",
+                    new { versionId, now });
             }
 
             // Ensure block_malicious = block (the default, but be explicit).

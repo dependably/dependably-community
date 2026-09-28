@@ -37,16 +37,22 @@ CREATE TABLE IF NOT EXISTS orgs (
     slug        TEXT NOT NULL UNIQUE,
     deleted_at  TEXT
         CHECK (deleted_at IS NULL OR deleted_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
-    -- Tenant lifecycle gate. 'active' is the only state that admits a request: every
+    -- Tenant lifecycle gate. 'active' is the only state that admits every request: every
     -- ITenantResolver selects this column into TenantContext.Status, and
     -- TenantStatusEnforcementMiddleware refuses a non-active tenant before it reaches a
     -- controller (protocol plane, management API, and login alike), while
     -- ITenantStorageResolver.GetRegistryAsync applies the same check independently as defence
-    -- in depth. system_admin flips 'suspended' via PATCH /api/v1/system/tenants/{slug}/status;
-    -- 'archived'/'deleting' get the identical refusal but currently have no operator-facing
-    -- trigger in community.
+    -- in depth. system_admin flips 'suspended'/'read_only' via
+    -- PATCH /api/v1/system/tenants/{slug}/status; 'archived'/'deleting' get the identical
+    -- full-lockout refusal but currently have no operator-facing trigger in community.
+    -- 'read_only' is a narrower posture than the other three: TenantStatusEnforcementMiddleware
+    -- admits GET/HEAD/OPTIONS on every plane and any write on the management plane, refusing
+    -- only a state-changing request on the protocol plane (publish/upload/delete/yank) — an old
+    -- binary predating this value still fails closed, because its blanket `!= 'active'` check
+    -- reads 'read_only' as a full lockout, which is a strict subset of the narrower refusal this
+    -- release applies, so it is safe mid-cutover.
     status      TEXT NOT NULL DEFAULT 'active'
-                CHECK (status IN ('active','suspended','archived','deleting')),
+                CHECK (status IN ('active','suspended','archived','deleting','read_only')),
     -- Reserved for future multi-region routing. Fully dormant in community.
     region      TEXT,
     -- Per-tenant entitlement document; canonical schema + strict binding live in enterprise.
@@ -57,6 +63,15 @@ CREATE TABLE IF NOT EXISTS orgs (
     -- Aggregate storage quota for the tenant's hosted artefacts. NULL = unlimited.
     -- Checked in PackagePublishService before the blob put; exceeding returns 413.
     storage_quota_bytes BIGINT,
+    -- Usage-cap posture, recomputed by the hourly usage rollup from org_usage_caps and the org's
+    -- month-to-date usage, and by PATCH /api/v1/system/tenants/{slug}/usage-limits for the org it
+    -- changes. Every ITenantResolver selects it into TenantContext.UsagePosture.
+    -- 'uploads_refused': a capped meter is at or above 100 %; TenantStatusEnforcementMiddleware
+    -- refuses protocol-plane POST/PUT/PATCH with 402. 'downloads_throttled': a capped egress meter
+    -- is at or above 110 %; writes are refused the same way and the org's protocol-plane requests
+    -- draw on the small tenant-throttled rate-limit budget. An org with no caps stays 'normal'.
+    usage_posture TEXT NOT NULL DEFAULT 'normal'
+        CHECK (usage_posture IN ('normal','uploads_refused','downloads_throttled')),
     created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
 );
@@ -65,15 +80,15 @@ CREATE TABLE IF NOT EXISTS org_settings (
     org_id              TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
     anonymous_pull      INTEGER NOT NULL DEFAULT 0,
     allowlist_mode      INTEGER NOT NULL DEFAULT 0,
-    max_upload_bytes    INTEGER,
-    max_upload_bytes_pypi   INTEGER,
-    max_upload_bytes_npm    INTEGER,
-    max_upload_bytes_nuget  INTEGER,
-    max_upload_bytes_maven  INTEGER,        -- per-ecosystem Maven cap; falls back to max_upload_bytes
-    max_upload_bytes_rpm    INTEGER,        -- per-ecosystem RPM cap; falls back to max_upload_bytes
-    max_upload_bytes_oci    INTEGER,        -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
-    max_upload_bytes_cargo  INTEGER,        -- per-ecosystem Cargo cap; falls back to max_upload_bytes
-    max_upload_bytes_hex    INTEGER,        -- per-ecosystem Hex cap; falls back to max_upload_bytes
+    max_upload_bytes    BIGINT,
+    max_upload_bytes_pypi   BIGINT,
+    max_upload_bytes_npm    BIGINT,
+    max_upload_bytes_nuget  BIGINT,
+    max_upload_bytes_maven  BIGINT,        -- per-ecosystem Maven cap; falls back to max_upload_bytes
+    max_upload_bytes_rpm    BIGINT,        -- per-ecosystem RPM cap; falls back to max_upload_bytes
+    max_upload_bytes_oci    BIGINT,        -- per-ecosystem OCI (Docker) cap; falls back to max_upload_bytes
+    max_upload_bytes_cargo  BIGINT,        -- per-ecosystem Cargo cap; falls back to max_upload_bytes
+    max_upload_bytes_hex    BIGINT,        -- per-ecosystem Hex cap; falls back to max_upload_bytes
     keep_versions       INTEGER,            -- GC: max versions to retain per package per ecosystem
     keep_days           INTEGER,            -- GC: evict proxy blobs unused for this many days
     activity_retention_days INTEGER DEFAULT 90,  -- GC: delete activity rows older than this; NULL resolves to the ACTIVITY_RETENTION_DAYS instance default (90) so activity is bounded by default
@@ -89,7 +104,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     license_publish_enforcement_mode TEXT NOT NULL DEFAULT 'off'
                               CHECK (license_publish_enforcement_mode IN ('off','warn','block')),
     proxy_passthrough_enabled INTEGER NOT NULL DEFAULT 1,
-    max_osv_score_tolerance   REAL    NOT NULL DEFAULT 10.0,
+    max_osv_score_tolerance   DOUBLE PRECISION    NOT NULL DEFAULT 10.0,
     -- Supply-chain hold: minimum upstream-release age (hours) before a proxy-fetched version
     -- clears the block gate. NULL = policy off. The gate is re-evaluated on every serve and
     -- index render; held versions serve again automatically once they age past the threshold.
@@ -124,7 +139,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- Policy for CISA-KEV-listed (exploited-in-the-wild) advisories. See Schema.sql.
     block_kev                 TEXT    NOT NULL DEFAULT 'off' CHECK (block_kev IN ('off', 'warn', 'block')),
     -- EPSS exploitation-probability ceiling (0.0–1.0); NULL = policy off. See Schema.sql.
-    max_epss_tolerance        REAL,
+    max_epss_tolerance        DOUBLE PRECISION,
     -- Narrower companion to block_kev: fires only on advisories CISA marks as used in
     -- ransomware campaigns (vulnerabilities.kev_known_ransomware = 1). Independent of block_kev
     -- rather than a mode on it, because the two dimensions are orthogonal and the useful policy
@@ -149,7 +164,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- holds its meaning across retrains but always blocks a proportion regardless of absolute
     -- risk. Neither dominates, so the operator states which they mean. Both may be set; either
     -- tripping is enough.
-    max_epss_percentile_tolerance REAL,
+    max_epss_percentile_tolerance DOUBLE PRECISION,
     -- Enrichment-overlay gate: refuses artefacts whose advisories CISA Vulnrichment marks as
     -- having active exploitation (ssvc_exploitation = 'active'). Distinct from block_kev: KEV is
     -- a curated catalogue of ~1400 CVEs, while SSVC assesses far more and grades them, so this
@@ -268,6 +283,23 @@ CREATE TABLE IF NOT EXISTS system_admins (
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
 );
 
+-- Instance-scoped API tokens for the system-admin tenant-lifecycle endpoints. No org_id: the
+-- table is instance-level, not tenant-scoped, and stays outside OrgIdFilteringComplianceTests.
+-- personal-data: excluded — created_by is an authorship-provenance stamp on an operator-plane row; system_admins itself is excluded from the tenant self-service export for the same reason
+CREATE TABLE IF NOT EXISTS system_tokens (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    token_hash  TEXT NOT NULL UNIQUE,
+    created_by  TEXT NOT NULL REFERENCES system_admins(id) ON DELETE CASCADE,
+    description TEXT,            -- optional free-text label set at creation time.
+    created_at  TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    expires_at  TEXT NOT NULL
+        CHECK (expires_at IS NULL OR expires_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    last_used_at TEXT    -- updated (throttled ~60s) when the token authenticates a request.
+        CHECK (last_used_at IS NULL OR last_used_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+
 CREATE TABLE IF NOT EXISTS packages (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -302,7 +334,7 @@ CREATE TABLE IF NOT EXISTS package_versions (
     version     TEXT NOT NULL,
     purl        TEXT NOT NULL,
     blob_key    TEXT NOT NULL,
-    size_bytes  INTEGER NOT NULL DEFAULT 0,
+    size_bytes  BIGINT NOT NULL DEFAULT 0,
     checksum_sha256 TEXT,
     yanked      INTEGER NOT NULL DEFAULT 0,
     yank_reason TEXT,
@@ -522,7 +554,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     summary         TEXT,
     severity        TEXT            -- NULL when the advisory carries no CVSS severity classification
                     CHECK (severity IN ('CRITICAL','HIGH','MEDIUM','LOW')),
-    cvss_score      REAL,
+    cvss_score      DOUBLE PRECISION,
     affected_versions TEXT,         -- JSON array of version strings
     osv_json        TEXT,           -- full OSV advisory JSON; source of truth for the rich detail panel
     published_at    TEXT
@@ -535,7 +567,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     is_kev          INTEGER NOT NULL DEFAULT 0,
     kev_checked_at  TEXT
         CHECK (kev_checked_at IS NULL OR kev_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
-    epss_score      REAL,
+    epss_score      DOUBLE PRECISION,
     epss_checked_at TEXT
         CHECK (epss_checked_at IS NULL OR epss_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     -- Tracker enrichment overlay: the NIST NVD CVSS band and the CISA Vulnrichment SSVC
@@ -556,7 +588,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     -- question evaluates the OLDER of the pair.
     nvd_severity    TEXT
                     CHECK (nvd_severity IN ('CRITICAL','HIGH','MEDIUM','LOW','NONE')),
-    nvd_score       REAL,
+    nvd_score       DOUBLE PRECISION,
     nvd_checked_at  TEXT
         CHECK (nvd_checked_at IS NULL OR nvd_checked_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     nvd_asserted_at TEXT
@@ -592,7 +624,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     -- FIRST.org publishes a percentile alongside every EPSS probability. The percentile is a rank
     -- and is stable across model retrains, where the raw probability is a model output that
     -- shifts — so a threshold expressed against this column keeps meaning what an operator meant.
-    epss_percentile REAL
+    epss_percentile DOUBLE PRECISION
                     CHECK (epss_percentile IS NULL OR (epss_percentile >= 0.0 AND epss_percentile <= 1.0)),
     -- Three more KEV catalogue fields, same posture as kev_known_ransomware/kev_date_added/
     -- kev_due_date above: already present in the same feed response, previously discarded.
@@ -628,7 +660,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     exploit_code_sources     TEXT,     -- JSON array of source names; same convention as mal_compromised_versions
     -- The CVE Program's own cvelistV5 CVSS/CWE/SSVC overlay. Deliberately SEPARATE columns from
     -- nvd_*/ssvc_* above — see Schema.sql for the disagreement-hiding rationale.
-    cvelist_cvss_score       REAL,
+    cvelist_cvss_score       DOUBLE PRECISION,
     cvelist_cvss_severity    TEXT
                               CHECK (cvelist_cvss_severity IN ('CRITICAL','HIGH','MEDIUM','LOW','NONE')),
     cvelist_cvss_provenance  TEXT,     -- free text (e.g. 'cna', 'CISA-ADP'); not a closed set, no CHECK
@@ -860,6 +892,7 @@ CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON service_tokens(token_hash)
 CREATE INDEX IF NOT EXISTS idx_user_tokens_org ON user_tokens(org_id);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON user_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_service_tokens_org ON service_tokens(org_id);
+CREATE INDEX IF NOT EXISTS idx_system_tokens_created_by ON system_tokens(created_by);
 CREATE INDEX IF NOT EXISTS idx_invites_created_by ON invites(created_by);
 
 CREATE TABLE IF NOT EXISTS blocklist (
@@ -1116,6 +1149,21 @@ CREATE TABLE IF NOT EXISTS upstream_registry (
 CREATE INDEX IF NOT EXISTS idx_upstream_registry_org_eco
     ON upstream_registry(org_id, ecosystem, position);
 
+-- Per-(org, ecosystem) record that the org has at some point configured an upstream carrying a
+-- credential (UpstreamRegistryRepository.IsCredentialFree is false). Nothing records which upstream
+-- supplied a given proxied object, so once an org has fetched through a credentialed upstream its
+-- proxied objects for that ecosystem can never be shown to be public: a row here keeps them off
+-- the CloudFront edge-cacheable prefix even after the credentialed upstream is deleted. Written
+-- when such an upstream is added or seeded, and converged from upstream_registry on every boot.
+-- Rows are never removed except with the org; there is deliberately no API to clear one.
+CREATE TABLE IF NOT EXISTS upstream_credential_history (
+    org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ecosystem     TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (first_seen_at IS NULL OR first_seen_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    PRIMARY KEY (org_id, ecosystem)
+);
+
 -- Per-(org, ecosystem, package name) upstream source pin. The first upstream to successfully
 -- serve a proxied name binds that name to that upstream host; a later proxy fetch resolving the
 -- same name from a DIFFERENT upstream host is refused. This is the non-OCI analogue of OCI
@@ -1289,8 +1337,8 @@ CREATE TABLE IF NOT EXISTS rpm_metadata (
     rpm_group           TEXT,
     source_rpm          TEXT,
     url                 TEXT,
-    installed_size      INTEGER NOT NULL DEFAULT 0,
-    archive_size        INTEGER NOT NULL DEFAULT 0,
+    installed_size      BIGINT NOT NULL DEFAULT 0,
+    archive_size        BIGINT NOT NULL DEFAULT 0,
     header_start        INTEGER NOT NULL DEFAULT 0,
     header_end          INTEGER NOT NULL DEFAULT 0,
     requires_json       TEXT NOT NULL DEFAULT '[]',
@@ -1344,7 +1392,7 @@ CREATE TABLE IF NOT EXISTS maven_version_files (
     classifier          TEXT,
     extension           TEXT NOT NULL,
     blob_key            TEXT NOT NULL,
-    size_bytes          INTEGER NOT NULL DEFAULT 0,
+    size_bytes          BIGINT NOT NULL DEFAULT 0,
     checksum_sha256     TEXT,
     checksum_sha1       TEXT,
     checksum_md5        TEXT,
@@ -1399,7 +1447,7 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     digest        TEXT NOT NULL,
     org_id        TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     media_type    TEXT NOT NULL,
-    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    size_bytes    BIGINT NOT NULL DEFAULT 0,
     blob_key      TEXT NOT NULL,
     cached_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (cached_at IS NULL OR cached_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
@@ -1456,7 +1504,7 @@ CREATE TABLE IF NOT EXISTS oci_uploads (
     org_id         TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     repository     TEXT NOT NULL,
     staging_path   TEXT NOT NULL,
-    received_bytes INTEGER NOT NULL DEFAULT 0,
+    received_bytes BIGINT NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
         CHECK (created_at IS NULL OR created_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
     PRIMARY KEY (upload_id, org_id)
@@ -1838,6 +1886,122 @@ CREATE TABLE IF NOT EXISTS org_stats_history (
 -- the same reasoning as idx_audit_event_occurred_at.
 CREATE INDEX IF NOT EXISTS idx_org_stats_history_day ON org_stats_history (day);
 
+-- Usage metering. The raw, append-only record of what each org consumed, and the rollups a
+-- billing system reads. Measurement only: nothing here knows a plan, an allowance, or a price —
+-- that interpretation belongs to whatever rates the rollups.
+--
+-- None of these tables references orgs. A metering row must outlive its org's hard delete so
+-- the final period can still be invoiced; the rows carry no personal data (an org id, a meter,
+-- a byte count), so surviving the org erases nothing a data subject is owed.
+--
+-- One row per metered response. event_id is minted once per request and is the idempotency key:
+-- a writer that retries a batch inserts with ON CONFLICT (event_id) DO NOTHING, so a replay can
+-- never double-count. delivery separates bytes the app streamed from bytes it handed to the
+-- object store or CDN with a redirect; a redirect records the object's full size when it is
+-- issued, and object_ref names the object so the figure can be reconciled against the store's
+-- own access logs. quantity is bytes for every meter defined today.
+CREATE TABLE IF NOT EXISTS usage_events (
+    event_id    TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL,
+    meter       TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes')),
+    delivery    TEXT NOT NULL DEFAULT 'streamed' CHECK (delivery IN ('streamed', 'redirect')),
+    quantity    BIGINT NOT NULL CHECK (quantity >= 0),
+    source      TEXT NOT NULL,
+    object_ref  TEXT,
+    occurred_at TEXT COLLATE "C" NOT NULL
+        CHECK (occurred_at IS NULL OR occurred_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$')
+);
+CREATE INDEX IF NOT EXISTS idx_usage_events_org_occurred ON usage_events (org_id, occurred_at);
+-- Serves the hourly rollup and the retention sweep, which both range over occurred_at across
+-- every org.
+CREATE INDEX IF NOT EXISTS idx_usage_events_occurred ON usage_events (occurred_at);
+
+-- Hourly totals per (org, meter), recomputed from usage_events over a lookback window. A
+-- recompute replaces a bucket's totals outright, so running it twice yields the same rows.
+-- redirect_quantity is the part of quantity that was delivered by redirect. request_count is the
+-- number of metered events in the bucket, an operator capacity signal and never a billed meter;
+-- buckets rolled up before the column existed read 0.
+CREATE TABLE IF NOT EXISTS usage_hourly (
+    org_id            TEXT NOT NULL,
+    meter             TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes')),
+    bucket            TEXT COLLATE "C" NOT NULL
+        CHECK (bucket ~ '^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$'),
+    quantity          BIGINT NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+    redirect_quantity BIGINT NOT NULL DEFAULT 0 CHECK (redirect_quantity >= 0),
+    request_count     BIGINT NOT NULL DEFAULT 0,
+    computed_at       TEXT NOT NULL
+        CHECK (computed_at IS NULL OR computed_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    PRIMARY KEY (org_id, meter, bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_hourly_bucket ON usage_hourly (bucket);
+
+-- Daily totals per (org, meter): the table a billing system reads. The egress meters are sums of
+-- usage_hourly; storage_bytes is the day's high-water mark of billable storage, and a write to it
+-- only ever raises the stored value, so a recompute or a second capture in the same day cannot
+-- lower the mark. request_count is the sum of the hourly request_count for the egress meters and
+-- 0 for storage_bytes.
+CREATE TABLE IF NOT EXISTS usage_daily (
+    org_id            TEXT NOT NULL,
+    meter             TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes')),
+    bucket            TEXT COLLATE "C" NOT NULL
+        CHECK (bucket ~ '^\d{4}-\d{2}-\d{2}$'),
+    quantity          BIGINT NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+    redirect_quantity BIGINT NOT NULL DEFAULT 0 CHECK (redirect_quantity >= 0),
+    request_count     BIGINT NOT NULL DEFAULT 0,
+    computed_at       TEXT NOT NULL
+        CHECK (computed_at IS NULL OR computed_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    PRIMARY KEY (org_id, meter, bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_bucket ON usage_daily (bucket);
+
+-- One storage capture per org per UTC day; the last capture of the day wins. billable_bytes is
+-- what a customer pays to store: uploaded artifacts only, from org_billable_storage_bytes.
+-- cache_attributed_bytes is the proxy-cache share of org_storage_bytes, recorded for analysis and
+-- never billed.
+-- The count columns are operator capacity and abuse signals, never billed meters:
+--   hosted_version_count  uploaded non-OCI package versions;
+--   oci_manifest_count    uploaded OCI manifests and indexes (oci_blobs rows of a manifest media type);
+--   oci_blob_count        the other uploaded oci_blobs rows (layers and configs);
+--   cache_entry_count     proxy-cache entries the org reaches (its tenant_artifact_access rows);
+--   db_row_count          rows across a fixed list of org-scoped growth tables
+--                         (StorageSnapshotRepository.DbFootprintTables); tables with no org_id
+--                         cannot be attributed to an org and are excluded.
+-- hosted_version_count + oci_manifest_count is the org's artefact count.
+CREATE TABLE IF NOT EXISTS storage_snapshot (
+    org_id                 TEXT NOT NULL,
+    day_utc                TEXT COLLATE "C" NOT NULL
+        CHECK (day_utc ~ '^\d{4}-\d{2}-\d{2}$'),
+    hosted_bytes           BIGINT NOT NULL DEFAULT 0,
+    oci_uploaded_bytes     BIGINT NOT NULL DEFAULT 0,
+    cache_attributed_bytes BIGINT NOT NULL DEFAULT 0,
+    billable_bytes         BIGINT NOT NULL DEFAULT 0,
+    hosted_version_count   BIGINT NOT NULL DEFAULT 0,
+    oci_manifest_count     BIGINT NOT NULL DEFAULT 0,
+    oci_blob_count         BIGINT NOT NULL DEFAULT 0,
+    cache_entry_count      BIGINT NOT NULL DEFAULT 0,
+    db_row_count           BIGINT NOT NULL DEFAULT 0,
+    captured_at            TEXT NOT NULL
+        CHECK (captured_at IS NULL OR captured_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    PRIMARY KEY (org_id, day_utc)
+);
+CREATE INDEX IF NOT EXISTS idx_storage_snapshot_day ON storage_snapshot (day_utc);
+
+-- Per-meter usage caps an operator sets through PATCH /api/v1/system/tenants/{slug}/usage-limits.
+-- Quantities only, in each meter's own unit: bytes for egress_bytes, egress_metadata_bytes and
+-- storage_bytes, uploaded artefacts for artifact_count. No row for a meter means that meter is not
+-- capped, and an org with no rows is metered but never enforced. The hourly usage rollup compares
+-- each cap with the org's month-to-date usage and writes the result to orgs.usage_posture.
+-- Configuration, not metering, so the rows go with their org on hard delete.
+CREATE TABLE IF NOT EXISTS org_usage_caps (
+    org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    meter        TEXT NOT NULL
+        CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes', 'artifact_count')),
+    cap_quantity BIGINT NOT NULL CHECK (cap_quantity > 0),
+    updated_at   TEXT COLLATE "C" NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+        CHECK (updated_at IS NULL OR updated_at ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z$'),
+    PRIMARY KEY (org_id, meter)
+);
+
 -- npm dist-tag registry. One row per (package, tag); tag names are freeform strings
 -- npm sends on `npm publish --tag <tag>`. UNIQUE(package_id, tag) enforces one version
 -- per tag per package. org_id is denormalized from packages so org_id-scoped queries
@@ -2201,7 +2365,7 @@ CREATE TABLE IF NOT EXISTS project_documents (
     tool_name          TEXT,
     tool_version       TEXT,
     sha256             TEXT NOT NULL,
-    size_bytes         INTEGER NOT NULL DEFAULT 0,
+    size_bytes         BIGINT NOT NULL DEFAULT 0,
     blob_key           TEXT NOT NULL,
     uploaded_by        TEXT,
     -- Ingest projection revision. See Schema.sql for the full rationale.
@@ -2342,7 +2506,7 @@ CREATE TABLE IF NOT EXISTS project_vuln_analysis (
     reachability       TEXT CHECK (reachability IN ('reachable','not-observed','unknown','imported-not-called')),
     confidence         TEXT CHECK (confidence IN ('high','medium','low')),
     sarif_suppressed   INTEGER NOT NULL DEFAULT 0,
-    security_severity  REAL,
+    security_severity  DOUBLE PRECISION,
     severity_origin    TEXT CHECK (severity_origin IN ('asserted','representative')),
     fingerprint        TEXT,
     updated_by         TEXT,

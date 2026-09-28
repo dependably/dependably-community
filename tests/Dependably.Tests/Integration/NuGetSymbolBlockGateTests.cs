@@ -199,8 +199,8 @@ public sealed class NuGetSymbolBlockGateTests : IAsyncLifetime
         var store = _factory.Services.GetRequiredService<IMetadataStore>();
         await using var conn = await store.OpenAsync();
         await conn.ExecuteAsync(
-            "UPDATE package_versions SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @versionId",
-            new { versionId });
+            "UPDATE package_versions SET revoked_at = @now WHERE id = @versionId",
+            new { versionId, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
     }
 
     private async Task SetLicenseSpdxAsync(string versionId, string spdx)
@@ -232,15 +232,15 @@ public sealed class NuGetSymbolBlockGateTests : IAsyncLifetime
 
         string vulnId = Guid.NewGuid().ToString("N");
         string malId = $"MAL-2026-{Guid.NewGuid():N}";
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities
                 (id, osv_id, ecosystem, package_name, severity, cvss_score, summary, modified_at, fetched_at)
             VALUES
-                (@vulnId, @malId, 'nuget', @pkgName, NULL, NULL, 'Malicious code',
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (@vulnId, @malId, 'nuget', @pkgName, NULL, NULL, 'Malicious code', @now, @now)
             """,
-            new { vulnId, malId, pkgName = seeded.Id.ToLowerInvariant() });
+            new { vulnId, malId, pkgName = seeded.Id.ToLowerInvariant(), now });
         await conn.ExecuteAsync(
             """
             INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind)
@@ -250,8 +250,8 @@ public sealed class NuGetSymbolBlockGateTests : IAsyncLifetime
         // A stamped vuln_checked_at is what ENABLES the malicious arm — an unscanned row is
         // deferred, not blocked.
         await conn.ExecuteAsync(
-            "UPDATE package_versions SET vuln_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @versionId",
-            new { versionId = seeded.VersionId });
+            "UPDATE package_versions SET vuln_checked_at = @now WHERE id = @versionId",
+            new { versionId = seeded.VersionId, now });
     }
 
     private async Task SetProxySettingAsync(string? blockMalicious = null, string? blockRevoked = null)

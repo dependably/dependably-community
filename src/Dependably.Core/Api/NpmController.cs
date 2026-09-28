@@ -1,5 +1,6 @@
 using Dependably.Api.NpmProtocol;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Usage;
 using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -43,6 +44,7 @@ public class NpmController : ControllerBase
     [EnableRateLimiting("anon")]
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static",
         Justification = "MVC route action: ASP.NET Core does not invoke static action methods.")]
+    // egress-ok: liveness ping, a fixed few bytes of JSON
     public IActionResult Ping() => NpmDistTagsHandler.Ping();
 
     /// <summary>
@@ -56,6 +58,7 @@ public class NpmController : ControllerBase
     /// </summary>
     [HttpGet("/npm/-/whoami")]
     [EnableRateLimiting("anon")]
+    // egress-ok: identity echo, a fixed few bytes of JSON
     public Task<IActionResult> WhoAmI(CancellationToken ct)
         => _distTags.WhoAmIAsync(HttpContext, CurrentTenantId(), ct);
 
@@ -64,18 +67,21 @@ public class NpmController : ControllerBase
     /// <summary>GET /npm/{package} — CouchDB package metadata</summary>
     [HttpGet("/npm/{package}")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "npm")]
     public Task<IActionResult> GetPackage(string package, CancellationToken ct)
         => _packument.GetPackageAsync(HttpContext, CurrentTenantId(), package, ct);
 
     /// <summary>GET /npm/@{scope}/{package} — scoped package metadata</summary>
     [HttpGet("/npm/@{scope}/{package}")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "npm")]
     public Task<IActionResult> GetScopedPackage(string scope, string package, CancellationToken ct)
         => _packument.GetScopedPackageAsync(HttpContext, CurrentTenantId(), scope, package, ct);
 
     /// <summary>GET /npm/{package}/{version} — specific version metadata</summary>
     [HttpGet("/npm/{package}/{version}")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "npm")]
     public Task<IActionResult> GetVersion(string package, string version, CancellationToken ct)
         => _packument.GetVersionAsync(HttpContext, CurrentTenantId(), package, version, ct);
 
@@ -84,12 +90,14 @@ public class NpmController : ControllerBase
     /// <summary>GET /npm/tarballs/{pkg}/{file} — tarball download</summary>
     [HttpGet("/npm/tarballs/{pkg}/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "npm")]
     public Task<IActionResult> GetTarball(string pkg, string file, CancellationToken ct)
         => _tarball.GetTarballAsync(HttpContext, CurrentTenantId(), pkg, file, ct);
 
     /// <summary>GET /npm/tarballs/@{scope}/{pkg}/{file} — scoped package tarball download</summary>
     [HttpGet("/npm/tarballs/@{scope}/{pkg}/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "npm")]
     public Task<IActionResult> GetScopedTarball(string scope, string pkg, string file, CancellationToken ct)
         => _tarball.GetScopedTarballAsync(HttpContext, CurrentTenantId(), scope, pkg, file, ct);
 
@@ -103,12 +111,14 @@ public class NpmController : ControllerBase
     /// </summary>
     [HttpGet("/npm/{pkg}/-/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "npm")]
     public Task<IActionResult> GetTarballConventional(string pkg, string file, CancellationToken ct)
         => _tarball.GetTarballConventionalAsync(HttpContext, CurrentTenantId(), pkg, file, ct);
 
     /// <summary>GET /npm/@{scope}/{pkg}/-/{file} — scoped tarball at the conventional npm path (see <see cref="GetTarballConventional"/>).</summary>
     [HttpGet("/npm/@{scope}/{pkg}/-/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "npm")]
     public Task<IActionResult> GetScopedTarballConventional(string scope, string pkg, string file, CancellationToken ct)
         => _tarball.GetScopedTarballConventionalAsync(HttpContext, CurrentTenantId(), scope, pkg, file, ct);
 
@@ -161,12 +171,14 @@ public class NpmController : ControllerBase
     /// <summary>GET /npm/-/package/{pkg}/dist-tags — list all dist-tags</summary>
     [HttpGet("/npm/-/package/{pkg}/dist-tags")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "npm")]
     public Task<IActionResult> GetDistTags(string pkg, CancellationToken ct)
         => _distTags.GetDistTagsAsync(HttpContext, CurrentTenantId(), pkg, ct);
 
     /// <summary>GET /npm/-/package/@{scope}/{pkg}/dist-tags — list dist-tags for scoped package</summary>
     [HttpGet("/npm/-/package/@{scope}/{pkg}/dist-tags")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "npm")]
     public Task<IActionResult> GetScopedDistTags(string scope, string pkg, CancellationToken ct)
         => _distTags.GetScopedDistTagsAsync(HttpContext, CurrentTenantId(), scope, pkg, ct);
 
@@ -278,6 +290,7 @@ public class NpmController : ControllerBase
     /// </summary>
     [HttpGet("/npm/-/v1/search")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "npm")]
     public Task<IActionResult> Search(
         [FromQuery] string? text,
         [FromQuery] int size = 20,

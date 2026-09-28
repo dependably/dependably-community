@@ -6,6 +6,7 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
 using Dependably.Infrastructure.Observability;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Protocol.Provenance;
 using Dependably.Security;
@@ -60,6 +61,7 @@ public sealed class ApkController : OrgScopedControllerBase
     [HttpGet("/apk/{**path}")]
     [HttpHead("/apk/{**path}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.PerResponse, "apk")]
     public async Task<IActionResult> HandleApkRequest(string path, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -96,6 +98,7 @@ public sealed class ApkController : OrgScopedControllerBase
             return Unauthorized();
         }
 
+        HttpContext.ClassifyEgress(IsApkArtifact(file) ? EgressKind.Artifact : EgressKind.Metadata);
         return IsApkArtifact(file)
             ? await ServeApkArtifactAsync(orgId, release, repo, arch, file, settings, token, ct)
             : await ServeApkIndexAsync(orgId, release, repo, arch, file, settings, ct);
@@ -120,22 +123,9 @@ public sealed class ApkController : OrgScopedControllerBase
         string? purl = parsed is { } p ? PurlNormalizer.Apk(p.PkgName, p.PkgVer, p.PkgRel, arch) : null;
         string blobKey = BlobKeys.Apk(orgId, release, repo, arch, file);
 
-        var cached = await _svc.Blobs.GetAsync(blobKey, ct);
-        if (cached is not null)
+        if (await TryServeApkCacheHitAsync(orgId, repo, arch, file, parsed, blobKey, settings, token, ct) is { } hit)
         {
-            if (parsed is { } cp
-                && await IsApkBlockedAsync(orgId, cp, repo, arch, file, token, settings, ct))
-            {
-                await cached.DisposeAsync();
-                return StatusCode(StatusCodes.Status403Forbidden);
-            }
-
-            Response.Headers["X-Cache"] = "HIT";
-            if (parsed is { } hp)
-            {
-                await RecordApkCacheHitAsync(orgId, hp, repo, arch, file, blobKey, ct);
-            }
-            return File(cached, "application/octet-stream", file);
+            return hit;
         }
 
         bool proxyOff = settings is not null && !settings.ProxyPassthroughEffective;
@@ -178,6 +168,61 @@ public sealed class ApkController : OrgScopedControllerBase
                 Status = StatusCodes.Status503ServiceUnavailable,
             });
         }
+    }
+
+    /// <summary>
+    /// Serves a package already in the store — by presigned redirect when one is allowed, else by
+    /// stream — after the block gate, or returns null on a miss so the caller fetches upstream.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Each argument is a distinct fetch-coordinate input; the settings and token are the request's own context, and bundling them adds no cohesion.")]
+    private async Task<IActionResult?> TryServeApkCacheHitAsync(
+        string orgId, string repo, string arch, string file,
+        (string PkgName, string PkgVer, string PkgRel)? parsed, string blobKey,
+        OrgSettings? settings, TokenRecord? token, CancellationToken ct)
+    {
+        // A package that may be redirected is probed for rather than opened, so a hit answered by
+        // a redirect does not open (and then discard) a stream from the object store; the probe is
+        // the only existence check the redirect makes. Only a parsed filename can redirect: its
+        // size lives on the coordinate row, and an unparsable one has no row to read it from.
+        var probe = parsed is not null && _svc.Presign is { } presign
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, "apk", ct)
+            : null;
+        var cached = probe is null ? await _svc.Blobs.GetAsync(blobKey, ct) : null;
+        if (cached is null && probe is not { Exists: true })
+        {
+            return null;
+        }
+
+        if (parsed is { } cp
+            && await IsApkBlockedAsync(orgId, cp, repo, arch, file, token, settings, ct))
+        {
+            if (cached is not null)
+            {
+                await cached.DisposeAsync();
+            }
+            return StatusCode(StatusCodes.Status403Forbidden);
+        }
+
+        var redirect = probe is not null && parsed is { } redirectParsed
+            ? await TryRedirectApkAsync(orgId, redirectParsed, repo, arch, file, probe, ct)
+            : null;
+        if (redirect is null)
+        {
+            cached ??= await _svc.Blobs.GetAsync(blobKey, ct);
+        }
+
+        if (redirect is null && cached is null)
+        {
+            return null;
+        }
+
+        Response.Headers["X-Cache"] = "HIT";
+        if (parsed is { } hp)
+        {
+            await RecordApkCacheHitAsync(orgId, hp, repo, arch, file, blobKey, ct);
+        }
+        return redirect ?? File(cached!, "application/octet-stream", file);
     }
 
     // Walks the configured upstream sources in priority order (Go precedent — apk is
@@ -326,6 +371,26 @@ public sealed class ApkController : OrgScopedControllerBase
                 BlockGateRequest.ForProxyCacheFacts(
                     orgId, "apk", caFacts, token, settings, HttpContext.GetNormalizedRemoteIp()), ct)
                 == BlockDecision.Blocked;
+    }
+
+    /// <summary>
+    /// The presigned-redirect decision for a cached <c>.apk</c>. A package file is addressed by
+    /// release, repository, architecture, and its versioned filename, and apk clients verify its
+    /// embedded signature, so it is immutable; <c>APKINDEX.tar.gz</c> and the other index files
+    /// are metadata and stream. apk is proxy-only, so the bytes are proxied, and the size is the
+    /// coordinate row's — with no row the package streams.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "Each argument is a distinct coordinate input for the one lookup the redirect needs.")]
+    private async Task<IActionResult?> TryRedirectApkAsync(
+        string orgId, (string PkgName, string PkgVer, string PkgRel) p, string repo, string arch, string file,
+        RedirectProbe probe, CancellationToken ct)
+    {
+        var caFacts = await _svc.CacheArtifacts.GetServeFactsByCoordinateAsync(
+            orgId, "apk", p.PkgName, $"{p.PkgVer}-r{p.PkgRel}", ApkCoordinateFilename(repo, arch, file), ct);
+        return caFacts is null
+            ? null
+            : await _svc.Presign!.TryRedirectAsync(HttpContext, probe, caFacts.SizeBytes, ct);
     }
 
     private async Task RecordApkCacheHitAsync(
@@ -519,7 +584,8 @@ public sealed record ApkControllerServices(
     ReservedNamespaceService Reserved,
     BlockGateService BlockGate,
     ApkIndexFetchCoordinator IndexCoordinator,
-    TimeSpan NegativeCacheTtl);
+    TimeSpan NegativeCacheTtl,
+    BlobPresignService? Presign = null);
 
 /// <summary>Result of an apk index/index-adjacent file fetch (see <see cref="ApkIndexFetchCoordinator"/>).</summary>
 public sealed record ApkIndexResult(Stream Body, string ContentType, string? ETag, bool NotModified);

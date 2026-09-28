@@ -1,5 +1,6 @@
 using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Protocol;
 using Dependably.Storage;
 
@@ -104,6 +105,10 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
     /// </summary>
     public async Task<EvictionSummary> RunOnceAsync(CancellationToken ct = default)
     {
+        // xtenant: the proxy cache is shared across tenants; eviction sizes the whole plane and
+        // releases each holder's claim.
+        using var ownerScope = DbScope.CrossTenant("cache eviction");
+
         int? maxAgeDays = ParseInt("CACHE_MAX_AGE_DAYS");
         long? maxSizeBytes = ParseLong("CACHE_MAX_SIZE_BYTES");
         int? maxArtifacts = ParseInt("CACHE_MAX_ARTIFACTS");

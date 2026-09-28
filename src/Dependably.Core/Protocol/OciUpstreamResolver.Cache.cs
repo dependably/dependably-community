@@ -388,14 +388,7 @@ public sealed partial class OciUpstreamResolver
         // OciDigestVerifyStream below still enforces the same cap for chunked transfers that
         // arrive with no Content-Length header at all.
         long maxBlobBytes = _options.Value.MaxBlobProxyBytes;
-        if (resp.Content.Headers.ContentLength > maxBlobBytes)
-        {
-            _logger.LogWarning(
-                "OCI blob {Repository}/{Digest} from {Host} declared Content-Length {ContentLength} exceeding the {MaxBytes}-byte blob proxy cap; refusing.",
-                repository, digest, upstream.Host, resp.Content.Headers.ContentLength, maxBlobBytes);
-            throw new OciBlobTooLargeException(
-                digest, upstream.Host, maxBlobBytes, resp.Content.Headers.ContentLength);
-        }
+        RefuseDeclaredOverCap(resp.Content.Headers.ContentLength, maxBlobBytes, repository, digest, upstream.Host);
 
         // Open the client mirror only here: after the upstream has been reached and the declared
         // size has been checked, so neither a 404 nor an over-cap blob can commit response
@@ -491,16 +484,7 @@ public sealed partial class OciUpstreamResolver
             // layer — orphaned those bytes permanently, and a retrying client minted a fresh
             // orphan each time. Unconditionally, and on CancellationToken.None so a cancelled
             // fetch still cleans up after itself.
-            try
-            {
-                await _blobs.Cache.DeleteAsync(stagingKey, CancellationToken.None);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(
-                    "{ExceptionType} deleting OCI staging entry {StagingKey} for {Repository}/{Digest}; bytes may be orphaned. {Message}",
-                    ex.GetType().Name, stagingKey, repository, digest, ex.Message);
-            }
+            await DeleteStagingEntryAsync(stagingKey, repository, digest);
         }
 
         // Persist DB row for this org.
@@ -519,6 +503,38 @@ public sealed partial class OciUpstreamResolver
         // Return only metadata — each waiter opens its own stream independently in
         // FetchBlobAsync, so the single shared result never carries a shared stream.
         return new OciBlobFetchMetadata(blobKey, mediaType, mirrored);
+    }
+
+    /// <summary>
+    /// Refuses a blob whose declared Content-Length is over the proxy cap before a byte is read.
+    /// </summary>
+    private void RefuseDeclaredOverCap(long? declaredLength, long maxBlobBytes, string repository, string digest, string host)
+    {
+        if (declaredLength > maxBlobBytes)
+        {
+            _logger.LogWarning(
+                "OCI blob {Repository}/{Digest} from {Host} declared Content-Length {ContentLength} exceeding the {MaxBytes}-byte blob proxy cap; refusing.",
+                repository, digest, host, declaredLength, maxBlobBytes);
+            throw new OciBlobTooLargeException(digest, host, maxBlobBytes, declaredLength);
+        }
+    }
+
+    /// <summary>
+    /// Deletes a staging entry on <see cref="CancellationToken.None"/>, logging rather than
+    /// throwing when the delete fails so the fetch's own outcome is what propagates.
+    /// </summary>
+    private async Task DeleteStagingEntryAsync(string stagingKey, string repository, string digest)
+    {
+        try
+        {
+            await _blobs.Cache.DeleteAsync(stagingKey, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "{ExceptionType} deleting OCI staging entry {StagingKey} for {Repository}/{Digest}; bytes may be orphaned. {Message}",
+                ex.GetType().Name, stagingKey, repository, digest, ex.Message);
+        }
     }
 
     // Opens the caller's mirror, or returns null when there is none or it could not be opened.

@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using Dapper;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -264,10 +265,12 @@ public sealed class BannerRepository
         string orgId, string userId, string role, CancellationToken ct = default)
     {
         string now = NowZ();
-        await using var conn = await _db.OpenAsync(ct);
         // xtenant: unions system-plane banners (scope='system', org_id IS NULL) with the
         // caller's tenant banners (scope='tenant' AND org_id=@orgId). System arm is global
-        // by design; tenant arm is pinned to @orgId so no other tenant's rows leak.
+        // by design; tenant arm is pinned to @orgId so no other tenant's rows leak. Opened as
+        // the owner because a system banner belongs to no tenant, so row-level security would
+        // hide it from the caller's tenant connection.
+        await using var conn = await _db.OpenCrossTenantAsync("system banners shown to a tenant", ct);
         var rows = await conn.QueryAsync<Banner>(
             """
             SELECT b.id, b.severity, b.body, b.link_url as LinkUrl, b.link_label as LinkLabel,
@@ -308,7 +311,9 @@ public sealed class BannerRepository
         string orgId, string bannerId, string userId, CancellationToken ct = default)
     {
         string now = NowZ();
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: the probe must see system banners (no org) as well as the caller's own; the
+        // predicate still pins the tenant arm to @orgId, exactly as GetActiveAsync does.
+        await using var conn = await _db.OpenCrossTenantAsync("dismissing a system banner", ct);
         int bannerCount = await conn.ExecuteScalarAsync<int>(
             "SELECT COUNT(*) FROM banners WHERE id = @bannerId AND (scope = 'system' OR org_id = @orgId)",
             new { bannerId, orgId });

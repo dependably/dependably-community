@@ -68,7 +68,7 @@ public sealed class ProjectsOrgCascadeTests : IClassFixture<DependablyMultiFacto
         }
 
         var svc = _factory.Services.GetServices<IHostedService>().OfType<TenantHardDeleteService>().Single();
-        await svc.RunPassAsync(default);
+        await TestHarnessDbScope.AsHostAsync(() => svc.RunPassAsync(default));
 
         await using (var conn = await db.OpenAsync())
         {

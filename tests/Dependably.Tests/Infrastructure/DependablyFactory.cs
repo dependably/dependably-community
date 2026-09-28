@@ -5,6 +5,7 @@ using System.Security.Claims;
 using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Builder;
@@ -35,7 +36,52 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     public WireMockServer MockUpstream { get; } = WireMockServer.Start();
     public InMemoryBlobStore BlobStore { get; } = new();
 
-    private readonly TestMetadataStore _metadataStore = new();
+    /// <summary>
+    /// Which metadata database the host runs on, from <c>TEST_INTEGRATION_DB</c>: <c>sqlite</c>
+    /// (default, in-memory), <c>postgres</c>, or <c>postgres-rls</c> (Postgres with
+    /// <c>DB_ROW_LEVEL_SECURITY=enforce</c>). The Postgres modes create a throwaway database per
+    /// factory, owned by a non-superuser role (<see cref="PostgresTestDatabase"/>).
+    /// </summary>
+    public static string IntegrationDatabase { get; } =
+        (Environment.GetEnvironmentVariable("TEST_INTEGRATION_DB") ?? "sqlite").Trim().ToLowerInvariant() switch
+        {
+            "" or "sqlite" => "sqlite",
+            "postgres" => "postgres",
+            "postgres-rls" => "postgres-rls",
+            var other => throw new InvalidOperationException(
+                $"TEST_INTEGRATION_DB must be sqlite, postgres or postgres-rls (got '{other}')."),
+        };
+
+    /// <summary>
+    /// This host's database; defaults to <see cref="IntegrationDatabase"/>. A benchmark comparing
+    /// modes sets it per factory.
+    /// </summary>
+    public string Database { get; init; } = IntegrationDatabase;
+
+    // Created with the host, once the Database override is known.
+    private IntegrationDatabase? _db;
+
+    /// <summary>
+    /// Unrestricted store for the factory's own seeding helpers: the in-memory SQLite store, or on
+    /// Postgres a plain owner connection that row-level security does not apply to.
+    /// </summary>
+    private IMetadataStore HarnessStore =>
+        _db?.HarnessStore ?? throw new InvalidOperationException("The host has not been created.");
+
+    /// <summary>
+    /// The host's services. Reaching in marks the caller's flow as test-harness access, so seeding
+    /// and assertions made outside a request are not mistaken for the host's own background work
+    /// under row-level security (<see cref="TestHarnessDbScope"/>).
+    /// </summary>
+    public override IServiceProvider Services
+    {
+        get
+        {
+            var services = base.Services;
+            TestHarnessDbScope.Enter();
+            return services;
+        }
+    }
 
     /// <summary>
     /// Opt-in frozen host clock. The default stays the system clock because third-party
@@ -234,6 +280,8 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         }
 
         builder.Configuration.AddInMemoryCollection(settings);
+        _db = new IntegrationDatabase(Database);
+        _db.ConfigureBefore(builder);
 
         Program.ConfigureBuilder(builder);
 
@@ -275,9 +323,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         builder.Services.RemoveAll<TieredBlobStorage>();
         builder.Services.AddSingleton(new TieredBlobStorage(BlobStore, BlobStore));
 
-        // Remove the SqliteMetadataStore singleton registered inside ConfigureBuilder
-        builder.Services.RemoveAll<IMetadataStore>();
-        builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+        _db!.ConfigureServices(builder.Services);
 
         if (MailSenderOverride is not null)
         {
@@ -382,8 +428,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         var app = builder.Build();
         Program.ConfigureApp(app);
 
-        app.Start();
-
+        _db!.Start(app);
         return app;
     }
 
@@ -400,9 +445,22 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     {
         MockUpstream.Stop();
         MockUpstream.Dispose();
-        await _metadataStore.DisposeAsync();
         await base.DisposeAsync();
+        if (_db is not null)
+        {
+            await _db.DisposeAsync();
+        }
     }
+
+    /// <summary>
+    /// Waits for the host's <typeparamref name="TService"/> to finish the pass it runs at startup.
+    /// A test that seeds rows such a pass rewrites (the SBOM policy re-evaluation replaces a
+    /// version's findings) waits for it so the pass cannot land on top of the seed.
+    /// </summary>
+    public Task WaitForStartupPassAsync<TService>()
+        where TService : ScheduledBackgroundService =>
+        Services.GetServices<IHostedService>().OfType<TService>().Single()
+            .StartupPassCompleted.WaitAsync(TimeSpan.FromSeconds(60), TimeProvider.System);
 
     // ── Token helpers ──────────────────────────────────────────────────────────
 
@@ -447,7 +505,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public async Task<string> CreateAdminToken()
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
 
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
@@ -470,7 +528,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public async Task<string> CreateAdminUserToken(string capabilitiesJson)
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
 
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
@@ -496,7 +554,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public async Task<string> CreateAdminJwt()
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
 
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
@@ -562,7 +620,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public async Task<string> CreateUserJwt(string userId, string role)
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
 
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT tenant_id FROM users WHERE id = @userId",
@@ -619,7 +677,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public async Task<string> CreateUserJwtWithCaps(string userId, IEnumerable<string> capabilities)
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
 
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT tenant_id FROM users WHERE id = @userId",
@@ -668,7 +726,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         string passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 4);
         string userId = Guid.NewGuid().ToString("N");
 
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
             ?? throw new InvalidOperationException("Default org not found.");
@@ -694,9 +752,10 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             "nuget" => "max_upload_bytes_nuget",
             _ => "max_upload_bytes"
         };
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
         await conn.ExecuteAsync(
-            "INSERT OR REPLACE INTO instance_settings (key, value) VALUES (@key, @value)",
+            "INSERT INTO instance_settings (key, value) VALUES (@key, @value) "
+            + "ON CONFLICT(key) DO UPDATE SET value = @value",
             new { key, value = bytes.ToString() });
     }
 
@@ -713,7 +772,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
             _ => "max_upload_bytes"
         };
 
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
         string orgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = @slug", new { slug = org })
             ?? throw new InvalidOperationException($"Org '{org}' not found.");
 
@@ -735,7 +794,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// </summary>
     public async Task SetOrgStatus(string org, string status)
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
         string orgId = await conn.ExecuteScalarAsync<string>("SELECT id FROM orgs WHERE slug = @slug", new { slug = org })
             ?? throw new InvalidOperationException($"Org '{org}' not found.");
 
@@ -844,7 +903,7 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     /// <summary>Marks a specific package version as yanked (soft-delete) in the DB.</summary>
     public async Task SetVersionYanked(string org, string ecosystem, string name, string version, string? reason = null)
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await HarnessStore.OpenAsync();
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = @slug", new { slug = org })
             ?? throw new InvalidOperationException($"Org '{org}' not found.");

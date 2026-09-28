@@ -81,12 +81,13 @@ public sealed class HeaderTenantResolver : ITenantResolver
         }
 
         await using var conn = await _db.OpenAsync(ct);
-        // Status flows through to TenantContext so TenantStatusEnforcementMiddleware can refuse
-        // a suspended/archived/deleting tenant the same way every other resolver strategy does.
-        var (Id, Slug, Status) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status)>(
-            "SELECT id, slug, status FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
+        // Status and usage posture flow through to TenantContext so TenantStatusEnforcementMiddleware
+        // can refuse a suspended/archived/deleting tenant, and apply a usage-cap posture, the same
+        // way every other resolver strategy does.
+        var (Id, Slug, Status, UsagePosture) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status, string UsagePosture)>(
+            "SELECT id, slug, status, usage_posture FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
             new { slug });
 
-        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug, Status);
+        return Id is null ? TenantContext.Uninitialized : TenantContext.ForTenant(Id, Slug, Status, UsagePosture);
     }
 }

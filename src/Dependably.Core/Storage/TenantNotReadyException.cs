@@ -31,6 +31,20 @@ public enum TenantNotReadyReason
     /// set on the problem-JSON path only (OCI: <c>UNAVAILABLE</c>, no <c>Retry-After</c>).
     /// </summary>
     ProvisioningFailed,
+    /// <summary>
+    /// <c>orgs.status = 'read_only'</c> and the request is a state-changing write this posture
+    /// refuses — unlike <see cref="StatusInactive"/>, a read (GET/HEAD/OPTIONS) never reaches this
+    /// reason. 423 Locked as problem JSON with a read-only-specific <c>detail</c>; 403 with OCI
+    /// code <c>DENIED</c> on <c>/v2/</c>.
+    /// </summary>
+    ReadOnlyWrite,
+    /// <summary>
+    /// <c>orgs.usage_posture</c> is <c>uploads_refused</c> or <c>downloads_throttled</c> and the
+    /// request is a protocol-plane POST/PUT/PATCH. 402 Payment Required as problem JSON, whose
+    /// <c>type</c> is <c>USAGE_CAP_INFO_URL</c> when that is set; 403 with OCI code <c>DENIED</c>
+    /// on <c>/v2/</c>, like the other write refusals there.
+    /// </summary>
+    UsageCapReached,
 }
 
 /// <summary>

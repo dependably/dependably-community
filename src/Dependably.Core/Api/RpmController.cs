@@ -682,4 +682,5 @@ public sealed record RpmControllerServices(
     Dependably.Security.NameBindingGate? NameBinding = null,
     UpstreamClient? UpstreamClient = null,
     IRpmUpstreamProxy? Proxy = null,
-    Dependably.Infrastructure.IPerOrgTrustAnchorStore? TrustStore = null);
+    Dependably.Infrastructure.IPerOrgTrustAnchorStore? TrustStore = null,
+    BlobPresignService? Presign = null);

@@ -27,6 +27,9 @@ internal static class ControllersStartupExtensions
 
         builder.Services.AddControllers(options =>
             {
+                options.Filters.AddService<SystemTokenMixedPrincipalGuard>();
+                // Before RouteScopeFilter, so a mixed JWT+SystemToken principal never reaches
+                // any scope/rotation/MFA decision that assumes a single authenticating scheme.
                 options.Filters.AddService<RouteScopeFilter>();
                 // After RouteScopeFilter (realm first), block flagged users until they rotate.
                 options.Filters.AddService<PasswordRotationGuard>();

@@ -13,6 +13,13 @@ namespace Dependably.Infrastructure;
 /// bypassable call site has to remember. Null for <see cref="Apex"/> and
 /// <see cref="Uninitialized"/>, which carry no tenant row.
 /// </para>
+///
+/// <para>
+/// <see cref="UsagePosture"/> carries <c>orgs.usage_posture</c> the same way, read by the same
+/// primary-key lookup, so the usage-cap refusal in <c>TenantStatusEnforcementMiddleware</c> and the
+/// tenant-throttled rate-limit partition cost no aggregate per request. <c>normal</c> for
+/// <see cref="Apex"/> and <see cref="Uninitialized"/>.
+/// </para>
 /// </summary>
 public sealed record TenantContext(
     bool IsApex,
@@ -20,7 +27,8 @@ public sealed record TenantContext(
     bool IsUninitialized,
     string? TenantId,
     string? TenantSlug,
-    string? Status = null)
+    string? Status = null,
+    string UsagePosture = Usage.UsagePostures.Normal)
 {
     public const string HttpItemsKey = "TenantContext";
 
@@ -28,6 +36,7 @@ public sealed record TenantContext(
 
     public static TenantContext Uninitialized { get; } = new(false, false, true, null, null);
 
-    public static TenantContext ForTenant(string tenantId, string tenantSlug, string status = "active") =>
-        new(false, true, false, tenantId, tenantSlug, status);
+    public static TenantContext ForTenant(
+        string tenantId, string tenantSlug, string status = "active", string? usagePosture = null) =>
+        new(false, true, false, tenantId, tenantSlug, status, usagePosture ?? Usage.UsagePostures.Normal);
 }

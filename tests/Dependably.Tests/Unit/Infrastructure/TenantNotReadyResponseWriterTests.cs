@@ -48,6 +48,21 @@ public sealed class TenantNotReadyResponseWriterTests
     }
 
     [Fact]
+    public async Task ReadOnlyWrite_Returns403Denied()
+    {
+        var ctx = NewOciContext();
+
+        await TenantNotReadyResponseWriter.WriteAsync(ctx, TenantNotReadyReason.ReadOnlyWrite);
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
+        Assert.Equal("application/json", ctx.Response.ContentType);
+
+        var error = await ReadOciErrorAsync(ctx);
+        Assert.Equal("DENIED", error.GetProperty("code").GetString());
+        Assert.Equal("Organization is read-only; uploads are refused.", error.GetProperty("message").GetString());
+    }
+
+    [Fact]
     public async Task NotFound_Returns404NameUnknown()
     {
         var ctx = NewOciContext();

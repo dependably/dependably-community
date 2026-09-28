@@ -177,16 +177,16 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
         {
             await using var conn = await _db.OpenAsync(ct);
             // Soft-deleted tenants are immediately inaccessible — the subdomain returns 404 until
-            // system_admin restores within the grace window. Status flows through to TenantContext so
-            // TenantStatusEnforcementMiddleware can refuse a suspended/archived/deleting tenant before
-            // it reaches a controller.
-            var (Id, Slug, Status) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status)>(
-                "SELECT id, slug, status FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
+            // system_admin restores within the grace window. Status and usage posture flow through to
+            // TenantContext so TenantStatusEnforcementMiddleware can refuse a suspended/archived/deleting
+            // tenant, or a write under a usage-cap posture, before it reaches a controller.
+            var (Id, Slug, Status, UsagePosture) = await conn.QuerySingleOrDefaultAsync<(string Id, string Slug, string Status, string UsagePosture)>(
+                "SELECT id, slug, status, usage_posture FROM orgs WHERE slug = @slug AND deleted_at IS NULL LIMIT 1",
                 new { slug });
 
             var result = Id is null
                 ? TenantContext.Uninitialized
-                : TenantContext.ForTenant(Id, Slug, Status);
+                : TenantContext.ForTenant(Id, Slug, Status, UsagePosture);
 
             if (_cache is not null)
             {

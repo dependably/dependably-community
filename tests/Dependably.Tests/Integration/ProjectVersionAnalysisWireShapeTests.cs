@@ -27,7 +27,13 @@ public sealed class ProjectVersionAnalysisWireShapeTests : IClassFixture<Dependa
 {
     private readonly DependablyFactory _factory;
     public ProjectVersionAnalysisWireShapeTests(DependablyFactory factory) => _factory = factory;
-    public Task InitializeAsync() => ((IAsyncLifetime)_factory).InitializeAsync();
+    // The vulnerability-scan tick re-evaluates SBOM policy for every in-service version at host
+    // startup, replacing its findings; seeding before it finishes lets it drop the seeded finding.
+    public async Task InitializeAsync()
+    {
+        await ((IAsyncLifetime)_factory).InitializeAsync();
+        await _factory.WaitForStartupPassAsync<VulnerabilityScanService>();
+    }
     public Task DisposeAsync() => Task.CompletedTask;
 
     private async Task<HttpClient> AdminClient()
@@ -50,18 +56,19 @@ public sealed class ProjectVersionAnalysisWireShapeTests : IClassFixture<Dependa
 
         string projectId = Guid.NewGuid().ToString("N");
         string versionId = Guid.NewGuid().ToString("N");
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO projects (id, org_id, kind, name, classifier, created_at)
-            VALUES (@projectId, @orgId, 'project', @projectName, 'application', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@projectId, @orgId, 'project', @projectName, 'application', @now)
             """,
-            new { projectId, orgId, projectName = $"wire-shape-{Guid.NewGuid():N}" });
+            new { projectId, orgId, projectName = $"wire-shape-{Guid.NewGuid():N}", now });
         await conn.ExecuteAsync(
             """
             INSERT INTO project_versions (id, org_id, project_id, version, is_latest, created_at)
-            VALUES (@versionId, @orgId, @projectId, '1.0.0', 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@versionId, @orgId, @projectId, '1.0.0', 1, @now)
             """,
-            new { versionId, orgId, projectId });
+            new { versionId, orgId, projectId, now });
 
         // One component that exercises every branch the MCP compactAnalysis() reads: a hosted
         // registry match (present/blocked/deprecated/latestVersion/outdated all non-null), one
@@ -74,34 +81,34 @@ public sealed class ProjectVersionAnalysisWireShapeTests : IClassFixture<Dependa
                  component_type, sbom_scope, dependency_scope, dependency_kind, license_spdx, created_at)
             VALUES
                 (@id, @orgId, @versionId, 'pkg:npm/lodash@4.17.21', 'npm', 'lodash', '4.17.21', 'lodash',
-                 'library', 'required', 'runtime', 'direct', 'MIT', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'library', 'required', 'runtime', 'direct', 'MIT', @now)
             """,
-            new { id = componentId, orgId, versionId });
+            new { id = componentId, orgId, versionId, now });
 
         string packageId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO packages (id, org_id, ecosystem, name, purl_name, upstream_latest_version, created_at)
-            VALUES (@id, @orgId, 'npm', 'lodash', 'lodash', '5.0.0', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@id, @orgId, 'npm', 'lodash', 'lodash', '5.0.0', @now)
             """,
-            new { id = packageId, orgId });
+            new { id = packageId, orgId, now });
         await conn.ExecuteAsync(
             """
             INSERT INTO package_versions
                 (id, package_id, version, purl, blob_key, manual_block_state, deprecated, created_at)
             VALUES
                 (@id, @packageId, '4.17.21', 'pkg:npm/lodash@4.17.21', 'registry/npm/lodash/4.17.21/lodash-4.17.21.tgz',
-                 'blocked', 'Use lodash-es instead.', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 'blocked', 'Use lodash-es instead.', @now)
             """,
-            new { id = Guid.NewGuid().ToString("N"), packageId });
+            new { id = Guid.NewGuid().ToString("N"), packageId, now });
 
         string vulnId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, severity, cvss_score, is_kev, fetched_at)
-            VALUES (@id, 'CVE-2024-9999', 'npm', 'lodash', 'HIGH', 8.5, 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@id, 'CVE-2024-9999', 'npm', 'lodash', 'HIGH', 8.5, 1, @now)
             """,
-            new { id = vulnId });
+            new { id = vulnId, now });
         await conn.ExecuteAsync(
             "INSERT INTO sbom_component_vulns (id, component_id, vuln_id) VALUES (@id, @componentId, @vulnId)",
             new { id = Guid.NewGuid().ToString("N"), componentId, vulnId });
@@ -111,19 +118,17 @@ public sealed class ProjectVersionAnalysisWireShapeTests : IClassFixture<Dependa
             INSERT INTO project_vuln_analysis
                 (id, org_id, project_version_id, purl_key, vuln_key, vex_state, vex_source, reachability, updated_at)
             VALUES
-                (@id, @orgId, @versionId, 'pkg:npm/lodash', 'CVE-2024-9999', 'exploitable', 'manual', 'reachable',
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (@id, @orgId, @versionId, 'pkg:npm/lodash', 'CVE-2024-9999', 'exploitable', 'manual', 'reachable', @now)
             """,
-            new { id = Guid.NewGuid().ToString("N"), orgId, versionId });
+            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, now });
 
         await conn.ExecuteAsync(
             """
             INSERT INTO sbom_policy_findings (id, org_id, project_version_id, component_id, arm, license_spdx, detail, created_at)
             VALUES
-                (@id, @orgId, @versionId, @componentId, 'license', 'MIT', 'License requires manual review.',
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (@id, @orgId, @versionId, @componentId, 'license', 'MIT', 'License requires manual review.', @now)
             """,
-            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, componentId });
+            new { id = Guid.NewGuid().ToString("N"), orgId, versionId, componentId, now });
 
         using var client = await AdminClient();
         using var resp = await client.GetAsync($"/api/v1/projects/{projectId}/versions/{versionId}/analysis");

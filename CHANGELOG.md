@@ -7,6 +7,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-27
+
+### Added
+
+- **System API tokens.** In `DEPLOYMENT_MODE=multi`, a system admin can mint a `dpsys_` token at
+  the apex (the Tokens page of the System console, or `POST /api/v1/system/tokens`) so CI, Terraform, or a
+  provisioning script can create and manage tenants without an interactive session. The token's
+  reach is fixed, not chosen at mint time: it authenticates only the tenant-management actions
+  listed under [System API tokens](OPERATIONS.md#system-api-tokens) in OPERATIONS.md, and gets `401`
+  everywhere else, including admin management, instance settings, audit, and minting another
+  token. Every token needs an expiry at most 365 days out, and an instance holds at most 50
+  unexpired tokens. A token stops working when its owner is disabled, locked, or deleted, or when
+  another admin resets the owner's password. The owner's own password change leaves it alone. Any
+  system admin can list or revoke any token. An action taken with a token is audited as a
+  `service` actor under the token's name, with the owning admin's id in the event detail.
+- **Presigned redirects for every ecosystem.** `STORAGE_PRESIGNED_READS` redirected only full,
+  digest-addressed OCI blob downloads. It now applies to any ecosystem named in the new
+  `STORAGE_PRESIGNED_READ_ECOSYSTEMS`: `apk`, `cargo`, `go`, `hex`, `maven`, `npm`, `nuget`, `oci`,
+  `pypi`, `rpm`, and `terraform`. The default is `oci`, so an upgrade redirects nothing that did not
+  redirect before. A redirect is issued after the same authorization, tenancy, and block-gate
+  checks the streaming path runs, and only for immutable artefacts. Metadata, `HEAD`, ranged
+  reads, and cache misses still stream. Downloads redirect with `307`, except apk, which gets `302`
+  because apk-tools does not follow a `307`.
+- **CloudFront signer for presigned redirects.** `STORAGE_PRESIGNED_READ_SIGNER=cloudfront` points
+  redirects at a CloudFront distribution instead of the bucket, using signed URLs whose canned
+  policy covers the one object until the URL expires. It needs `STORAGE_BACKEND=s3` with no
+  `_CACHE` / `_REGISTRY` overrides, plus `CLOUDFRONT_URL_BASE`, `CLOUDFRONT_KEY_PAIR_ID`, and
+  `CLOUDFRONT_PRIVATE_KEY`. Uploaded artefacts are private: they go through CloudFront only when
+  `CLOUDFRONT_UNCACHED_PATH_PREFIX` is set, and are signed by the object store otherwise. A proxied
+  artefact takes `CLOUDFRONT_CACHED_PATH_PREFIX`, where the edge may cache it, only when every
+  upstream its org has configured for that ecosystem is credential-free. Otherwise it is treated
+  like an uploaded one. The same applies when the org has no upstream left for the ecosystem,
+  when the check fails, and on edge nodes. The check covers the whole ecosystem, so an org with
+  one private OCI registry loses edge caching for all of its proxied image layers. It is also
+  permanent: a credentialed upstream is recorded in the new `upstream_credential_history` table,
+  and the org's proxied artefacts for that ecosystem stay off the cached prefix even after the
+  upstream is deleted, because the artefacts it fetched are still in the cache. There is no way to
+  clear the record short of deleting the org. Credentialed upstreams added before this release are
+  recorded at startup if they still exist or their `upstream_registry_added` audit event is still
+  in the audit log with its detail. One deleted before that retention window is not known, so
+  operators who had one should delete the org's cached proxied artefacts for the ecosystem before
+  enabling the CloudFront signer. See
+  [Signing with CloudFront](OPERATIONS.md#signing-with-cloudfront) in OPERATIONS.md.
+- **Read-only organizations.** `PATCH /api/v1/system/tenants/{slug}/status` accepts `read_only`
+  alongside `active` and `suspended`. A read-only org keeps serving downloads, and its users can
+  still sign in and use the web UI and management API, but every state-changing request to a
+  package registry (publish, upload, delete, yank) gets `423`. Nothing is deleted. The check looks
+  at which controller a request reaches rather than its path, so SAML sign-in and other
+  management writes are unaffected. Other replicas of a multi-replica deployment pick up a status
+  change within 5 seconds.
+- **Postgres credentials as separate variables.** `DB_PASSWORD` and `DB_USERNAME` override any
+  `Password=` or `Username=` in `DB_CONNECTION_STRING`, so an orchestrator that injects secrets as
+  separate variables (ECS task-definition `secrets`, a rotated RDS or Aurora managed credential)
+  can supply them without splicing them into the string. They apply to the app and to the default
+  target of `migrate-to-postgres` and `verify-postgres-migration`. An explicit `--target` is used
+  as given.
+- **Per-tenant rate limit.** `TENANT_RATE_LIMIT_PERMITS` bounds one tenant's protocol-plane
+  requests per second across all of its tokens and addresses. It is off unless set.
+
+### Changed
+
+- **Action required: Postgres row-level security is on by default for multi-tenant
+  deployments.** With `DB_PROVIDER=postgres` and `DEPLOYMENT_MODE` set to `multi` or `header`,
+  `DB_ROW_LEVEL_SECURITY` now defaults to `enforce`. Row-level security backs the application's
+  `org_id` filter: tenant connections switch to the non-login role `DB_ROW_LEVEL_SECURITY_ROLE`
+  (default `dependably_rls`) and can read or write only their own tenant's rows. Startup creates
+  that role, so the connecting role needs `CREATEROLE`, or the role must be created beforehand
+  (`NOLOGIN NOBYPASSRLS`, granted to the connecting role, with `SET` on Postgres 16 and later). The
+  default never blocks startup. If the connecting role lacks `CREATEROLE`, the server is older than
+  Postgres 15, or `DB_CONNECTION_STRING` sets `Multiplexing=true`, the node boots with it off, logs
+  a warning naming the reason, and reports `dependably.db.rls_enforced=0`. An explicit `enforce`
+  refuses to boot in those cases instead, and an explicit `off` is honoured with a warning.
+  Transaction-mode poolers (PgBouncer `pool_mode=transaction`) are not supported with it on. Set
+  `DB_ROW_LEVEL_SECURITY=off` if yours uses one. RDS Proxy is fine. SQLite and single-tenant
+  deployments are unaffected.
+- **Action required: an unknown `DB_PROVIDER` fails startup.** Any value other than `sqlite` or
+  `postgres` (ignoring case and surrounding whitespace) used to fall back to SQLite without saying
+  so. A deployment with `DB_PROVIDER=postgresql` or `pg` was running on SQLite. It now refuses to
+  start. Set `DB_PROVIDER=postgres` to keep using Postgres. If you want to keep the SQLite
+  database such a deployment has been writing to, set `DB_PROVIDER=sqlite` instead.
+- **Upgrading a Postgres database rewrites several large tables.** The first boot of this release
+  widens integer and floating-point columns on `package_versions`, `vulnerabilities`, `oci_blobs`,
+  `maven_version_files`, `rpm_metadata`, `project_documents`, `org_settings`, and others to 64-bit
+  types. Each change rewrites the table and rebuilds its indexes while holding an exclusive lock,
+  and the read-model views are unavailable until the migration finishes. On a large database,
+  plan the upgrade as a maintenance window rather than a blue-green cutover with the previous
+  release still serving. SQLite databases are unaffected.
+
+### Fixed
+
+- **Cargo downloads work when anonymous pull is off.** `/cargo/config.json` did not declare
+  `"auth-required": true`, so Cargo sent its token to the index but not to the crate download,
+  which answered `401`. The registry configuration now declares it whenever the org's anonymous
+  pull is off, and leaves it out when anonymous pull is on. Cargo 1.74 or later is required for
+  an authenticated registry.
+- **Proxied PyPI files record their size on S3 and Azure.** On an object-store backend a proxied
+  PyPI file was recorded with a size of 0, because the store's response stream cannot report its
+  length, so those files never took a presigned redirect. The first fetch now reads the size from
+  a listing of the stored object when the stream cannot give it. Files fetched before this
+  release keep their 0 until they are evicted and fetched again.
+- **Proxied OCI blob pulls work on S3 storage.** With `STORAGE_BACKEND=s3`, every OCI blob that
+  had to be fetched from the upstream registry failed with `500` and `AmazonS3Exception: Could
+  not determine content length`. Blobs already in the cache were served normally. The proxy
+  streams a blob into the store while it checks the digest, and that stream cannot report its
+  length, which the AWS SDK requires before it sends a single upload request. This happened on
+  AWS S3 and S3-compatible services (MinIO, R2) alike. The S3 store now uploads a stream of unknown
+  length in 8 MiB parts, holding at most one part in memory, and a blob smaller than one part
+  still goes up as a single request. A failed upload is aborted so its parts do not stay in the
+  bucket. The IAM policy for the bucket needs `s3:AbortMultipartUpload`; see
+  [Blob storage backends](OPERATIONS.md#blob-storage-backends) in OPERATIONS.md.
+- **Presigned redirects keep an `http://` S3 endpoint's scheme.** With `S3_ENDPOINT` set to an
+  `http://` address (a common MinIO setup), presigned redirects named `https://` on the same
+  host and port, where nothing listens for TLS, so every redirected download failed. The URL now
+  uses the endpoint's own scheme. AWS S3 and `https://` endpoints are unaffected.
+- **Transparent intercept reaches the ecosystem again.** With `HOST_ROUTING` set, a request to a
+  mapped host (for example `registry.npmjs.org=npm`) had its path rewritten to the ecosystem
+  prefix only after the endpoint had already been chosen from the original path, so it never
+  reached the ecosystem's controller. Routing now runs after the rewrite, in both the full and the
+  edge images.
+
 ## [0.12.2] - 2026-09-23
 
 ### Added

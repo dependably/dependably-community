@@ -46,6 +46,7 @@ public sealed partial class OrgIdFilteringComplianceTests
         "artifact_inventory",
         "artifact_license",
         "org_storage_bytes",
+        "org_billable_storage_bytes",
 
         // Version-scoped child tables: no org_id column of their own, reached via an org-scoped
         // package_versions / packages FK. Listed so unfiltered raw SQL against them must justify

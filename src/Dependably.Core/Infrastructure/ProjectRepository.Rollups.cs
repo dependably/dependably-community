@@ -53,13 +53,16 @@ public sealed partial class ProjectRepository
 
         for (int depth = 0; frontier.Count > 0 && depth < MaxTreeDepth; depth++)
         {
+            var (frontierClause, parameters) = DapperInClause.Expand("frontier", frontier);
+            parameters.AddDynamicParams(new { orgId });
+            // rawsql: frontierClause is a parameterized IN (@frontier0, …) list built in C# by DapperInClause.
             var children = (await conn.QueryAsync<ProjectTreeRow>(new CommandDefinition(
                 """
                 SELECT c.id AS Id, c.parent_id AS ParentId, c.kind AS Kind
                 FROM projects c
                 WHERE c.org_id = @orgId AND c.parent_id IN @frontier
-                """,
-                new { orgId, frontier }, cancellationToken: ct))).AsList();
+                """.Replace("@frontier", frontierClause, StringComparison.Ordinal),
+                parameters, cancellationToken: ct))).AsList();
 
             var next = new List<string>();
             foreach (var child in children)
@@ -132,14 +135,17 @@ public sealed partial class ProjectRepository
             return [];
         }
 
+        var (projectIdsClause, projectIdsClauseParams) = DapperInClause.Expand("projectIds", projectIds.ToList());
+        projectIdsClauseParams.AddDynamicParams(new { orgId });
+        // rawsql: projectIdsClause is a parameterized IN (@projectIds0, …) list built in C# by DapperInClause.
         var rows = await conn.QueryAsync<LatestVersionRow>(new CommandDefinition(
             """
             SELECT v.project_id AS ProjectId, v.id AS VersionId, v.version AS VersionLabel,
                    v.policy_status AS PolicyStatus
             FROM project_versions v
             WHERE v.org_id = @orgId AND v.project_id IN @projectIds AND v.is_latest = 1
-            """,
-            new { orgId, projectIds }, cancellationToken: ct));
+            """.Replace("@projectIds", projectIdsClause, StringComparison.Ordinal),
+            projectIdsClauseParams, cancellationToken: ct));
 
         return rows.ToDictionary(r => r.ProjectId, r => r, StringComparer.Ordinal);
     }
@@ -203,14 +209,17 @@ public sealed partial class ProjectRepository
             return [];
         }
 
+        var (componentVersions, componentVersionsParams) = DapperInClause.Expand("versionIds", versionIds.ToList());
+        componentVersionsParams.AddDynamicParams(new { orgId });
+        // rawsql: componentVersions is a parameterized IN (@versionIds0, …) list built in C# by DapperInClause.
         var rows = await conn.QueryAsync<ComponentCountRow>(new CommandDefinition(
             """
             SELECT c.project_version_id AS ProjectVersionId, COUNT(*) AS ComponentCount
             FROM sbom_components c
             WHERE c.org_id = @orgId AND c.project_version_id IN @versionIds
             GROUP BY c.project_version_id
-            """,
-            new { orgId, versionIds }, cancellationToken: ct));
+            """.Replace("@versionIds", componentVersions, StringComparison.Ordinal),
+            componentVersionsParams, cancellationToken: ct));
 
         return rows.ToDictionary(r => r.ProjectVersionId, r => r.ComponentCount, StringComparer.Ordinal);
     }
@@ -237,6 +246,9 @@ public sealed partial class ProjectRepository
             return [];
         }
 
+        var (severityVersions, severityVersionsParams) = DapperInClause.Expand("versionIds", versionIds.ToList());
+        severityVersionsParams.AddDynamicParams(new { orgId });
+        // rawsql: severityVersions is a parameterized IN (@versionIds0, …) list built in C# by DapperInClause.
         var rows = (await conn.QueryAsync<SeverityVulnRow>(new CommandDefinition(
             """
             SELECT c.project_version_id AS ProjectVersionId, c.ecosystem AS Ecosystem,
@@ -246,17 +258,20 @@ public sealed partial class ProjectRepository
             JOIN sbom_component_vulns cv ON cv.component_id = c.id
             JOIN vulnerabilities v ON v.id = cv.vuln_id
             WHERE c.org_id = @orgId AND c.project_version_id IN @versionIds
-            """,
-            new { orgId, versionIds }, cancellationToken: ct))).AsList();
+            """.Replace("@versionIds", severityVersions, StringComparison.Ordinal),
+            severityVersionsParams, cancellationToken: ct))).AsList();
 
+        var (suppressedVersions, suppressedVersionsParams) = DapperInClause.Expand("versionIds", versionIds.ToList());
+        suppressedVersionsParams.AddDynamicParams(new { orgId });
+        // rawsql: suppressedVersions is a parameterized IN (@versionIds0, …) list built in C# by DapperInClause.
         var suppressed = (await conn.QueryAsync<SuppressingAnalysisRow>(new CommandDefinition(
             """
             SELECT project_version_id AS ProjectVersionId, purl_key AS PurlKey, vuln_key AS VulnKey
             FROM project_vuln_analysis
             WHERE org_id = @orgId AND project_version_id IN @versionIds
               AND vex_state IN ('not_affected','false_positive','resolved')
-            """,
-            new { orgId, versionIds }, cancellationToken: ct))).AsList();
+            """.Replace("@versionIds", suppressedVersions, StringComparison.Ordinal),
+            suppressedVersionsParams, cancellationToken: ct))).AsList();
 
         var suppressedByVersionPurl = new Dictionary<(string VersionId, string PurlKey), HashSet<string>>();
         foreach (var s in suppressed)
@@ -333,6 +348,9 @@ public sealed partial class ProjectRepository
             return [];
         }
 
+        var (uploadProjects, uploadProjectsParams) = DapperInClause.Expand("projectIds", projectIds.ToList());
+        uploadProjectsParams.AddDynamicParams(new { orgId });
+        // rawsql: uploadProjects is a parameterized IN (@projectIds0, …) list built in C# by DapperInClause.
         var rows = await conn.QueryAsync<LastUploadRow>(new CommandDefinition(
             """
             SELECT v.project_id AS ProjectId, MAX(d.uploaded_at) AS LastUploadAt
@@ -340,8 +358,8 @@ public sealed partial class ProjectRepository
             JOIN project_versions v ON v.id = d.project_version_id AND v.org_id = @orgId
             WHERE d.org_id = @orgId AND v.project_id IN @projectIds
             GROUP BY v.project_id
-            """,
-            new { orgId, projectIds }, cancellationToken: ct));
+            """.Replace("@projectIds", uploadProjects, StringComparison.Ordinal),
+            uploadProjectsParams, cancellationToken: ct));
 
         return rows.Where(r => r.LastUploadAt is not null)
                    .ToDictionary(r => r.ProjectId, r => r.LastUploadAt!.Value, StringComparer.Ordinal);

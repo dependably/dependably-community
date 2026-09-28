@@ -392,7 +392,7 @@ public sealed class InstanceVulnTrackerConfigEndpointTests : IClassFixture<Depen
         await using var conn = await store.OpenAsync();
         string? detail = await conn.ExecuteScalarAsync<string>(
             "SELECT detail FROM audit_log WHERE action = 'instance_vuln_tracker_config_updated' "
-            + "ORDER BY rowid DESC LIMIT 1");
+            + "ORDER BY created_at DESC LIMIT 1");
 
         Assert.NotNull(detail);
         Assert.DoesNotContain("osvst_super_secret", detail);

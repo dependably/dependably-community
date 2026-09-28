@@ -4,6 +4,7 @@
   import { onMount } from 'svelte'
   import { t } from 'svelte-i18n'
   import { systemApi } from '../lib/api.js'
+  import { navigate } from '../lib/store.js'
   import DataTable from '../lib/DataTable.svelte'
   import RowActionsMenu from '../lib/RowActionsMenu.svelte'
   import SearchInput from '../lib/SearchInput.svelte'
@@ -47,7 +48,7 @@
   let deleteTarget = null
   let deleteBusy = false
 
-  // Lifecycle gate toggle — null = closed; otherwise { tenant, newStatus: 'active' | 'suspended' }.
+  // Lifecycle gate toggle — null = closed; otherwise { tenant, newStatus: 'active' | 'suspended' | 'read_only' }.
   let statusTarget = null
   let statusBusy = false
 
@@ -142,6 +143,7 @@
   function reasonSentence(reason, stats) {
     switch (reason) {
       case 'suspended': return $t('system.tenants.detail.reasonDetail.suspended')
+      case 'read_only': return $t('system.tenants.detail.reasonDetail.read_only')
       case 'storage_quota_exceeded': return $t('system.tenants.detail.reasonDetail.storage_quota_exceeded')
       case 'storage_quota_near': return $t('system.tenants.detail.reasonDetail.storage_quota_near')
       case 'stats_stale': return $t('system.tenants.detail.reasonDetail.stats_stale')
@@ -398,6 +400,8 @@
           <span class="status-pill status-softDeleted">{$t('system.tenants.status.softDeleted')}</span>
         {:else if effectiveStatus(ten) === 'suspended'}
           <span class="status-pill status-suspended">{$t('system.tenants.status.suspended')}</span>
+        {:else if effectiveStatus(ten) === 'read_only'}
+          <span class="status-pill status-readOnly">{$t('system.tenants.status.readOnly')}</span>
         {:else}
           <span class="status-pill status-active">{$t('system.tenants.status.active')}</span>
         {/if}
@@ -417,19 +421,29 @@
       <td class="actions-cell">
         <div class="row-actions">
           <RowActionsMenu id={ten.id} bind:openId={openActionsId} ariaLabel={$t('system.tenants.actionsMenu.open')}>
+            <button class="popover-item" on:click|stopPropagation={() => navigate('system-tenant-usage', { slug: ten.slug })}>
+              {$t('system.tenants.actionsMenu.viewUsage')}
+            </button>
             {#if ten.deletedAt}
               <button class="popover-item" on:click|stopPropagation={() => restore(ten.slug)}>
                 {$t('system.tenants.actionsMenu.restore')}
               </button>
             {:else}
+              <div class="popover-divider"></div>
               <button class="popover-item" on:click|stopPropagation={() => openQuotaEditor(ten)}>
                 {$t('system.tenants.actionsMenu.editQuota')}
               </button>
-              {#if ten.status === 'suspended'}
+              {#if ten.status === 'suspended' || ten.status === 'read_only'}
                 <button class="popover-item" on:click|stopPropagation={() => openStatusChange(ten, 'active')}>
                   {$t('system.tenants.actionsMenu.enable')}
                 </button>
-              {:else}
+              {/if}
+              {#if ten.status !== 'read_only'}
+                <button class="popover-item" on:click|stopPropagation={() => openStatusChange(ten, 'read_only')}>
+                  {$t('system.tenants.actionsMenu.setReadOnly')}
+                </button>
+              {/if}
+              {#if ten.status !== 'suspended'}
                 <button class="popover-item" on:click|stopPropagation={() => openStatusChange(ten, 'suspended')}>
                   {$t('system.tenants.actionsMenu.disable')}
                 </button>
@@ -476,6 +490,8 @@
                     <span class="status-pill status-softDeleted">{$t('system.tenants.status.softDeleted')}</span>
                   {:else if effectiveStatus(ten) === 'suspended'}
                     <span class="status-pill status-suspended">{$t('system.tenants.status.suspended')}</span>
+                  {:else if effectiveStatus(ten) === 'read_only'}
+                    <span class="status-pill status-readOnly">{$t('system.tenants.status.readOnly')}</span>
                   {:else}
                     <span class="status-pill status-active">{$t('system.tenants.status.active')}</span>
                   {/if}
@@ -660,16 +676,20 @@
       {#if statusTarget.newStatus === 'suspended'}
         <h3>{$t('system.tenants.disableModalTitle')}</h3>
         <p>{$t('system.tenants.disableConfirm', { values: { slug: statusTarget.tenant.slug } })}</p>
+      {:else if statusTarget.newStatus === 'read_only'}
+        <h3>{$t('system.tenants.readOnlyModalTitle')}</h3>
+        <p>{$t('system.tenants.readOnlyConfirm', { values: { slug: statusTarget.tenant.slug } })}</p>
       {:else}
         <h3>{$t('system.tenants.enableModalTitle')}</h3>
         <p>{$t('system.tenants.enableConfirm', { values: { slug: statusTarget.tenant.slug } })}</p>
       {/if}
       <div class="modal-actions">
         <button on:click={() => statusTarget = null} disabled={statusBusy}>{$t('common.actions.cancel')}</button>
-        <button class={statusTarget.newStatus === 'suspended' ? 'danger' : 'primary'}
+        <button class={statusTarget.newStatus === 'active' ? 'primary' : 'danger'}
                 on:click={confirmStatusChange} disabled={statusBusy}>
           {#if statusBusy}{$t('system.tenants.statusUpdating')}
           {:else if statusTarget.newStatus === 'suspended'}{$t('system.tenants.actionsMenu.disable')}
+          {:else if statusTarget.newStatus === 'read_only'}{$t('system.tenants.actionsMenu.setReadOnly')}
           {:else}{$t('system.tenants.actionsMenu.enable')}
           {/if}
         </button>
@@ -778,6 +798,7 @@
   }
   .status-pill.status-active { color: var(--success); }
   .status-pill.status-suspended { color: var(--warning); }
+  .status-pill.status-readOnly { color: var(--warning); }
   .status-pill.status-softDeleted { color: var(--text2); }
 
   .health-dot {

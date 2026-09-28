@@ -70,19 +70,19 @@ public sealed class QuarantineWorkflowTests : IClassFixture<DependablyFactory>, 
                 WHERE p.name = @pkg LIMIT 1
                 """, new { pkg });
             string vulnId = Guid.NewGuid().ToString("N");
+            string now = TimeProvider.System.GetUtcNow().ToUtcIso();
             await conn.ExecuteAsync(
                 """
                 INSERT INTO vulnerabilities (id, osv_id, ecosystem, package_name, modified_at, fetched_at)
-                VALUES (@vulnId, @osvId, 'npm', @pkg,
-                    strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-                """, new { vulnId, osvId = $"MAL-2026-{Guid.NewGuid():N}", pkg });
+                VALUES (@vulnId, @osvId, 'npm', @pkg, @now, @now)
+                """, new { vulnId, osvId = $"MAL-2026-{Guid.NewGuid():N}", pkg, now });
             string pvvId = Guid.NewGuid().ToString("N");
             await conn.ExecuteAsync(
                 "INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind) VALUES (@pvvId, @versionId, @vulnId, 'package_version')",
                 new { pvvId, versionId, vulnId });
             await conn.ExecuteAsync(
-                "UPDATE package_versions SET vuln_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @versionId",
-                new { versionId });
+                "UPDATE package_versions SET vuln_checked_at = @now WHERE id = @versionId",
+                new { versionId, now });
         }
 
         var blocked = await DownloadTarballAsync(pkg);

@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -77,6 +78,10 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
     /// </summary>
     public async Task<JanitorSummary> RunOnceAsync(CancellationToken ct = default)
     {
+        // xtenant: stale upload sessions are found across every tenant; an upload id's staging file
+        // is shared by its reference count.
+        using var ownerScope = DbScope.CrossTenant("oci staging janitor");
+
         int ttlMinutes = ParseTtlMinutes();
         var cutoff = _time.GetUtcNow().AddMinutes(-ttlMinutes);
         string cutoffStr = cutoff.ToUtcIso();

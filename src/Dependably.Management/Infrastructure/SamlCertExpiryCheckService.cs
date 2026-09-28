@@ -1,6 +1,7 @@
 using Cronos;
 using Dapper;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -175,6 +176,9 @@ public sealed class SamlCertExpiryCheckService : BackgroundService
 
     internal async Task RunCheckPassAsync(CancellationToken ct)
     {
+        // xtenant: scans every tenant's SAML signing certificate for expiry.
+        using var ownerScope = DbScope.CrossTenant("saml cert expiry check");
+
         using var scope = Observability.BackgroundJobScope.Begin("saml-cert-expiry", "saml.cert_expiry_check", _time);
         try
         {

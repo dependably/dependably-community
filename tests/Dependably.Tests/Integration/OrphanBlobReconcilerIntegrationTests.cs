@@ -84,7 +84,7 @@ public sealed class OrphanBlobReconcilerIntegrationTests : IClassFixture<Dependa
             testClock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(testClock));
 
-        var summary = await sut.RunOnceAsync();
+        var summary = await TestHarnessDbScope.AsHostAsync(() => sut.RunOnceAsync());
 
         // Step 5: invariants.
         Assert.Equal(1, summary.OrphansDeleted);
@@ -133,7 +133,7 @@ public sealed class OrphanBlobReconcilerIntegrationTests : IClassFixture<Dependa
         await BackdateAsync(jarKey, TestTime.KnownNow.AddHours(-2));
         await BackdateAsync(pomKey, TestTime.KnownNow.AddHours(-2));
 
-        var summary = await BuildReconciler().RunOnceAsync();
+        var summary = await TestHarnessDbScope.AsHostAsync(() => BuildReconciler().RunOnceAsync());
 
         Assert.True(await _factory.BlobStore.ExistsAsync(jarKey), "JAR must survive the sweep.");
         Assert.True(await _factory.BlobStore.ExistsAsync(pomKey),

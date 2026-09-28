@@ -1,6 +1,7 @@
 using Dependably.Api.PyPiProtocol;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Caching;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -34,12 +35,14 @@ public class PyPiController : ControllerBase
     /// <summary>GET /simple/ — PEP 503 package listing</summary>
     [HttpGet("/simple/")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "pypi")]
     public Task<IActionResult> SimpleIndex(CancellationToken ct)
         => _simpleIndex.SimpleIndexAsync(HttpContext, CurrentTenantId(), ct);
 
     /// <summary>GET /simple/{package}/ — PEP 503/592 version listing</summary>
     [HttpGet("/simple/{package}/")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "pypi")]
     public Task<IActionResult> PackageIndex(string package, CancellationToken ct)
         => _simpleIndex.PackageIndexAsync(HttpContext, CurrentTenantId(), package, ct);
 
@@ -48,12 +51,14 @@ public class PyPiController : ControllerBase
     /// <summary>GET /pypi/{package}/json — PyPI JSON API for a package's latest version</summary>
     [HttpGet("/pypi/{package}/json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "pypi")]
     public Task<IActionResult> PackageJson(string package, CancellationToken ct)
         => _jsonApi.PackageJsonAsync(HttpContext, CurrentTenantId(), package, ct);
 
     /// <summary>GET /pypi/{package}/{version}/json — PyPI JSON API for a specific version</summary>
     [HttpGet("/pypi/{package}/{version}/json")]
     [EnableRateLimiting("metadata")]
+    [MeteredEgress(EgressKind.Metadata, "pypi")]
     public Task<IActionResult> PackageVersionJson(string package, string version, CancellationToken ct)
         => _jsonApi.PackageVersionJsonAsync(HttpContext, CurrentTenantId(), package, version, ct);
 
@@ -74,6 +79,7 @@ public class PyPiController : ControllerBase
     /// <summary>GET /packages/{file} — blob download with proxy cache (tenant-implicit from host)</summary>
     [HttpGet("/packages/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "pypi")]
     public Task<IActionResult> DownloadPackage(string file, CancellationToken ct)
         => _download.DownloadPackageAsync(HttpContext, CurrentTenantId(), file, ct);
 
@@ -95,6 +101,7 @@ public class PyPiController : ControllerBase
     /// <summary>GET /packages/{h1}/{h2}/{sha256}/{file} — see <see cref="HeadPackageCdnShaped"/>.</summary>
     [HttpGet("/packages/{h1:regex(^[[0-9a-fA-F]]{{2}}$)}/{h2:regex(^[[0-9a-fA-F]]{{2}}$)}/{sha256:regex(^[[0-9a-fA-F]]{{64}}$)}/{file}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "pypi")]
     public Task<IActionResult> DownloadPackageCdnShaped(string h1, string h2, string sha256, string file, CancellationToken ct)
         => _download.DownloadPackageByDigestAsync(HttpContext, CurrentTenantId(), h1, h2, sha256, file, ct);
 

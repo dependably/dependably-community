@@ -85,6 +85,10 @@ public static class PersonalDataTables
             ["system_admins"] =
                 "Operator-plane identity with its own lifecycle and no tenant_id — not a tenant `users` " +
                 "row. The tenant self-service export serves tenant data subjects only.",
+            ["system_tokens"] =
+                "Instance-level API token record for the system-admin tenant-lifecycle endpoints; " +
+                "created_by is an authorship-provenance stamp on an operator-plane row, not the " +
+                "subject's personal data. Same reasoning as system_admins.",
             ["reserved_namespace"] =
                 "Org namespace-governance config; created_by is an authorship-provenance stamp on an " +
                 "org-owned row, not the subject's personal data.",

@@ -35,6 +35,7 @@ public static class ManagementServiceCollectionExtensions
             sp.GetRequiredService<TimeProvider>()));
         services.AddSingleton<OrgSettingsRepository>();
         services.AddSingleton<SystemAdminRepository>();
+        services.AddSingleton<SystemTokenRepository>();
         services.AddSingleton<PackageAnalyticsRepository>();
         services.AddSingleton<UserService>();
         services.AddSingleton<IAuditEmitter, AuditEmitter>();

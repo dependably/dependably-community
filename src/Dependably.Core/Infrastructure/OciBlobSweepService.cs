@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
@@ -66,6 +67,10 @@ public sealed class OciBlobSweepService : ScheduledBackgroundService
     /// </summary>
     public async Task<int> RunOnceAsync(CancellationToken ct = default)
     {
+        // xtenant: reclaiming a blob asks whether any tenant still references it; a tenant-bound
+        // count would miss the others and delete a shared blob.
+        using var ownerScope = DbScope.CrossTenant("oci blob sweep");
+
         // This sweep is the only scheduled job in the OCI path that deletes bytes, so the operator
         // switch matters more here than anywhere else — and the edge allowlist inversion over
         // BackgroundJobs.Known must keep a cache node from reclaiming against a graph the

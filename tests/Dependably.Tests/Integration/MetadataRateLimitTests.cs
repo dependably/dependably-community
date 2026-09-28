@@ -49,6 +49,12 @@ public sealed class MetadataRateLimitTests
         string token = await factory.CreateToken("pull");
         using var client = factory.CreateClientWithBearer(token);
 
+        // The limiter's window is one real-time second. Render the packument once from another
+        // source address (its own partition) so the counted requests below are cache hits that
+        // land well inside one window even on a loaded runner; a first-render inside the burst can
+        // outlast the window and let the third request through.
+        await GetWithIpAsync(client, "/npm/rate-limit-npm", "198.51.100.140");
+
         // Exhaust the 2-permit window.
         for (int i = 0; i < 2; i++)
         {
@@ -75,6 +81,9 @@ public sealed class MetadataRateLimitTests
 
         string token = await factory.CreateToken("pull");
         using var client = factory.CreateClientWithBasic(token);
+
+        // Warm the rendered index from another partition first; see the npm test above.
+        await GetWithIpAsync(client, "/simple/rate-limit-pypi/", "198.51.100.142");
 
         for (int i = 0; i < 2; i++)
         {
@@ -292,7 +301,7 @@ public sealed class MetadataRateLimitTests
     private sealed class MetadataRateLimitFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly Dictionary<string, string> _settings;
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
         private readonly InMemoryBlobStore _blobStore = new();
 
         public MetadataRateLimitFactory(Dictionary<string, string> settings) => _settings = settings;
@@ -304,14 +313,14 @@ public sealed class MetadataRateLimitTests
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blobStore);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blobStore, _blobStore));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
             builder.Services.RemoveAll<IUpstreamUrlValidator>();
             builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
             builder.Services.RemoveAll<SsrfConnectCallback>();
@@ -345,7 +354,7 @@ public sealed class MetadataRateLimitTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -357,8 +366,8 @@ public sealed class MetadataRateLimitTests
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         // ── Token helpers ─────────────────────────────────────────────────────

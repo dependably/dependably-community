@@ -1,7 +1,24 @@
+import type { Page } from '@playwright/test'
 import { test, expect } from '../fixtures/index.js'
 import fs from 'fs'
 import path from 'path'
-import { loginAsAdmin, fixturesRoot } from '../helpers/api-client.js'
+import { loginAsAdmin, inviteFreshAdmin, fixturesRoot } from '../helpers/api-client.js'
+import { LoginPage } from '../pages/LoginPage.js'
+
+// The row-menu test reads English menu labels, and the shared `admin@dependably.local` account's
+// language is not this spec's to assume: i18n.spec.ts persists a French override to it, and a
+// worker interleaved with that spec would render this one in French. A freshly-invited admin
+// has no language override of its own.
+async function loginAsFreshAdmin(page: Page, baseURL: string) {
+  const authedAdmin = await loginAsAdmin(baseURL)
+  const fresh = await inviteFreshAdmin(authedAdmin, baseURL)
+  await authedAdmin.dispose()
+
+  const login = new LoginPage(page)
+  await login.goto()
+  await login.login(fresh.email, fresh.password)
+  await login.expectNavVisible()
+}
 
 /**
  * Copyable install commands: one per version inside the expanded detail panel, and the unpinned
@@ -66,12 +83,13 @@ test.describe('Install commands', () => {
     }
   })
 
-  test('offers the command from the packages list without opening the package', async ({ adminPage }) => {
+  test('offers the command from the packages list without opening the package', async ({ page, baseURL }) => {
     const pageErrors: string[] = []
-    adminPage.on('pageerror', (e) => pageErrors.push(e.message))
+    page.on('pageerror', (e) => pageErrors.push(e.message))
 
-    await adminPage.goto('/packages?q=mypy-extensions')
-    const main = adminPage.locator('main.main-content')
+    await loginAsFreshAdmin(page, baseURL!)
+    await page.goto('/packages?q=mypy-extensions')
+    const main = page.locator('main.main-content')
     await expect(main).toBeVisible({ timeout: 10_000 })
 
     try {

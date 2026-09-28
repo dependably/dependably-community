@@ -257,7 +257,7 @@ public sealed class ProxyFetchSoakTests
         private readonly string _blobDir;
         private readonly string _stagingDir;
         private readonly DripFeedHandler _handler;
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
         private LocalBlobStore? _blobStore;
 
         public SoakFactory(string blobDir, string stagingDir, DripFeedHandler handler)
@@ -274,6 +274,7 @@ public sealed class ProxyFetchSoakTests
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             _blobStore = new LocalBlobStore(_blobDir);
@@ -282,8 +283,7 @@ public sealed class ProxyFetchSoakTests
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blobStore, _blobStore));
 
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.Services.RemoveAll<IUpstreamUrlValidator>();
             builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
@@ -311,7 +311,7 @@ public sealed class ProxyFetchSoakTests
             var app = builder.Build();
             Program.ConfigureApp(app);
 
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -320,7 +320,7 @@ public sealed class ProxyFetchSoakTests
             base.Dispose(disposing);
             if (disposing)
             {
-                _metadataStore.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                _db.DisposeAsync().AsTask().GetAwaiter().GetResult();
             }
         }
 

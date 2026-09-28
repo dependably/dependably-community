@@ -17,13 +17,16 @@ public class Org
     /// </summary>
     public DateTimeOffset? DeletedAt { get; set; }
     /// <summary>
-    /// Tenant lifecycle gate. 'active' is the only state that admits a request: a non-active
-    /// value is a full lockout — <see cref="TenantStatusEnforcementMiddleware"/> refuses every
-    /// tenant-bound request for the org (protocol plane, management API, and login alike) before
-    /// it reaches a controller, and <see cref="Storage.ITenantStorageResolver"/> applies the same
-    /// check independently as defence in depth (raising <see cref="Storage.TenantNotReadyException"/>).
-    /// system_admin can toggle between 'active' and 'suspended' from the Tenants page;
-    /// 'archived' and 'deleting' get the identical lockout but are enterprise-only.
+    /// Tenant lifecycle gate. 'active' is the only state that admits every request without
+    /// restriction — <see cref="TenantStatusEnforcementMiddleware"/> refuses a non-active tenant
+    /// before it reaches a controller, and <see cref="Storage.ITenantStorageResolver"/> applies
+    /// the same check independently as defence in depth (raising
+    /// <see cref="Storage.TenantNotReadyException"/>). 'suspended' is a full lockout (protocol
+    /// plane, management API, and login alike). 'read_only' is narrower: reads and every
+    /// management-plane request stay admitted, only a state-changing protocol-plane request is
+    /// refused. system_admin can toggle between 'active', 'suspended', and 'read_only' from the
+    /// Tenants page; 'archived' and 'deleting' get the same full lockout as 'suspended' but are
+    /// enterprise-only.
     /// </summary>
     public string Status { get; set; } = "active";
     /// <summary>
@@ -950,6 +953,17 @@ public class AuditEntry
     public string? OrgSlug { get; set; }
     public string? ActorId { get; set; }
     public string? ActorEmail { get; set; }
+    /// <summary>
+    /// <see cref="Dependably.Infrastructure.ActorKinds"/> value, populated for scope='system' rows
+    /// attributed to a system API token; NULL for a system_admin actor or a genuinely actor-less row.
+    /// </summary>
+    public string? ActorKind { get; set; }
+    /// <summary>
+    /// Denormalized display name for a system-token actor (system_tokens.name at write time),
+    /// because system_tokens is hard-deleted on revocation and the actor_id join stops resolving
+    /// exactly when an operator is asking who used the credential. NULL for a system_admin actor.
+    /// </summary>
+    public string? ActorLabel { get; set; }
     public string Action { get; set; } = "";
     public string? Ecosystem { get; set; }
     public string? Purl { get; set; }

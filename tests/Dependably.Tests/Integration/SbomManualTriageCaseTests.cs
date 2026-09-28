@@ -188,10 +188,10 @@ public sealed class SbomManualTriageCaseTests : IAsyncLifetime
             SELECT vuln_key
             FROM project_vuln_analysis
             WHERE project_version_id = @versionId AND purl_key = @purlKey
-            ORDER BY vuln_key
             """,
             new { versionId = target.VersionId, purlKey });
-        return rows.ToList();
+        // Ordinal, in C#: the engines' collations disagree on how case sorts.
+        return rows.Order(StringComparer.Ordinal).ToList();
     }
 
     private async Task<string?> SourceAsync(Target target, string purlKey, string vulnKey)

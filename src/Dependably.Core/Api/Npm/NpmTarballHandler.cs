@@ -34,7 +34,8 @@ public sealed class NpmTarballHandler(
     UpstreamRegistryResolver registries,
     NpmFirstFetchMetadataReader firstFetch,
     TimeProvider time,
-    ILogger<NpmTarballHandler> logger)
+    ILogger<NpmTarballHandler> logger,
+    BlobPresignService? presign = null)
 {
     public Task<IActionResult> GetTarballAsync(
         HttpContext httpContext, string orgId, string pkg, string file, CancellationToken ct)
@@ -358,22 +359,31 @@ public sealed class NpmTarballHandler(
         }
 
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
-        if (stream is null)
+        string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
+        var redirect = presign is null
+            ? null
+            : await presign.TryRedirectAsync(httpContext, blobs, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "npm", ct);
+        Stream? stream = null;
+        if (redirect is null)
         {
-            return null;
+            stream = await blobs.GetAsync(storeKey, ct);
+            if (stream is null)
+            {
+                return null;
+            }
+
+            httpContext.Response.Headers["X-Cache"] = "HIT";
+            if (caFacts.Purl is not null)
+            {
+                httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
+            }
+            if (!string.IsNullOrEmpty(caFacts.ContentHash))
+            {
+                httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
-        httpContext.Response.Headers["X-Cache"] = "HIT";
-        if (caFacts.Purl is not null)
-        {
-            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
-        }
-        if (!string.IsNullOrEmpty(caFacts.ContentHash))
-        {
-            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
         if (caFacts.Purl is not null)
         {
             await audit.LogActivityAsync(orgId, "npm", caFacts.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
@@ -382,7 +392,7 @@ public sealed class NpmTarballHandler(
         // Increment per-tenant download count on the global plane. Enqueued off the request
         // path — the row already exists (seeded durably at first-fetch).
         await tenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
-        return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
+        return redirect ?? new FileStreamResult(stream!, "application/octet-stream") { FileDownloadName = file };
     }
 
     // Evaluates allowlist, blocklist, and proxy-passthrough gates for the proxy fetch path.
@@ -454,23 +464,33 @@ public sealed class NpmTarballHandler(
             }
         }
 
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(pkgVersion.BlobKey), ct);
-        if (stream is null)
+        string storeKey = BlobKeys.StoreKey(pkgVersion.BlobKey);
+        var redirect = presign is null
+            ? null
+            : await presign.TryRedirectAsync(
+                httpContext, blobs, storeKey, pkgVersion.SizeBytes, BlobOrigins.FromColumn(pkgVersion.Origin), "npm", ct);
+        Stream? stream = null;
+        if (redirect is null)
         {
-            return new NotFoundResult();
+            stream = await blobs.GetAsync(storeKey, ct);
+            if (stream is null)
+            {
+                return new NotFoundResult();
+            }
+
+            httpContext.Response.Headers["X-Cache"] = "HIT";
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
+            if (pkgVersion.ChecksumSha256 is not null)
+            {
+                httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
-        httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
-        if (pkgVersion.ChecksumSha256 is not null)
-        {
-            httpContext.Response.Headers.ETag = $"\"sha256:{pkgVersion.ChecksumSha256}\"";
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
         await audit.LogActivityAsync(orgId, "npm", pkgVersion.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
-        return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
+        return redirect ?? new FileStreamResult(stream!, "application/octet-stream") { FileDownloadName = file };
     }
 
     // Identifies a proxied npm tarball request: org scope, full package name, short name,

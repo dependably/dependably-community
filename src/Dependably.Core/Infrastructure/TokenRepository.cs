@@ -61,7 +61,11 @@ public class TokenRepository
             return cachedRecord;
         }
 
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: a presented token is looked up by its hash wherever it belongs, so that a token
+        // of another tenant is found and then refused as a tenant mismatch by the caller — which
+        // compares the record's org_id against the host tenant and audits the refusal — rather
+        // than being indistinguishable from a forged one.
+        await using var conn = await _db.OpenCrossTenantAsync("presented token lookup", ct);
 
         string now = _time.GetUtcNow().ToUtcIso();
 

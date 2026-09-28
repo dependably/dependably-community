@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Diagnostics;
 using Dapper;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -220,7 +221,9 @@ public sealed class ActivityWriterHostedService : BackgroundService
             return;
         }
 
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: one batch carries rows for many orgs, each row naming its own org_id; the
+        // channel producer stamped that org from the request's resolved tenant.
+        await using var conn = await _db.OpenCrossTenantAsync("activity batch writer", ct);
         // Wrap the batch in a single transaction so the writer takes the write lock and
         // commits to disk once per batch instead of once per row.
         await using var tx = await conn.BeginTransactionAsync(ct);

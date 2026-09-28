@@ -11119,6 +11119,12 @@ dotnet/</target>
         <target>Journal d&apos;audit système</target>
       </segment>
     </unit>
+    <unit id="system.audit.tokenActor">
+      <segment state="translated">
+        <source>Token: {name}</source>
+        <target>Jeton : {name}</target>
+      </segment>
+    </unit>
     <unit id="system.backgroundJobs.columns.duration">
       <segment state="translated">
         <source>Duration</source>
@@ -11677,6 +11683,12 @@ dotnet/</target>
         <target>Actifs</target>
       </segment>
     </unit>
+    <unit id="system.dashboard.tenants.readOnly">
+      <segment state="translated">
+        <source>Read-only</source>
+        <target>Lecture seule</target>
+      </segment>
+    </unit>
     <unit id="system.dashboard.tenants.softDeleted">
       <segment state="translated">
         <source>Soft-deleted</source>
@@ -11705,6 +11717,24 @@ dotnet/</target>
       <segment state="translated">
         <source>Operator dashboard</source>
         <target>Tableau de bord opérateur</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.usage.monthToDate">
+      <segment state="translated">
+        <source>Current UTC month to date</source>
+        <target>Mois UTC en cours à ce jour</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.usage.title">
+      <segment state="translated">
+        <source>Usage (month to date)</source>
+        <target>Utilisation (mois en cours)</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.usage.unavailable">
+      <segment state="translated">
+        <source>Usage figures unavailable.</source>
+        <target>Chiffres d&apos;utilisation indisponibles.</target>
       </segment>
     </unit>
     <unit id="system.login.email">
@@ -11801,6 +11831,18 @@ dotnet/</target>
       <segment state="translated">
         <source>Tenants</source>
         <target>Locataires</target>
+      </segment>
+    </unit>
+    <unit id="system.nav.tokens">
+      <segment state="translated">
+        <source>Tokens</source>
+        <target>Jetons</target>
+      </segment>
+    </unit>
+    <unit id="system.nav.usage">
+      <segment state="translated">
+        <source>Usage</source>
+        <target>Utilisation</target>
       </segment>
     </unit>
     <unit id="system.nav.users">
@@ -12631,6 +12673,18 @@ dotnet/</target>
         <target>Restaurer</target>
       </segment>
     </unit>
+    <unit id="system.tenants.actionsMenu.setReadOnly">
+      <segment state="translated">
+        <source>Set read-only</source>
+        <target>Passer en lecture seule</target>
+      </segment>
+    </unit>
+    <unit id="system.tenants.actionsMenu.viewUsage">
+      <segment state="translated">
+        <source>View usage</source>
+        <target>Voir l&apos;utilisation</target>
+      </segment>
+    </unit>
     <unit id="system.tenants.columns.actions">
       <segment state="translated">
         <source>Actions</source>
@@ -12805,6 +12859,12 @@ dotnet/</target>
         <target>{count} paquets en attente de révision de quarantaine.</target>
       </segment>
     </unit>
+    <unit id="system.tenants.detail.reasonDetail.read_only">
+      <segment state="translated">
+        <source>Tenant is read-only — downloads keep working; uploads and publishes are refused.</source>
+        <target>Locataire en lecture seule — les téléchargements continuent de fonctionner; les téléversements et les publications sont refusés.</target>
+      </segment>
+    </unit>
     <unit id="system.tenants.detail.reasonDetail.stats_frozen_non_active">
       <segment state="translated">
         <source>Statistics snapshot is frozen because the tenant is not active — it resumes once the tenant is reinstated.</source>
@@ -12929,6 +12989,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Packages pending quarantine review</source>
         <target>Paquets en attente de révision de quarantaine</target>
+      </segment>
+    </unit>
+    <unit id="system.tenants.health.reasons.read_only">
+      <segment state="translated">
+        <source>Tenant read-only</source>
+        <target>Locataire en lecture seule</target>
       </segment>
     </unit>
     <unit id="system.tenants.health.reasons.stats_frozen_non_active">
@@ -13087,6 +13153,18 @@ dotnet/</target>
         <target>Illimité</target>
       </segment>
     </unit>
+    <unit id="system.tenants.readOnlyConfirm">
+      <segment state="translated">
+        <source>Set {slug} to read-only? Downloads keep working; uploads and publishes are refused. The management API and login stay reachable. Existing data is preserved.</source>
+        <target>Passer {slug} en lecture seule? Les téléchargements continuent de fonctionner; les téléversements et les publications sont refusés. L&apos;API de gestion et la connexion restent accessibles. Les données existantes sont préservées.</target>
+      </segment>
+    </unit>
+    <unit id="system.tenants.readOnlyModalTitle">
+      <segment state="translated">
+        <source>Set tenant read-only</source>
+        <target>Passer le locataire en lecture seule</target>
+      </segment>
+    </unit>
     <unit id="system.tenants.restore">
       <segment state="translated">
         <source>Restore</source>
@@ -13103,6 +13181,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Active</source>
         <target>Actif</target>
+      </segment>
+    </unit>
+    <unit id="system.tenants.status.readOnly">
+      <segment state="translated">
+        <source>Read-only</source>
+        <target>Lecture seule</target>
       </segment>
     </unit>
     <unit id="system.tenants.status.softDeleted">
@@ -13127,6 +13211,390 @@ dotnet/</target>
       <segment state="translated">
         <source>Tenants</source>
         <target>Locataires</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.back">
+      <segment state="translated">
+        <source>← Back to Usage</source>
+        <target>← Retour à Utilisation</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.day">
+      <segment state="translated">
+        <source>Day</source>
+        <target>Jour</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.granularity">
+      <segment state="translated">
+        <source>Granularity</source>
+        <target>Granularité</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.hour">
+      <segment state="translated">
+        <source>Hour</source>
+        <target>Heure</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.monthToDate.title">
+      <segment state="translated">
+        <source>Month to date</source>
+        <target>Mois en cours à ce jour</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.series.bucket">
+      <segment state="translated">
+        <source>Bucket</source>
+        <target>Intervalle</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.series.empty">
+      <segment state="translated">
+        <source>No usage recorded for this range.</source>
+        <target>Aucune utilisation enregistrée pour cette plage.</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.series.metadataRequests">
+      <segment state="translated">
+        <source>Metadata requests</source>
+        <target>Requêtes de métadonnées</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.series.redirect">
+      <segment state="translated">
+        <source>Redirect-delivered</source>
+        <target>Livré par redirection</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.series.requests">
+      <segment state="translated">
+        <source>Metered requests</source>
+        <target>Requêtes mesurées</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.series.title">
+      <segment state="translated">
+        <source>Usage over time</source>
+        <target>Utilisation dans le temps</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.artifacts">
+      <segment state="translated">
+        <source>Artefacts</source>
+        <target>Artefacts</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.cacheEntries">
+      <segment state="translated">
+        <source>Proxy-cache entries</source>
+        <target>Entrées du cache proxy</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.dbRows">
+      <segment state="translated">
+        <source>Database rows</source>
+        <target>Lignes de base de données</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.hostedVersions">
+      <segment state="translated">
+        <source>Hosted versions</source>
+        <target>Versions hébergées</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.metadataRequests">
+      <segment state="translated">
+        <source>Metadata requests (month to date)</source>
+        <target>Requêtes de métadonnées (mois en cours)</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.noSnapshot">
+      <segment state="translated">
+        <source>Counts appear after the first daily storage snapshot.</source>
+        <target>Les comptes apparaissent après le premier instantané de stockage quotidien.</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.note">
+      <segment state="translated">
+        <source>Capacity and abuse signals. They are never billed.</source>
+        <target>Signaux de capacité et d&apos;abus. Ils ne sont jamais facturés.</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.ociBlobs">
+      <segment state="translated">
+        <source>OCI blobs</source>
+        <target>Blobs OCI</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.ociManifests">
+      <segment state="translated">
+        <source>OCI manifests</source>
+        <target>Manifests OCI</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.requests">
+      <segment state="translated">
+        <source>Metered requests (month to date)</source>
+        <target>Requêtes mesurées (mois en cours)</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.signals.title">
+      <segment state="translated">
+        <source>Operator signals, not billed</source>
+        <target>Signaux d&apos;exploitation, non facturés</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.snapshot.billable">
+      <segment state="translated">
+        <source>Billable</source>
+        <target>Facturable</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.snapshot.cache">
+      <segment state="translated">
+        <source>Cache-attributed</source>
+        <target>Attribué au cache</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.snapshot.capturedAt">
+      <segment state="translated">
+        <source>Captured {date}</source>
+        <target>Capturé le {date}</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.snapshot.hosted">
+      <segment state="translated">
+        <source>Hosted</source>
+        <target>Hébergé</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.snapshot.none">
+      <segment state="translated">
+        <source>No storage snapshot captured yet.</source>
+        <target>Aucun instantané de stockage capturé pour l&apos;instant.</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.snapshot.oci">
+      <segment state="translated">
+        <source>OCI uploaded</source>
+        <target>OCI téléversé</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.snapshot.title">
+      <segment state="translated">
+        <source>Latest storage snapshot</source>
+        <target>Dernier instantané de stockage</target>
+      </segment>
+    </unit>
+    <unit id="system.tenantUsage.title">
+      <segment state="translated">
+        <source>Usage — {slug}</source>
+        <target>Utilisation — {slug}</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.artifacts">
+      <segment state="translated">
+        <source>Artefacts</source>
+        <target>Artefacts</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.dbRows">
+      <segment state="translated">
+        <source>Database rows</source>
+        <target>Lignes de base de données</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.egress">
+      <segment state="translated">
+        <source>Artefact egress</source>
+        <target>Sortie d&apos;artefacts</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.metadata">
+      <segment state="translated">
+        <source>Metadata egress</source>
+        <target>Sortie de métadonnées</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.metadataRequests">
+      <segment state="translated">
+        <source>Metadata requests</source>
+        <target>Requêtes de métadonnées</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.requests">
+      <segment state="translated">
+        <source>Metered requests</source>
+        <target>Requêtes mesurées</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.snapshot">
+      <segment state="translated">
+        <source>Latest snapshot</source>
+        <target>Dernier instantané</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.storage">
+      <segment state="translated">
+        <source>Billable storage (avg)</source>
+        <target>Stockage facturable (moy.)</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.tenant">
+      <segment state="translated">
+        <source>Tenant</source>
+        <target>Locataire</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.downloadCsv">
+      <segment state="translated">
+        <source>Download CSV</source>
+        <target>Télécharger le CSV</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.ecosystems.bytes">
+      <segment state="translated">
+        <source>Bytes</source>
+        <target>Octets</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.ecosystems.ecosystem">
+      <segment state="translated">
+        <source>Ecosystem</source>
+        <target>Écosystème</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.ecosystems.meter">
+      <segment state="translated">
+        <source>Meter</source>
+        <target>Compteur</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.ecosystems.redirectBytes">
+      <segment state="translated">
+        <source>Redirect-delivered</source>
+        <target>Livré par redirection</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.ecosystems.title">
+      <segment state="translated">
+        <source>By ecosystem</source>
+        <target>Par écosystème</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.effectiveRange">
+      <segment state="translated">
+        <source>Showing {from} – {to}</source>
+        <target>Affichage {from} – {to}</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.empty">
+      <segment state="translated">
+        <source>No usage recorded for this range.</source>
+        <target>Aucune utilisation enregistrée pour cette plage.</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.exporting">
+      <segment state="translated">
+        <source>Exporting…</source>
+        <target>Exportation…</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.from">
+      <segment state="translated">
+        <source>From</source>
+        <target>Du</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.meter.egress_bytes">
+      <segment state="translated">
+        <source>Artefact egress</source>
+        <target>Sortie d&apos;artefacts</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.meter.egress_metadata_bytes">
+      <segment state="translated">
+        <source>Metadata egress</source>
+        <target>Sortie de métadonnées</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.orphanedOrg">
+      <segment state="translated">
+        <source>(deleted org)</source>
+        <target>(organisation supprimée)</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.orphanedOrgTitle">
+      <segment state="translated">
+        <source>This org id no longer has a tenant row: {orgId}</source>
+        <target>Cet identifiant d&apos;organisation n&apos;a plus de ligne locataire : {orgId}</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.signalsNote">
+      <segment state="translated">
+        <source>Metered requests, artefact counts and database rows are capacity and abuse signals for operators. They are never billed. HEAD, 304 and error responses are not metered, so they are not counted. Artefacts and database rows come from the latest daily storage snapshot.</source>
+        <target>Les requêtes mesurées, le nombre d&apos;artefacts et les lignes de base de données sont des signaux de capacité et d&apos;abus destinés aux opérateurs. Ils ne sont jamais facturés. Les réponses HEAD, 304 et d&apos;erreur ne sont pas mesurées, elles ne sont donc pas comptées. Les artefacts et les lignes de base de données proviennent du dernier instantané de stockage quotidien.</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.signalsTitle">
+      <segment state="translated">
+        <source>Operator signals, not billed</source>
+        <target>Signaux d&apos;exploitation, non facturés</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.subtitle">
+      <segment state="translated">
+        <source>Raw byte counts per tenant over a date range — no unit conversion, no rate, no plan.</source>
+        <target>Volumes bruts en octets par locataire sur une plage de dates — aucune conversion d&apos;unité, aucun tarif, aucun forfait.</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.title">
+      <segment state="translated">
+        <source>Usage</source>
+        <target>Utilisation</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.to">
+      <segment state="translated">
+        <source>To</source>
+        <target>Au</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.totals.egress">
+      <segment state="translated">
+        <source>Artefact egress</source>
+        <target>Sortie d&apos;artefacts</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.totals.metadata">
+      <segment state="translated">
+        <source>Metadata egress</source>
+        <target>Sortie de métadonnées</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.totals.metadataRequests">
+      <segment state="translated">
+        <source>Metadata requests</source>
+        <target>Requêtes de métadonnées</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.totals.redirect">
+      <segment state="translated">
+        <source>Redirect-delivered</source>
+        <target>Livré par redirection</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.totals.requests">
+      <segment state="translated">
+        <source>Metered requests</source>
+        <target>Requêtes mesurées</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.totals.storage">
+      <segment state="translated">
+        <source>Billable storage (avg)</source>
+        <target>Stockage facturable (moy.)</target>
       </segment>
     </unit>
     <unit id="system.userLookup.columns.actions">
@@ -13277,6 +13745,138 @@ dotnet/</target>
       <segment state="translated">
         <source>Unlock</source>
         <target>Déverrouiller</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.columns.created">
+      <segment state="translated">
+        <source>Created</source>
+        <target>Créé le</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.columns.description">
+      <segment state="translated">
+        <source>Description</source>
+        <target>Description</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.columns.expires">
+      <segment state="translated">
+        <source>Expires</source>
+        <target>Expire le</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.columns.lastUsed">
+      <segment state="translated">
+        <source>Last used</source>
+        <target>Dernière utilisation</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.columns.name">
+      <segment state="translated">
+        <source>Name</source>
+        <target>Nom</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.columns.owner">
+      <segment state="translated">
+        <source>Owner</source>
+        <target>Propriétaire</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.empty">
+      <segment state="translated">
+        <source>No API tokens</source>
+        <target>Aucun jeton API</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.expired">
+      <segment state="translated">
+        <source>expired</source>
+        <target>expiré</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.description">
+      <segment state="translated">
+        <source>Description (optional)</source>
+        <target>Description (optionnel)</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.descriptionPlaceholder">
+      <segment state="translated">
+        <source>e.g. CI pipeline that provisions tenants</source>
+        <target>p. ex. : pipeline CI qui approvisionne des locataires</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.expiresAt">
+      <segment state="translated">
+        <source>Expires at</source>
+        <target>Expire le</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.expiresAtRequired">
+      <segment state="translated">
+        <source>An expiry date is required.</source>
+        <target>Une date d&apos;expiration est requise.</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.name">
+      <segment state="translated">
+        <source>Name</source>
+        <target>Nom</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.namePlaceholder">
+      <segment state="translated">
+        <source>e.g. Terraform provisioning</source>
+        <target>p. ex. : approvisionnement Terraform</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.nameRequired">
+      <segment state="translated">
+        <source>Name is required.</source>
+        <target>Le nom est obligatoire.</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.modal.title">
+      <segment state="translated">
+        <source>New API Token</source>
+        <target>Nouveau jeton API</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.never">
+      <segment state="translated">
+        <source>never</source>
+        <target>jamais</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.newToken">
+      <segment state="translated">
+        <source>New token</source>
+        <target>Nouveau jeton</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.reach">
+      <segment state="translated">
+        <source>Authenticates only tenant create, list, delete, restore, and status/quota changes.</source>
+        <target>Authentifie uniquement la création, la liste, la suppression, la restauration et les changements de statut ou de quota des locataires.</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.revokeConfirm">
+      <segment state="translated">
+        <source>Revoke this API token?</source>
+        <target>Révoquer ce jeton API?</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.title">
+      <segment state="translated">
+        <source>API Tokens</source>
+        <target>Jetons API</target>
+      </segment>
+    </unit>
+    <unit id="systemTokens.tokenCreated">
+      <segment state="translated">
+        <source>Token created — copy it now, it will not be shown again.</source>
+        <target>Jeton créé — copiez-le maintenant, il ne sera plus affiché.</target>
       </segment>
     </unit>
     <unit id="tokens.columns.created">

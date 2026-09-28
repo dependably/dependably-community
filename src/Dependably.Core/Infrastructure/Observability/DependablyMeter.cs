@@ -50,6 +50,17 @@ public static class DependablyMeter
                          "Attributes: reason (no_trusted_key|missing_signature|bad_signature|" +
                          "weak_signature_algorithm|malformed_index).");
 
+    /// <summary>
+    /// Statements the Postgres row-level security backstop refused. Any non-zero count means a code
+    /// path reached a tenant table without the tenant the application-level filter assumed — the
+    /// isolation bug the backstop exists to contain. Attributes: <c>reason</c>
+    /// (<c>no_tenant_context</c>|<c>session_mismatch</c>|<c>policy_violation</c>|<c>insufficient_privilege</c>).
+    /// </summary>
+    public static readonly Counter<long> RowLevelSecurityViolations =
+        Meter.CreateCounter<long>(
+            "dependably.db.rls_violations",
+            description: "Statements refused by Postgres row-level security. Attributes: reason (no_tenant_context|session_mismatch|policy_violation|insufficient_privilege).");
+
     public static readonly UpDownCounter<long> UpstreamInflightFetches =
         Meter.CreateUpDownCounter<long>(
             "dependably.upstream.inflight_fetches",
@@ -202,6 +213,35 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.download_count_writer.dropped",
             description: "Download-count increments dropped because the async writer channel was full.");
+
+    /// <summary>
+    /// Usage events committed to <c>usage_events</c>. Paired with <see cref="UsageEventsDropped"/>
+    /// it shows the metering pipeline's health; it carries no org attribute, since per-tenant
+    /// usage lives in the database, not in metrics.
+    /// </summary>
+    public static readonly Counter<long> UsageEventsWritten =
+        Meter.CreateCounter<long>(
+            "dependably.usage_events.written",
+            description: "Usage events committed to the metering record.");
+
+    /// <summary>
+    /// Usage events shed: the writer channel stayed full past its bounded wait, or the final
+    /// insert at shutdown failed. Every shed event is unbilled usage, so this should stay at zero;
+    /// a rising value means the metering drainer cannot reach the database.
+    /// </summary>
+    public static readonly Counter<long> UsageEventsDropped =
+        Meter.CreateCounter<long>(
+            "dependably.usage_events.dropped",
+            description: "Usage events shed before reaching the metering record.");
+
+    /// <summary>
+    /// Metered responses from a per-response endpoint that never named their kind, and were
+    /// recorded as metadata. Non-zero means a handler is missing its classification call.
+    /// </summary>
+    public static readonly Counter<long> UsageEventsUnclassified =
+        Meter.CreateCounter<long>(
+            "dependably.usage_events.unclassified",
+            description: "Metered responses recorded as metadata because the handler did not classify them.");
 
     /// <summary>
     /// SIEM events dropped because the outbound forwarder queue's bounded channel was full.
@@ -589,6 +629,8 @@ public static class DependablyMeter
     /// <summary>Bytes used by files in the staging directory; written by StagingDiskMonitor.</summary>
     private static long _stagingDiskUsedBytes;
 
+    private static int _rowLevelSecurityEnforced;
+
     /// <summary>
     /// Current advisory-inventory snapshot, grouped by (ecosystem, severity); written by
     /// AdvisoryInventoryPoller. A poll replaces the whole snapshot rather than upserting
@@ -616,6 +658,11 @@ public static class DependablyMeter
                     new KeyValuePair<string, object?>("tier", kv.Key))),
             unit: "By",
             description: "Total bytes held by each blob-store tier (cache|registry). Updated by BlobStoreSizePoller.");
+
+        Meter.CreateObservableGauge(
+            "dependably.db.rls_enforced",
+            observeValue: () => Volatile.Read(ref _rowLevelSecurityEnforced),
+            description: "1 when Postgres row-level security backs the tenant filter (DB_ROW_LEVEL_SECURITY=enforce), 0 otherwise.");
 
         Meter.CreateObservableGauge(
             "dependably.tenants.count",
@@ -709,6 +756,10 @@ public static class DependablyMeter
 
     public static IReadOnlyDictionary<string, long> ReadBlobStoreSizes()
         => BlobStoreSizes.ToDictionary(kv => kv.Key, kv => kv.Value);
+
+    /// <summary>Records whether row-level security is enforced, for <c>dependably.db.rls_enforced</c>.</summary>
+    public static void RecordRowLevelSecurityEnforced(bool enforced) =>
+        Volatile.Write(ref _rowLevelSecurityEnforced, enforced ? 1 : 0);
 
     /// <summary>
     /// Returns the last recorded available bytes on the staging volume, as set by

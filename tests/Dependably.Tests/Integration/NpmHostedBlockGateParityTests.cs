@@ -222,21 +222,21 @@ public sealed class NpmHostedBlockGateParityTests : IAsyncLifetime
 
         string vulnId = Guid.NewGuid().ToString("N");
         string malId = $"MAL-2026-{Guid.NewGuid():N}";
+        string now = Clock.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO vulnerabilities
                 (id, osv_id, ecosystem, package_name, severity, cvss_score, summary, modified_at, fetched_at)
             VALUES
-                (@vulnId, @malId, 'npm', @pkgName, NULL, NULL, 'Malicious code',
-                 strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                (@vulnId, @malId, 'npm', @pkgName, NULL, NULL, 'Malicious code', @now, @now)
             """,
-            new { vulnId, malId, pkgName });
+            new { vulnId, malId, pkgName, now });
         string pvvId = Guid.NewGuid().ToString("N");
         await conn.ExecuteAsync(
             "INSERT INTO package_version_vulns (id, package_version_id, vuln_id, owner_kind) VALUES (@pvvId, @versionId, @vulnId, 'package_version')",
             new { pvvId, versionId, vulnId });
         await conn.ExecuteAsync(
-            "UPDATE package_versions SET vuln_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @versionId",
-            new { versionId });
+            "UPDATE package_versions SET vuln_checked_at = @now WHERE id = @versionId",
+            new { versionId, now });
     }
 }

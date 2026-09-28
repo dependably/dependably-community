@@ -295,7 +295,7 @@ public sealed class MetricsScrapeDeniedAuditTenantScopeTests : IAsyncLifetime
 internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
     private readonly InMemoryBlobStore _blob = new();
-    private readonly TestMetadataStore _metadataStore = new();
+    private readonly IntegrationDatabase _db = new();
     public readonly FakeTimeProvider Clock = new(new DateTimeOffset(2026, 6, 15, 10, 0, 0, TimeSpan.Zero));
 
     public const string ApexHost = "localhost";
@@ -303,7 +303,7 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
     // static test-fixture password for a WebApplicationFactory seed, not a real secret
     public const string SystemAdminPassword = "TestPassword12345!";
 
-    public IMetadataStore Db => _metadataStore;
+    public IMetadataStore Db => _db.HarnessStore;
 
     protected override IHost CreateHost(IHostBuilder _)
     {
@@ -317,14 +317,14 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
         // at service-registration time, so a UseSetting after this line is inert.
         // See TestHostEnv.
         TestHostEnv.PinAmbient(builder, "multi");
+        _db.ConfigureBefore(builder);
         Program.ConfigureBuilder(builder);
 
         builder.Services.RemoveAll<IBlobStore>();
         builder.Services.AddSingleton<IBlobStore>(_blob);
         builder.Services.RemoveAll<TieredBlobStorage>();
         builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-        builder.Services.RemoveAll<IMetadataStore>();
-        builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+        _db.ConfigureServices(builder.Services);
 
         // Freeze time so the cooldown gate is deterministic.
         builder.Services.RemoveAll<TimeProvider>();
@@ -347,7 +347,7 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
 
         var app = builder.Build();
         Program.ConfigureApp(app);
-        app.Start();
+        _db.Start(app);
         return app;
     }
 
@@ -355,8 +355,8 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
 
     public new async Task DisposeAsync()
     {
-        await _metadataStore.DisposeAsync();
         await base.DisposeAsync();
+        await _db.DisposeAsync();
     }
 
     /// <summary>
@@ -384,7 +384,7 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
 
     private async Task<string> IssueSystemAdminJwtAsync()
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
         string sysId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM system_admins LIMIT 1")
             ?? throw new InvalidOperationException("system_admin not seeded.");
@@ -441,10 +441,10 @@ internal sealed class SystemScopeAuditFactory : WebApplicationFactory<Program>, 
 internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
     private readonly InMemoryBlobStore _blob = new();
-    private readonly TestMetadataStore _metadataStore = new();
+    private readonly IntegrationDatabase _db = new();
     public readonly FakeTimeProvider Clock = new(new DateTimeOffset(2026, 6, 15, 10, 0, 0, TimeSpan.Zero));
 
-    public IMetadataStore Db => _metadataStore;
+    public IMetadataStore Db => _db.HarnessStore;
 
     protected override IHost CreateHost(IHostBuilder _)
     {
@@ -453,14 +453,14 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, 
         // at service-registration time, so a UseSetting after this line is inert.
         // See TestHostEnv.
         TestHostEnv.PinAmbient(builder);
+        _db.ConfigureBefore(builder);
         Program.ConfigureBuilder(builder);
 
         builder.Services.RemoveAll<IBlobStore>();
         builder.Services.AddSingleton<IBlobStore>(_blob);
         builder.Services.RemoveAll<TieredBlobStorage>();
         builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-        builder.Services.RemoveAll<IMetadataStore>();
-        builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+        _db.ConfigureServices(builder.Services);
 
         builder.Services.RemoveAll<TimeProvider>();
         builder.Services.AddSingleton<TimeProvider>(Clock);
@@ -483,7 +483,7 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, 
 
         var app = builder.Build();
         Program.ConfigureApp(app);
-        app.Start();
+        _db.Start(app);
         return app;
     }
 
@@ -491,8 +491,8 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, 
 
     public new async Task DisposeAsync()
     {
-        await _metadataStore.DisposeAsync();
         await base.DisposeAsync();
+        await _db.DisposeAsync();
     }
 
     /// <summary>Returns a client with loopback IP — outside the 10.0.0.0/8 allowlist → denied.</summary>
@@ -501,7 +501,7 @@ internal sealed class TenantScopeAuditFactory : WebApplicationFactory<Program>, 
     /// <summary>Returns a JWT-authenticated HttpClient for the seeded bootstrap admin.</summary>
     public async Task<HttpClient> CreateAdminClientAsync()
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
 
         string orgId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")

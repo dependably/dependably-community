@@ -3,6 +3,7 @@ using Amazon.S3;
 using Amazon.S3.Model;
 using Dependably.Storage;
 using NSubstitute;
+using S3Protocol = Amazon.S3.Protocol;
 
 namespace Dependably.Tests.Unit.Storage;
 
@@ -179,18 +180,59 @@ public sealed class S3BlobStoreTests
             && r.Expires == expiresAt.UtcDateTime));
     }
 
-    [Fact]
-    public async Task TryCreatePresignedReadUrlAsync_MissingObject_ReturnsNullWithoutSigning()
+    [Theory]
+    [InlineData("http://minio.internal:9000", S3Protocol.HTTP)]
+    [InlineData("HTTP://minio.internal:9000", S3Protocol.HTTP)]
+    [InlineData("https://minio.internal:9000", S3Protocol.HTTPS)]
+    [InlineData(null, S3Protocol.HTTPS)]
+    [InlineData("", S3Protocol.HTTPS)]
+    public async Task TryCreatePresignedReadUrlAsync_SignsForTheConfiguredEndpointScheme(string? serviceUrl, S3Protocol expected)
     {
-        // Signing a key with no object behind it would hand the caller a URL that 404s at S3,
-        // replacing the caller's cache-miss fall-through with a dead end.
-        _s3.GetObjectMetadataAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
-            .Returns<Task<GetObjectMetadataResponse>>(
-                _ => throw new AmazonS3Exception("404") { StatusCode = HttpStatusCode.NotFound });
+        // The SDK signs HTTPS unless told otherwise, so a plain-http S3-compatible endpoint would
+        // get a Location naming a TLS port it does not listen on. A region-bound client has no
+        // ServiceURL and stays on HTTPS.
+        var config = Substitute.For<Amazon.Runtime.IClientConfig>();
+        config.ServiceURL.Returns(serviceUrl);
+        _s3.Config.Returns(config);
+        _s3.GetPreSignedURLAsync(Arg.Any<GetPreSignedUrlRequest>()).Returns("http://minio.internal:9000/b/k?X-Amz-Signature=x");
 
         await using var sut = NewSut();
-        Assert.Null(await sut.TryCreatePresignedReadUrlAsync("gone/key", DateTimeOffset.UnixEpoch));
-        await _s3.DidNotReceive().GetPreSignedURLAsync(Arg.Any<GetPreSignedUrlRequest>());
+        await sut.TryCreatePresignedReadUrlAsync("k", DateTimeOffset.UnixEpoch);
+
+        await _s3.Received(1).GetPreSignedURLAsync(Arg.Is<GetPreSignedUrlRequest>(r => r.Protocol == expected));
+    }
+
+    [Fact]
+    public async Task TryCreatePresignedReadUrlAsync_HttpEndpoint_YieldsAnHttpUrlFromTheRealSdk()
+    {
+        // End to end through the SDK's own signer, which runs locally with no request to the endpoint.
+        using var real = new AmazonS3Client(
+            new Amazon.Runtime.BasicAWSCredentials("AKIDEXAMPLE", "secret"),
+            new AmazonS3Config { ServiceURL = "http://minio.internal:9000", ForcePathStyle = true, AuthenticationRegion = "us-east-1" });
+        _s3.Config.Returns(real.Config);
+        _s3.GetPreSignedURLAsync(Arg.Any<GetPreSignedUrlRequest>())
+            .Returns(ci => real.GetPreSignedURLAsync(ci.Arg<GetPreSignedUrlRequest>()));
+
+        await using var sut = NewSut("bucket");
+        var url = await sut.TryCreatePresignedReadUrlAsync("proxy/sha256/abc", new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+
+        Assert.NotNull(url);
+        Assert.Equal("http", url!.Scheme);
+        Assert.Equal("minio.internal", url.Host);
+        Assert.Equal(9000, url.Port);
+    }
+
+    [Fact]
+    public async Task TryCreatePresignedReadUrlAsync_OnlyMints_WithoutAHeadRequest()
+    {
+        // The presign seam has already asked whether the object exists; a HEAD here would be a
+        // second round-trip to S3 for every redirected read.
+        _s3.GetPreSignedURLAsync(Arg.Any<GetPreSignedUrlRequest>())
+            .Returns("https://bucket.s3.amazonaws.com/k?X-Amz-Signature=deadbeef");
+
+        await using var sut = NewSut();
+        Assert.NotNull(await sut.TryCreatePresignedReadUrlAsync("k", DateTimeOffset.UnixEpoch));
+        await _s3.DidNotReceive().GetObjectMetadataAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

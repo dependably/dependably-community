@@ -175,7 +175,8 @@ public sealed class MetricsAccessPropagationTests
         await using (var conn = await store.OpenAsync())
         {
             await conn.ExecuteAsync(
-                "INSERT OR REPLACE INTO instance_settings (key, value) VALUES (@key, @value)",
+                "INSERT INTO instance_settings (key, value) VALUES (@key, @value) "
+                + "ON CONFLICT(key) DO UPDATE SET value = @value",
                 new
                 {
                     key = "metrics_allowed_ips",
@@ -231,7 +232,7 @@ public sealed class MetricsAccessPropagationTests
     private sealed class ProbeIpMultiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly FakeTimeProvider _clock;
-        private readonly TestMetadataStore _store = new();
+        private readonly IntegrationDatabase _db = new();
         private readonly InMemoryBlobStore _blob = new();
 
         public IPAddress RemoteIp { get; set; } = IPAddress.Loopback;
@@ -252,6 +253,7 @@ public sealed class MetricsAccessPropagationTests
             // at service-registration time, so a UseSetting after this line is inert.
             // See TestHostEnv.
             TestHostEnv.PinAmbient(builder, "multi");
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<TimeProvider>();
@@ -261,8 +263,7 @@ public sealed class MetricsAccessPropagationTests
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_store);
+            _db.ConfigureServices(builder.Services);
 
             // Replace the SSRF validator so tests that use MockUpstream can run;
             // no-op here since these tests don't fetch upstream packages.
@@ -289,7 +290,7 @@ public sealed class MetricsAccessPropagationTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -297,13 +298,13 @@ public sealed class MetricsAccessPropagationTests
 
         public new async Task DisposeAsync()
         {
-            await _store.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         public async Task<HttpClient> CreateSystemAdminClientAsync()
         {
-            await using var conn = await _store.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             string sysId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM system_admins LIMIT 1")
                 ?? throw new InvalidOperationException("system_admin not found.");
@@ -350,7 +351,7 @@ public sealed class MetricsAccessPropagationTests
     private sealed class ProbeIpSingleFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly FakeTimeProvider _clock;
-        private readonly TestMetadataStore _store = new();
+        private readonly IntegrationDatabase _db = new();
         private readonly InMemoryBlobStore _blob = new();
 
         public IPAddress RemoteIp { get; set; } = IPAddress.Loopback;
@@ -365,6 +366,7 @@ public sealed class MetricsAccessPropagationTests
             // at service-registration time, so a UseSetting after this line is inert.
             // See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<TimeProvider>();
@@ -374,8 +376,7 @@ public sealed class MetricsAccessPropagationTests
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_store);
+            _db.ConfigureServices(builder.Services);
 
             builder.Services.RemoveAll<IUpstreamUrlValidator>();
             builder.Services.AddSingleton<IUpstreamUrlValidator, PermissiveUpstreamUrlValidator>();
@@ -400,7 +401,7 @@ public sealed class MetricsAccessPropagationTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -408,13 +409,13 @@ public sealed class MetricsAccessPropagationTests
 
         public new async Task DisposeAsync()
         {
-            await _store.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         public async Task<string> CreateAdminJwtAsync()
         {
-            await using var conn = await _store.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             string orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
                 ?? throw new InvalidOperationException("Default org not found.");

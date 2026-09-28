@@ -182,7 +182,7 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
     private sealed class LoopbackFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -191,13 +191,13 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             // Inject loopback as the connection IP — default allowlist (127.0.0.1/::1)
             // permits it, so management docs are reachable.
@@ -215,12 +215,12 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
         public Task InitializeAsync() { _ = CreateClient(); return Task.CompletedTask; }
-        public new async Task DisposeAsync() { await _metadataStore.DisposeAsync(); await base.DisposeAsync(); }
+        public new async Task DisposeAsync() { await base.DisposeAsync(); await _db.DisposeAsync(); }
 
         /// <summary>
         /// Issues a tenant-scoped JWT for the seeded bootstrap owner, matching the
@@ -229,7 +229,7 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
         /// </summary>
         public async Task<string> CreateAdminJwtAsync()
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
 
             string orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
@@ -285,7 +285,7 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
     private sealed class BlockedIpFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -294,13 +294,13 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             // Inject loopback as the connection IP, but restrict the allowlist
             // to a CIDR that excludes loopback — so management docs return 403
@@ -320,12 +320,12 @@ public sealed class ManagementDocsGateTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
         public Task InitializeAsync() { _ = CreateClient(); return Task.CompletedTask; }
-        public new async Task DisposeAsync() { await _metadataStore.DisposeAsync(); await base.DisposeAsync(); }
+        public new async Task DisposeAsync() { await base.DisposeAsync(); await _db.DisposeAsync(); }
 
         private sealed class LoopbackRemoteIpFilter : IStartupFilter
         {

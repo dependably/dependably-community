@@ -202,7 +202,7 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
     private sealed class EnforcedAirGapFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -211,14 +211,14 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.WebHost.UseTestServer();
             builder.WebHost.UseSetting("AIR_GAPPED", "true");
@@ -228,7 +228,7 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -240,13 +240,13 @@ public sealed class AirGapEnforcedSettingsTests : IAsyncLifetime
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         public async Task<string> CreateAdminJwt()
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             string orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
                 ?? throw new InvalidOperationException("Default org not found.");

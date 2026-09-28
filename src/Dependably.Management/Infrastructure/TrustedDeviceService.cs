@@ -66,7 +66,7 @@ public sealed class TrustedDeviceService
             WHERE token_hash = @hash
               AND user_id = @userId
               AND realm = @realm
-              AND tenant_id IS @tenantId
+              AND (tenant_id = @tenantId OR (tenant_id IS NULL AND @tenantId IS NULL))
               AND expires_at > @now
             """,
             new { hash, userId, realm, tenantId, now });

@@ -81,6 +81,11 @@ public sealed partial class PortableSqlDialectComplianceTests
     [GeneratedRegex(@"\bINSERT\s+OR\s+(IGNORE|REPLACE|ABORT|FAIL|ROLLBACK)\b", RegexOptions.IgnoreCase)]
     private static partial Regex SqliteInsertOrRegex();
 
+    // SQLite's `IS @param` null-safe equality. Postgres accepts IS only before NULL, TRUE, FALSE or
+    // UNKNOWN, so the statement is a syntax error there.
+    [GeneratedRegex(@"\bIS\s+(NOT\s+)?@\w+", RegexOptions.IgnoreCase)]
+    private static partial Regex SqliteIsParameterRegex();
+
     // SQLite PRAGMA statements.
     [GeneratedRegex(@"\bPRAGMA\s+\w+")]
     private static partial Regex SqlitePragmaRegex();
@@ -105,6 +110,8 @@ public sealed partial class PortableSqlDialectComplianceTests
         ("SQLite engine catalogue", SqliteCatalogRegex(), "query the schema through a provider-neutral path"),
         ("SQLite INSERT OR <action>", SqliteInsertOrRegex(), "use ON CONFLICT, which both engines accept"),
         ("SQLite PRAGMA", SqlitePragmaRegex(), "issue it from the SQLite-specific store, not a shared path"),
+        ("SQLite IS <parameter>", SqliteIsParameterRegex(),
+            "spell the null-safe comparison out: (col = @p OR (col IS NULL AND @p IS NULL))"),
         ("Postgres-only function/operator", PostgresFunctionRegex(),
             "use a construct both engines share, or compute it in C#"),
         ("Postgres :: cast", PostgresCastRegex(), "use CAST(x AS t) or bind an already-typed parameter"),
@@ -159,6 +166,105 @@ public sealed partial class PortableSqlDialectComplianceTests
                         "runs on one provider and throws on the other — invisibly, because the test " +
                         "suite runs on SQLite while production runs on Postgres. See test output.");
         }
+    }
+
+    // Dapper's `IN @list` auto-expansion. On SQLite Dapper rewrites it into one parameter per
+    // element; on Postgres it binds the whole list as a single array parameter, which `IN` cannot
+    // take, so the statement is a syntax error at request time. The portable shape keeps the
+    // `@list` token in the SQL text and swaps it for a DapperInClause.Expand fragment with
+    // `.Replace("@list", clause)` before the query reaches Dapper.
+    [GeneratedRegex(@"\bIN\s+(?<param>@\w+)\b", RegexOptions.IgnoreCase)]
+    private static partial Regex DapperListExpansionRegex();
+
+    [Fact]
+    public void ListParametersAreExpandedInCSharpNotByDapper()
+    {
+        string repoRoot = SourceRoots.RepoRoot();
+        var violations = new List<string>();
+
+        foreach (string file in SourceRoots.AllCSharpFiles())
+        {
+            if (IsProviderSpecificFile(file))
+            {
+                continue;
+            }
+
+            string[] lines = File.ReadAllLines(file);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string trimmed = lines[i].TrimStart();
+                if (trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith('*'))
+                {
+                    continue;
+                }
+
+                // Suppression justifications quote the construct in prose ("Dapper's own IN @list").
+                if (lines[i].Contains("Dapper's own", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                foreach (Match m in DapperListExpansionRegex().Matches(lines[i]))
+                {
+                    // A shared SQL constant is often declared far from the query that expands it,
+                    // so the expansion is looked for anywhere in the same file.
+                    string replace = $"Replace(\"{m.Groups["param"].Value}\"";
+                    bool expanded = lines.Any(l => l.Contains(replace, StringComparison.Ordinal));
+                    if (!expanded && !HasOptOut(lines, i))
+                    {
+                        violations.Add($"{Path.GetRelativePath(repoRoot, file)}:{i + 1}: {lines[i].Trim()}");
+                    }
+                }
+            }
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            $"{violations.Count} `IN @list` parameter(s) left to Dapper's auto-expansion, which binds an " +
+            "array Postgres cannot take after IN — a syntax error on the production engine that the SQLite " +
+            "suite never sees. Expand the list with DapperInClause.Expand and `.Replace(\"@list\", clause)` " +
+            $"in the same file:{Environment.NewLine}{string.Join(Environment.NewLine, violations)}");
+    }
+
+    // An ON CONFLICT DO UPDATE assignment that reads the existing row through a bare column name —
+    // `x = COALESCE(@x, x)`. SQLite resolves it to the target row; Postgres rejects it as ambiguous
+    // between the target row and EXCLUDED, so the upsert fails on the production engine only.
+    [GeneratedRegex(@"DO\s+UPDATE\s+SET(?<body>.*?)(?:""""""|""\s*[,;)+])", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex DoUpdateSetRegex();
+
+    [GeneratedRegex(@"^\s*(?<col>\w+)\s*=\s*(?<rhs>.+?),?\s*$", RegexOptions.Multiline)]
+    private static partial Regex AssignmentRegex();
+
+    [Fact]
+    public void UpsertAssignmentsQualifyTheExistingRow()
+    {
+        string repoRoot = SourceRoots.RepoRoot();
+        var violations = new List<string>();
+
+        foreach (string file in SourceRoots.AllCSharpFiles())
+        {
+            string source = File.ReadAllText(file);
+            foreach (Match update in DoUpdateSetRegex().Matches(source))
+            {
+                foreach (Match assignment in AssignmentRegex().Matches(update.Groups["body"].Value))
+                {
+                    string column = assignment.Groups["col"].Value;
+                    if (!Regex.IsMatch(assignment.Groups["rhs"].Value, $@"(?<![\w@.]){Regex.Escape(column)}(?!\w)"))
+                    {
+                        continue;
+                    }
+
+                    int line = source[..update.Index].Count(c => c == '\n') + 1;
+                    violations.Add($"{Path.GetRelativePath(repoRoot, file)}:{line}: {column} = {assignment.Groups["rhs"].Value.Trim()}");
+                }
+            }
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            $"{violations.Count} ON CONFLICT DO UPDATE assignment(s) read the existing row through a bare column " +
+            "name, which Postgres rejects as ambiguous with EXCLUDED. Qualify it with the table name " +
+            $"(`col = COALESCE(@col, table.col)`):{Environment.NewLine}{string.Join(Environment.NewLine, violations)}");
     }
 
     [Fact]

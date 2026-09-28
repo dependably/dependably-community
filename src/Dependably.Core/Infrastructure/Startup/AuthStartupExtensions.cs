@@ -129,10 +129,12 @@ internal static class AuthStartupExtensions
                 // partition kind (token|user|ip|unknown), never the key — the key embeds a
                 // caller-controlled source address, so emitting it would let a caller mint
                 // time series at will.
-                string policy = ctx.HttpContext.GetEndpoint()
-                    ?.Metadata.GetMetadata<EnableRateLimitingAttribute>()
-                    ?.PolicyName ?? "unknown";
-                string partition = RateLimitPartitions.GetMetricLabel(ctx.HttpContext, ipv6Prefix);
+                //
+                // A rejection by the chained tenant dimension reports policy and partition "tenant"
+                // (a fixed value, never the org id the partition key carries): the endpoint's own
+                // policy granted the request, so naming it would send the operator after the wrong
+                // limit.
+                var (policy, partition) = TenantRateLimiter.AttributeRejection(ctx.HttpContext, ipv6Prefix);
                 Dependably.Infrastructure.Observability.DependablyMeter.RateLimitRejected.Add(1,
                     new KeyValuePair<string, object?>("policy", policy),
                     new KeyValuePair<string, object?>("partition", partition));
@@ -391,6 +393,14 @@ internal static class AuthStartupExtensions
     //                     closes the window between "route added" and "gate enforced in review".
     //
     // QueueLimit=0: callers receive 429 immediately and should back off exponentially.
+    //
+    // Chained after all three postures is the tenant dimension (TenantRateLimiter): a protocol
+    // request on a resolved tenant also draws on its org's budget — tenant:{id} at
+    // TENANT_RATE_LIMIT_PERMITS, off when unset — or, under a downloads_throttled usage posture, on
+    // tenant-throttled:{id} at TENANT_THROTTLED_RATE_LIMIT_PERMITS. Chaining rather than a fourth
+    // posture is what makes it apply on top of an endpoint's own download/metadata/push policy,
+    // which the Deferred posture above otherwise leaves the global limiter out of. The chain
+    // charges a request one permit per link however many passes the middleware makes over it.
     private static void AddManagementApiLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
     {
         int permitLimit = RateLimitCeilings.ResolveManagementPermitLimit(cfg);
@@ -400,7 +410,7 @@ internal static class AuthStartupExtensions
         // cannot exhaust the shared upstream semaphore or the single-writer DB. Any route that
         // legitimately needs more throughput carries an explicit download/metadata policy.
         int protocolDefault = RateLimitCeilings.ResolveProtocolDefaultPermitLimit(cfg);
-        o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+        var perCaller = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
         {
             switch (RateLimitPartitions.ClassifyGlobalScope(ctx))
             {
@@ -430,6 +440,11 @@ internal static class AuthStartupExtensions
                     return RateLimitPartition.GetNoLimiter<string>("none");
             }
         });
+
+        // Both links must stay window limiters: the chain charges a request once and grants its
+        // later passes free, which is only sound when disposing a lease returns no permit. A
+        // concurrency or token-bucket link would be bypassed on the second pass.
+        o.GlobalLimiter = TenantRateLimiter.Chain(perCaller, TenantRateLimitSettings.Resolve(cfg));
     }
 
     // Requests with no resolvable remote IP (in-process probes) share one "unknown"
@@ -544,6 +559,11 @@ internal static class RateLimitDenialAuditRecorder
             "login" or "invite" or "token-create" => useRedis
                 ? $"{ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown"}:{policy}"
                 : ctx.GetRateLimitPartitionIp(ipv6Prefix) ?? "unknown",
+
+            // The tenant dimension chained onto the GlobalLimiter recorded the partition it refused
+            // (tenant:{id} or tenant-throttled:{id}) at the moment it refused it.
+            TenantRateLimiter.PolicyLabel =>
+                ctx.Items[TenantRateLimiter.RejectedPartitionItemKey] as string ?? "tenant:unknown",
 
             // No named [EnableRateLimiting] policy rejected this request (policy reads "unknown")
             // — the GlobalLimiter did, via AddManagementApiLimiter's own two live branches.

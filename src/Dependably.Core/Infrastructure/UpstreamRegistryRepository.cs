@@ -1,3 +1,4 @@
+using System.Data;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
@@ -121,6 +122,164 @@ public sealed class UpstreamRegistryRepository
     }
 
     /// <summary>
+    /// True when the org has at least one upstream configured for <paramref name="ecosystem"/>,
+    /// every one of them is <see cref="IsCredentialFree">credential-free</see>, and the org has
+    /// never had a credentialed one (no <c>upstream_credential_history</c> row). False when any
+    /// current row carries a credential, when one ever did, and when there are no rows at all: a
+    /// proxied object cached for an ecosystem with no upstream left was fetched through a
+    /// configuration that no longer exists, so nothing shows it was public.
+    ///
+    /// <para>
+    /// The answer covers every row for the ecosystem, not the one that served a given object —
+    /// no table records which upstream row a tenant's copy came from — so one credentialed row
+    /// makes all of the org's proxied objects for that ecosystem non-public, and the history row
+    /// keeps them so after that upstream is deleted: the objects it fetched stay in the cache.
+    /// </para>
+    /// </summary>
+    public async Task<bool> AllUpstreamsCredentialFreeAsync(
+        string orgId, string ecosystem, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = (await conn.QueryAsync<RawRegistryRow>(new CommandDefinition(
+            """
+            SELECT url AS Url, auth_type AS AuthType, username AS Username,
+                   CASE WHEN secret IS NOT NULL THEN 1 ELSE 0 END AS HasSecret,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM upstream_credential_history h
+                       WHERE h.org_id = @orgId AND h.ecosystem = @ecosystem)
+                   THEN 1 ELSE 0 END AS EverCredentialed
+            FROM upstream_registry
+            WHERE org_id = @orgId AND ecosystem = @ecosystem
+            """,
+            new { orgId, ecosystem },
+            cancellationToken: ct))).ToList();
+
+        return rows.Count > 0
+            && !rows[0].EverCredentialed
+            && rows.All(r => IsCredentialFree(r.AuthType, r.Username, r.HasSecret, r.Url));
+    }
+
+    /// <summary>
+    /// Records that the org has configured a credentialed upstream for
+    /// <paramref name="ecosystem"/>, making its proxied objects for that ecosystem permanently
+    /// non-public (see <see cref="AllUpstreamsCredentialFreeAsync"/>). Idempotent; the first
+    /// sighting's timestamp is kept. Called by every path that writes a credentialed row, on the
+    /// same connection and transaction, before the row itself.
+    /// </summary>
+    internal static Task RecordCredentialedAsync(
+        IDbConnection conn, string orgId, string ecosystem, IDbTransaction? tx = null, CancellationToken ct = default)
+        => conn.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO upstream_credential_history (org_id, ecosystem)
+            VALUES (@orgId, @ecosystem)
+            ON CONFLICT (org_id, ecosystem) DO NOTHING
+            """,
+            new { orgId, ecosystem },
+            transaction: tx, cancellationToken: ct));
+
+    /// <summary>
+    /// True when an upstream row presents no credential of any kind: its auth type is one that
+    /// sends none on its own (<c>anonymous</c>, or <c>dockerhub_token_exchange</c> with no
+    /// username, which requests an anonymous pull token), it stores no username or secret, and its
+    /// URL carries no userinfo or query string. Every other auth type — <c>basic</c>,
+    /// <c>bearer</c>, <c>aws_ecr</c>, and any value this build does not recognize — counts as
+    /// credentialed.
+    /// </summary>
+    internal static bool IsCredentialFree(string? authType, string? username, bool hasSecret, string? url) =>
+        authType is "anonymous" or "dockerhub_token_exchange"
+        && string.IsNullOrEmpty(username)
+        && !hasSecret
+        && !UrlCarriesCredential(url);
+
+    /// <summary>
+    /// The ecosystem to record in <c>upstream_credential_history</c> for one
+    /// <c>upstream_registry_added</c> audit event, or null when the event shows a credential-free
+    /// upstream or cannot be read. This is how an upstream deleted before the history table
+    /// existed is still found: the audit row outlives the upstream row.
+    ///
+    /// <para>
+    /// The event records the auth type, whether a secret was stored, and the URL (or OCI host),
+    /// but not the username, so the decision is <see cref="IsCredentialFree"/> with no username.
+    /// That loses nothing: <c>anonymous</c> sends no header whatever the username, and
+    /// <c>dockerhub_token_exchange</c> presents credentials only with both a username and a secret.
+    /// An event with neither an auth type nor a secret flag is the shape written before non-OCI
+    /// upstreams could carry credentials, so only its URL can show one. Any other missing or
+    /// unrecognized field counts as credentialed. A null detail (scrubbed by audit retention or
+    /// member erasure) is skipped, since nothing about the upstream is left; detail that is not a
+    /// JSON object is recorded against <paramref name="fallbackEcosystem"/> when there is one.
+    /// </para>
+    /// </summary>
+    internal static string? CredentialedEcosystemFromAuditedAdd(string? detail, string? fallbackEcosystem)
+    {
+        if (string.IsNullOrWhiteSpace(detail))
+        {
+            return null;
+        }
+
+        if (ParseJsonObject(detail) is not { } root)
+        {
+            return string.IsNullOrWhiteSpace(fallbackEcosystem) ? null : fallbackEcosystem;
+        }
+
+        string? ecosystem = Property(root, "ecosystem") is { ValueKind: JsonValueKind.String } e ? e.GetString() : null;
+        ecosystem = string.IsNullOrWhiteSpace(ecosystem) ? fallbackEcosystem : ecosystem;
+        if (string.IsNullOrWhiteSpace(ecosystem))
+        {
+            return null;
+        }
+
+        var authType = Property(root, "authType", "auth_type");
+        var hasSecret = Property(root, "hasSecret", "has_secret");
+        string? url = (Property(root, "url") ?? Property(root, "host")) is { ValueKind: JsonValueKind.String } u ? u.GetString() : null;
+
+        bool credentialFree = authType is null && hasSecret is null
+            ? !UrlCarriesCredential(url)
+            : authType is { ValueKind: JsonValueKind.String } a
+                && hasSecret is { ValueKind: JsonValueKind.True or JsonValueKind.False } h
+                && IsCredentialFree(a.GetString(), username: null, h.GetBoolean(), url);
+        return credentialFree ? null : ecosystem;
+    }
+
+    /// <summary>The parsed JSON object in <paramref name="json"/>, or null when it is malformed or not an object.</summary>
+    private static JsonElement? ParseJsonObject(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.ValueKind == JsonValueKind.Object ? doc.RootElement.Clone() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static JsonElement? Property(JsonElement obj, params string[] names) =>
+        obj.EnumerateObject()
+            .Where(p => names.Any(n => string.Equals(p.Name, n, StringComparison.OrdinalIgnoreCase)))
+            .Select(p => (JsonElement?)p.Value)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// True when <paramref name="url"/> has a userinfo component (<c>user:pass@host</c>) or a query
+    /// string, either of which can carry a credential the auth columns do not show. OCI rows store
+    /// a bare host, so the authority is read by hand rather than through <see cref="Uri"/>.
+    /// </summary>
+    private static bool UrlCarriesCredential(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return true;
+        }
+
+        int schemeEnd = url.IndexOf("://", StringComparison.Ordinal);
+        string rest = schemeEnd >= 0 ? url[(schemeEnd + 3)..] : url;
+        int authorityEnd = rest.IndexOfAny(['/', '?', '#']);
+        string authority = authorityEnd >= 0 ? rest[..authorityEnd] : rest;
+        return authority.Contains('@') || rest.Contains('?');
+    }
+
+    /// <summary>
     /// Builds the <c>Authorization</c> header value for a non-OCI upstream from its stored auth
     /// fields, or null for anonymous (and any unrecognised scheme). <paramref name="secret"/> is
     /// the already-decrypted plaintext: <c>bearer</c> carries it verbatim, <c>basic</c>
@@ -169,13 +328,19 @@ public sealed class UpstreamRegistryRepository
         // prefix on read.
         string? storedSecret = req.Secret is null ? null : _envelope.Protect(req.Secret);
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         int nextPosition = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COALESCE(MAX(position), -1) + 1
             FROM upstream_registry
             WHERE org_id = @orgId AND ecosystem = @ecosystem
             """,
-            new { orgId, ecosystem });
+            new { orgId, ecosystem }, tx);
+
+        if (!IsCredentialFree(authType, username, storedSecret is not null, url))
+        {
+            await RecordCredentialedAsync(conn, orgId, ecosystem, tx, ct);
+        }
 
         await conn.ExecuteAsync(
             """
@@ -201,7 +366,9 @@ public sealed class UpstreamRegistryRepository
                 symbolServerUrl = req.SymbolServerUrl ?? NuGetSymbolServers.DefaultFor(ecosystem, url),
                 protocol = req.Protocol,
                 publicKeyPem = req.PublicKeyPem,
-            });
+            },
+            tx);
+        await tx.CommitAsync(ct);
 
         return new UpstreamRegistryEntry
         {
@@ -252,13 +419,19 @@ public sealed class UpstreamRegistryRepository
         string? storedSecret = req.Secret is null ? null : _envelope.Protect(req.Secret);
 
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
         int nextPosition = await conn.ExecuteScalarAsync<int>(
             """
             SELECT COALESCE(MAX(position), -1) + 1
             FROM upstream_registry
             WHERE org_id = @orgId AND ecosystem = 'oci'
             """,
-            new { orgId });
+            new { orgId }, tx);
+
+        if (!IsCredentialFree(authTypeStr, req.Username, storedSecret is not null, req.Host))
+        {
+            await RecordCredentialedAsync(conn, orgId, "oci", tx, ct);
+        }
 
         await conn.ExecuteAsync(
             """
@@ -280,7 +453,9 @@ public sealed class UpstreamRegistryRepository
                 secret = storedSecret,
                 tokenEndpoint = req.TokenEndpoint,
                 prefixes = prefixesJson,
-            });
+            },
+            tx);
+        await tx.CommitAsync(ct);
 
         return new UpstreamRegistryEntry
         {
@@ -480,6 +655,8 @@ public sealed class UpstreamRegistryRepository
         // Prefixes as raw JSON TEXT (parsed by ParsePrefixes)
         public string? PrefixesJson { get; set; }
         public bool HasSecret { get; set; }
+        // Credential-free lookup only: the org has an upstream_credential_history row.
+        public bool EverCredentialed { get; set; }
         // NuGet: symbol-server base URL for this upstream.
         public string? SymbolServerUrl { get; set; }
         // Terraform: 'mirror' when this upstream speaks the network mirror protocol.

@@ -10,11 +10,12 @@ namespace Dependably.Tests.Compliance;
 ///
 /// <para>
 /// Covers <c>AuditRepository.LogAsync</c> and <c>LogActivityAsync</c> — the two members whose
-/// signature carries <c>actorKind</c> and <c>sourceIp</c> as first-class optional parameters.
-/// <c>LogSystemAsync</c> is deliberately excluded: it has no <c>actorKind</c> parameter at all
-/// (<c>scope='system'</c> rows are written by a system_admin or by the platform itself, never a
-/// <see cref="Dependably.Infrastructure.ActorKinds"/> value), so the shape this gate checks does
-/// not apply to it.
+/// signature carries <c>actorKind</c> and <c>sourceIp</c> as first-class, request-driven optional
+/// parameters. <c>LogSystemAsync</c> is deliberately excluded by name (<see cref="MatchTarget"/>)
+/// even though it now also accepts an optional <c>actorKind</c>/<c>actorLabel</c> pair for the
+/// system-token actor case: most <c>scope='system'</c> rows are still written by a system_admin or
+/// by the platform itself, with no <see cref="Dependably.Infrastructure.ActorKinds"/> value to
+/// give, so requiring one at every call site would force a fabricated value on the common case.
 /// </para>
 ///
 /// <para><b>The rule, deliberately asymmetric:</b></para>

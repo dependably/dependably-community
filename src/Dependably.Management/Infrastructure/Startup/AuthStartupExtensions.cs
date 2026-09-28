@@ -57,7 +57,13 @@ public static class AuthStartupExtensions
                 // lifetime constraints, so before that binding the `scope` claim was the only
                 // thing telling the two apart.
                 options.TokenValidationParameters = JwtTokenBinding.SessionValidationParameters();
-            });
+            })
+            // System API tokens (dpsys_…), minted at the apex and scoped to the six
+            // tenant-lifecycle actions on SystemController. Management-only — the edge
+            // composition root has no system-admin surface to authenticate against — so this
+            // scheme is registered here rather than in CoreAuthStartupExtensions.
+            .AddScheme<SystemTokenAuthenticationOptions, SystemTokenAuthenticationHandler>(
+                SystemTokenDefaults.Scheme, _ => { });
 
         builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
             // Resolve the signing key per validation from JwtSigningKeyProvider instead of copying
@@ -74,6 +80,10 @@ public static class AuthStartupExtensions
             // issues tokens with, so a substituted clock can never split issue and validation time.
             .Configure<TimeProvider>((options, time) => options.TimeProvider = time);
 
+        // Refuses a request that authenticated under both Bearer (JWT) and SystemToken at once —
+        // registered ahead of every other global filter so a merged principal never reaches a
+        // scope/rotation/MFA decision built on a single-scheme assumption.
+        builder.Services.AddScoped<SystemTokenMixedPrincipalGuard>();
         // Global RouteScopeFilter rejects any /api/v1/ request whose JWT lacks a
         // `scope` claim and pins each scope to its realm: tenant routes require
         // scope=tenant + matching tid, system routes require scope=system + apex.
@@ -215,12 +225,12 @@ public static class AuthStartupExtensions
         // documented-forbidden SQLite+HA configuration with no error. DB_PROVIDER defaults to
         // sqlite when unset, so an operator who sets ha + Redis but leaves the default provider is
         // caught here.
-        string dbProvider = (builder.Configuration["DB_PROVIDER"] ?? "sqlite").ToLowerInvariant();
-        if (deploymentMode == "ha" && dbProvider != "postgres")
+        string rawDbProvider = (builder.Configuration[DbProviderSetting.Key] ?? "").Trim();
+        if (deploymentMode == "ha" && DbProviderSetting.FromConfiguration(builder.Configuration) != DbProvider.Postgres)
         {
             throw new InvalidOperationException(
                 $"DEPENDABLY_DEPLOYMENT_MODE=ha requires DB_PROVIDER=postgres (got "
-                + $"'{(string.IsNullOrWhiteSpace(dbProvider) ? "sqlite (default)" : dbProvider)}'). "
+                + $"'{(rawDbProvider.Length == 0 ? "sqlite (default)" : rawDbProvider)}'). "
                 + "SQLite does not support multi-instance access — sharing one database file across "
                 + "replicas causes write-lock corruption, WAL divergence, and silent data loss. "
                 + "See OPERATIONS.md -> High-availability deployment.");

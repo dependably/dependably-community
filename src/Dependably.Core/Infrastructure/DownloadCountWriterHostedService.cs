@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Dapper;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -256,7 +257,9 @@ public sealed class DownloadCountWriterHostedService : BackgroundService
 
         string now = _time.GetUtcNow().ToUtcIso();
 
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: one batch updates counters for many orgs, each keyed by the org_id the request
+        // resolved; the UPDATEs filter on it.
+        await using var conn = await _db.OpenCrossTenantAsync("download count batch writer", ct);
         // Wrap all UPDATEs in a single transaction so the writer holds the WAL writer
         // lock once per batch instead of once per key.
         await using var tx = await conn.BeginTransactionAsync(ct);

@@ -550,7 +550,7 @@ public sealed class ProjectsControllerTests : IAsyncLifetime
     private sealed class SingleStoreTenantStorageResolver : ITenantStorageResolver
     {
         public SingleStoreTenantStorageResolver(IBlobStore store) => Cache = store;
-        public Task<IBlobStore> GetRegistryAsync(string tenantId, CancellationToken ct = default)
+        public Task<IBlobStore> GetRegistryAsync(string tenantId, bool forWrite = false, CancellationToken ct = default)
             => Task.FromResult(Cache);
         public IBlobStore Cache { get; }
     }

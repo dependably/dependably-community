@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -191,6 +192,8 @@ public sealed class StatsRefreshService : BackgroundService
 
             foreach (string orgId in orgIds)
             {
+                using var tenantScope = DbScope.ForOrg(orgId);
+
                 // The per-org guard below swallows failures, so this is the point at which a lost
                 // lease (or a host shutdown) actually stops the pass.
                 if (leaseCt.IsCancellationRequested)
@@ -200,34 +203,7 @@ public sealed class StatsRefreshService : BackgroundService
 
                 try
                 {
-                    // now-ok: measures real elapsed time for a duration log/metric only — no control
-                    // flow branches on the value, so a substitutable clock would change the reported
-                    // number without changing what the code does.
-                    var orgSw = Stopwatch.StartNew();
-                    var stats = await _analytics.GetOrgStatsAsync(orgId, leaseCt);
-                    orgSw.Stop();
-
-                    var now = _time.GetUtcNow();
-                    string computedAt = now.ToUtcIso();
-
-                    // Append today's trend point (last write of the day wins), then fold the
-                    // recent window back into the stats this pass caches — so the snapshot's own
-                    // Trend field always reflects the row just written, not last pass's read.
-                    var historyPoint = new OrgStatsHistoryPoint
-                    {
-                        TotalVulnerabilities = stats.VulnsByEcosystemAndSeverity.Sum(v => v.Count),
-                        BlockedPulls30d = stats.BlockedPulls30d,
-                        TotalDownloads30d = stats.TotalDownloads30d,
-                    };
-                    string day = now.UtcDateTime.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
-                    string historyJson = JsonSerializer.Serialize(historyPoint, JsonContracts.Web);
-                    await _history.UpsertAsync(orgId, day, historyJson, computedAt, leaseCt);
-
-                    var trend = await BuildTrendAsync(orgId, leaseCt);
-                    var statsWithTrend = stats with { Trend = trend };
-
-                    string json = JsonSerializer.Serialize(statsWithTrend, JsonContracts.Web);
-                    await _snapshots.UpsertSnapshotAsync(orgId, json, computedAt, orgSw.ElapsedMilliseconds, leaseCt);
+                    await RefreshOrgSnapshotAsync(orgId, leaseCt);
                     refreshed++;
                 }
                 catch (OperationCanceledException)
@@ -263,6 +239,39 @@ public sealed class StatsRefreshService : BackgroundService
             // The lease owns the handle: stopping the heartbeat and releasing the lock are one step.
             await lease.DisposeAsync();
         }
+    }
+
+    // Recomputes one org's stats, appends today's trend point, and stores the snapshot.
+    private async Task RefreshOrgSnapshotAsync(string orgId, CancellationToken ct)
+    {
+        // now-ok: measures real elapsed time for a duration log/metric only — no control
+        // flow branches on the value, so a substitutable clock would change the reported
+        // number without changing what the code does.
+        var orgSw = Stopwatch.StartNew();
+        var stats = await _analytics.GetOrgStatsAsync(orgId, ct);
+        orgSw.Stop();
+
+        var now = _time.GetUtcNow();
+        string computedAt = now.ToUtcIso();
+
+        // Append today's trend point (last write of the day wins), then fold the
+        // recent window back into the stats this pass caches — so the snapshot's own
+        // Trend field always reflects the row just written, not last pass's read.
+        var historyPoint = new OrgStatsHistoryPoint
+        {
+            TotalVulnerabilities = stats.VulnsByEcosystemAndSeverity.Sum(v => v.Count),
+            BlockedPulls30d = stats.BlockedPulls30d,
+            TotalDownloads30d = stats.TotalDownloads30d,
+        };
+        string day = now.UtcDateTime.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        string historyJson = JsonSerializer.Serialize(historyPoint, JsonContracts.Web);
+        await _history.UpsertAsync(orgId, day, historyJson, computedAt, ct);
+
+        var trend = await BuildTrendAsync(orgId, ct);
+        var statsWithTrend = stats with { Trend = trend };
+
+        string json = JsonSerializer.Serialize(statsWithTrend, JsonContracts.Web);
+        await _snapshots.UpsertSnapshotAsync(orgId, json, computedAt, orgSw.ElapsedMilliseconds, ct);
     }
 
     // Folds org_stats_history's recent rows into the dashboard trend series. A malformed row

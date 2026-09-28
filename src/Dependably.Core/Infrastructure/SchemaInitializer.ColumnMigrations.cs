@@ -638,6 +638,10 @@ public sealed partial class SchemaInitializer
             // NULL = unlimited; positive integer = byte cap on the sum of size_bytes across
             // the tenant's package_versions. Checked in PackagePublishService.
             "ALTER TABLE orgs ADD COLUMN storage_quota_bytes INTEGER",
+            // Usage-cap posture computed from org_usage_caps by the hourly usage rollup and read
+            // by every tenant resolver. A new column, so its CHECK is safe to add on the ALTER:
+            // every existing row takes the 'normal' default.
+            "ALTER TABLE orgs ADD COLUMN usage_posture TEXT NOT NULL DEFAULT 'normal' CHECK (usage_posture IN ('normal','uploads_refused','downloads_throttled'))",
             // Operator-facing label + freshness signal for both token tables. `description`
             // is captured at issuance so operators can identify tokens after the raw value
             // is gone. `last_used_at` is touched on successful auth (throttled ~60s, see
@@ -1320,6 +1324,32 @@ public sealed partial class SchemaInitializer
         await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
             ? "ALTER TABLE tenant_artifact_access ADD COLUMN size_bytes INTEGER"
             : "ALTER TABLE tenant_artifact_access ADD COLUMN size_bytes BIGINT");
+
+        // The operator usage signals: metered request counts on the rollups and the per-org counts
+        // on storage_snapshot. Nothing bills them. They are 64-bit on both providers, like the byte
+        // columns beside them, so they run outside the shared loop. Rows written before the columns
+        // existed read 0; history is not backfilled.
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE usage_hourly ADD COLUMN request_count INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE usage_hourly ADD COLUMN request_count BIGINT NOT NULL DEFAULT 0");
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE usage_daily ADD COLUMN request_count INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE usage_daily ADD COLUMN request_count BIGINT NOT NULL DEFAULT 0");
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE storage_snapshot ADD COLUMN hosted_version_count INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE storage_snapshot ADD COLUMN hosted_version_count BIGINT NOT NULL DEFAULT 0");
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE storage_snapshot ADD COLUMN oci_manifest_count INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE storage_snapshot ADD COLUMN oci_manifest_count BIGINT NOT NULL DEFAULT 0");
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE storage_snapshot ADD COLUMN oci_blob_count INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE storage_snapshot ADD COLUMN oci_blob_count BIGINT NOT NULL DEFAULT 0");
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE storage_snapshot ADD COLUMN cache_entry_count INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE storage_snapshot ADD COLUMN cache_entry_count BIGINT NOT NULL DEFAULT 0");
+        await ApplyAdditiveAsync(conn, _db.Provider == DbProvider.Sqlite
+            ? "ALTER TABLE storage_snapshot ADD COLUMN db_row_count INTEGER NOT NULL DEFAULT 0"
+            : "ALTER TABLE storage_snapshot ADD COLUMN db_row_count BIGINT NOT NULL DEFAULT 0");
 
         // The only declaration site for this index. It deliberately does NOT appear in Schema.sql /
         // Schema.pg.sql: those run in full before this pass, so on an upgrading database a

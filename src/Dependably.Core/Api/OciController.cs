@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -62,14 +63,19 @@ public sealed partial class OciController : OrgScopedControllerBase
     /// </summary>
     [HttpGet("/v2/{**path}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.PerResponse, "oci")]
     public async Task<IActionResult> Get(string? path, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(path))
         {
+            HttpContext.ClassifyEgress(EgressKind.Metadata);
             return await PingAsync(ct);
         }
 
         var route = OciRoute.Parse(path);
+        // Layers and config blobs are the artifact bytes; manifests, tag lists, and referrers are
+        // the metadata a client resolves them through.
+        HttpContext.ClassifyEgress(route?.Kind == OciRouteKind.Blob ? EgressKind.Artifact : EgressKind.Metadata);
         return route is null
             ? OciError(StatusCodes.Status404NotFound, OciErrorCode.UNSUPPORTED, "Unsupported v2 path.")
             : route.Kind switch

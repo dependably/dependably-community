@@ -103,7 +103,10 @@ public sealed class SbomDocumentStore
     /// </summary>
     public async Task<string> StageBlobAsync(SbomDocumentWrite write, CancellationToken ct = default)
     {
-        var store = await _storage.GetRegistryAsync(write.OrgId, ct);
+        // forWrite: false — SBOM/VEX/SARIF ingest routes through the management plane
+        // (/api/v1/sbom, /vex, /sarif), which TenantStatusEnforcementMiddleware admits for a
+        // read-only org (same posture as token/member management), so this stays unblocked here too.
+        var store = await _storage.GetRegistryAsync(write.OrgId, forWrite: false, ct);
         string blobKey = Storage.BlobKeys.ProjectDocument(
             write.OrgId, write.ProjectId, write.ProjectVersionId, write.DocType, write.Sha256);
 
@@ -151,7 +154,7 @@ public sealed class SbomDocumentStore
     /// <summary>Opens a stored document's bytes, or null when the blob is gone.</summary>
     public async Task<Stream?> OpenAsync(string orgId, string blobKey, CancellationToken ct = default)
     {
-        var store = await _storage.GetRegistryAsync(orgId, ct);
+        var store = await _storage.GetRegistryAsync(orgId, forWrite: false, ct);
         return await store.GetAsync(blobKey, ct);
     }
 }

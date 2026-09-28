@@ -3,6 +3,7 @@ using Cronos;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Redis;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Background;
 
@@ -135,6 +136,10 @@ public sealed class TenantHardDeleteService : BackgroundService
 
     public async Task RunPassAsync(CancellationToken ct)
     {
+        // xtenant: removes an expired tenant entirely, including its org-less audit rows and the
+        // instance-scoped record of the deletion.
+        using var ownerScope = DbScope.CrossTenant("tenant hard delete");
+
         // A headless edge node has one implicit org and never soft-deletes tenants, so this sweep
         // is inert there — edge mode force-disables tenant-hard-delete (not in the allowlist).
         if (_airGap.IsJobDisabled("tenant-hard-delete"))
@@ -324,11 +329,14 @@ public sealed class TenantHardDeleteService : BackgroundService
             // list rather than from a half-pseudonymized set no query could find again.
             foreach (string[] chunk in auditEventIds.Chunk(AuditEventPseudonymizeChunkSize))
             {
+                var (idsClause, idsParams) = DapperInClause.Expand("id", chunk);
                 // xtenant: keyed by event_id PKs captured from the org_id = @orgId snapshot taken
                 // above, before the ON DELETE SET NULL cascade fired.
+                // rawsql: idsClause is a parameterized IN (@id0, …) list built in C# by DapperInClause.
                 await conn.ExecuteAsync(new CommandDefinition(
-                    "UPDATE audit_event SET source_ip = NULL, user_agent = NULL WHERE event_id IN @ids",
-                    new { ids = chunk }, transaction: tx, cancellationToken: ct));
+                    "UPDATE audit_event SET source_ip = NULL, user_agent = NULL WHERE event_id IN @ids"
+                        .Replace("@ids", idsClause, StringComparison.Ordinal),
+                    idsParams, transaction: tx, cancellationToken: ct));
             }
 
             // In the same transaction as the erasure it records: a row claiming a deletion that

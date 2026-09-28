@@ -46,7 +46,8 @@ public sealed class NuGetFlatContainerHandler(
     ProxyFetchService proxyFetch,
     Dependably.Protocol.Provenance.NuGetProvenanceVerifier provenance,
     TimeProvider time,
-    ILogger<NuGetFlatContainerHandler> logger)
+    ILogger<NuGetFlatContainerHandler> logger,
+    BlobPresignService? presign = null)
 {
     public async Task<IActionResult> FlatcontainerVersionsAsync(
         HttpContext httpContext, string orgId, string id, CancellationToken ct)
@@ -519,23 +520,34 @@ public sealed class NuGetFlatContainerHandler(
         string serveBlobKey = requestedFile?.BlobKey ?? pkgVersion.BlobKey;
         string? serveChecksum = requestedFile?.ChecksumSha256 ?? pkgVersion.ChecksumSha256;
 
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(serveBlobKey), ct);
-        if (stream is null)
+        long serveSize = requestedFile?.SizeBytes ?? pkgVersion.SizeBytes;
+        string storeKey = BlobKeys.StoreKey(serveBlobKey);
+        var redirect = presign is null
+            ? null
+            : await presign.TryRedirectAsync(
+                httpContext, blobs, storeKey, serveSize, BlobOrigins.FromColumn(pkgVersion.Origin), "nuget", ct);
+        Stream? stream = null;
+        if (redirect is null)
         {
-            return new NotFoundResult();
+            stream = await blobs.GetAsync(storeKey, ct);
+            if (stream is null)
+            {
+                return new NotFoundResult();
+            }
+
+            httpContext.Response.Headers["X-Cache"] = "HIT";
+            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
+            if (serveChecksum is not null)
+            {
+                httpContext.Response.Headers.ETag = $"\"sha256:{serveChecksum}\"";
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
-        httpContext.Response.Headers["X-Cache"] = "HIT";
-        httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(pkgVersion.Purl);
-        if (serveChecksum is not null)
-        {
-            httpContext.Response.Headers.ETag = $"\"sha256:{serveChecksum}\"";
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
         await audit.LogActivityAsync(orgId, "nuget", pkgVersion.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
             actorKind: token?.ActorKind, sourceIp: sourceIp, ct: ct);
         await packages.IncrementDownloadCountAsync(pkgVersion.Id, ct);
-        return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
+        return redirect ?? new FileStreamResult(stream!, "application/octet-stream") { FileDownloadName = file };
     }
 
 
@@ -548,22 +560,31 @@ public sealed class NuGetFlatContainerHandler(
         TokenRecord? token, string? sourceIp, CancellationToken ct)
     {
         // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
-        if (stream is null)
+        string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
+        var redirect = presign is null
+            ? null
+            : await presign.TryRedirectAsync(httpContext, blobs, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "nuget", ct);
+        Stream? stream = null;
+        if (redirect is null)
         {
-            return null;
+            stream = await blobs.GetAsync(storeKey, ct);
+            if (stream is null)
+            {
+                return null;
+            }
+
+            httpContext.Response.Headers["X-Cache"] = "HIT";
+            if (caFacts.Purl is not null)
+            {
+                httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
+            }
+            if (!string.IsNullOrEmpty(caFacts.ContentHash))
+            {
+                httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
+                httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            }
         }
 
-        httpContext.Response.Headers["X-Cache"] = "HIT";
-        if (caFacts.Purl is not null)
-        {
-            httpContext.Response.Headers["X-Dependably-PURL"] = HeaderSanitizer.Sanitize(caFacts.Purl);
-        }
-        if (!string.IsNullOrEmpty(caFacts.ContentHash))
-        {
-            httpContext.Response.Headers.ETag = $"\"sha256:{caFacts.ContentHash}\"";
-            httpContext.Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        }
         if (caFacts.Purl is not null)
         {
             await audit.LogActivityAsync(orgId, "nuget", caFacts.Purl, "download", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
@@ -572,7 +593,7 @@ public sealed class NuGetFlatContainerHandler(
         // Increment per-tenant download count on the global plane. Enqueued off the request
         // path — the row already exists (seeded durably at first-fetch).
         await tenantAccess.RecordDownloadHitAsync(orgId, caFacts.Id, time.GetUtcNow(), ct);
-        return new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
+        return redirect ?? new FileStreamResult(stream!, "application/octet-stream") { FileDownloadName = file };
     }
 
     private async Task<IActionResult> ProxyFetchNupkgAsync(

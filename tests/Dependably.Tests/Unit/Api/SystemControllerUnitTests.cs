@@ -1269,6 +1269,41 @@ public sealed class SystemControllerUnitTests
     }
 
     [Fact]
+    public async Task SetTenantStatus_AcceptsReadOnly()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string slug = $"ro-{Guid.NewGuid():N}"[..18];
+        await OrgSeeder.InsertAsync(s.Store, slug);
+        var b = await s.BuildAsync();
+        SetSystemActor(b, "ops-actor-id");
+
+        var result = await b.SystemController.SetTenantStatus(
+            slug, new SetTenantStatusRequest("read_only"), CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    [Fact]
+    public async Task SetTenantStatus_RejectsUnknownStatusValue()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        string slug = $"bogus-{Guid.NewGuid():N}"[..18];
+        await OrgSeeder.InsertAsync(s.Store, slug);
+        var b = await s.BuildAsync();
+        SetSystemActor(b, "ops-actor-id");
+
+        var result = await b.SystemController.SetTenantStatus(
+            slug, new SetTenantStatusRequest("archived"), CancellationToken.None);
+
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Fact]
     public async Task CreateAdmin_EnqueuesExactlyOneSystemEventRecord_NoTenant()
     {
         await using var s = await ControllerScenario.CreateAsync();

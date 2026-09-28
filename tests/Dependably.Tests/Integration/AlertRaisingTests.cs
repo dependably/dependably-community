@@ -451,20 +451,21 @@ public sealed class AlertRaisingTests : IAsyncLifetime
     private async Task SeedAlertSettingsAsync(string orgId, string minSeverity, bool vulnAlertsEnabled = true)
     {
         await using var conn = await _db.OpenAsync();
+        string now = TimeProvider.System.GetUtcNow().ToUtcIso();
         await conn.ExecuteAsync(
             """
             INSERT INTO alert_settings (org_id, vuln_alerts_enabled, vuln_min_severity, created_at, updated_at)
-            VALUES (@orgId, @vulnAlertsEnabled, @minSeverity, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            VALUES (@orgId, @vulnAlertsEnabled, @minSeverity, @now, @now)
             """,
-            new { orgId, vulnAlertsEnabled = vulnAlertsEnabled ? 1 : 0, minSeverity });
+            new { orgId, vulnAlertsEnabled = vulnAlertsEnabled ? 1 : 0, minSeverity, now });
     }
 
     private async Task StampCheckedAsync(string versionId)
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
-            "UPDATE package_versions SET vuln_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = @id",
-            new { id = versionId });
+            "UPDATE package_versions SET vuln_checked_at = @now WHERE id = @id",
+            new { id = versionId, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
     }
 
     private async Task ClearCheckedAsync(string versionId)

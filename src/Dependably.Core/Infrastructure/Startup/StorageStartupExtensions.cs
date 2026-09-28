@@ -1,3 +1,4 @@
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Storage;
 
 namespace Dependably.Infrastructure.Startup;
@@ -10,17 +11,33 @@ internal static class StorageStartupExtensions
 {
     internal static void AddDependablyMetadataStore(this WebApplicationBuilder builder)
     {
-        string dbProvider = (builder.Configuration["DB_PROVIDER"] ?? "sqlite").ToLowerInvariant();
-        string? dbConnStr = builder.Configuration["DB_CONNECTION_STRING"];
+        var dbProvider = DbProviderSetting.FromConfiguration(builder.Configuration);
+        // DB_USERNAME / DB_PASSWORD override the credential inside DB_CONNECTION_STRING.
+        string? dbConnStr = PostgresConnectionString.FromConfiguration(builder.Configuration);
         string dbPath = builder.Configuration["DB_PATH"] ?? "/data/dependably.db";
 
-        IMetadataStore metadataStore = dbProvider switch
+        var rowLevelSecurity = RowLevelSecurityOptions.FromConfiguration(builder.Configuration);
+        builder.Services.AddSingleton(rowLevelSecurity);
+        if (rowLevelSecurity.Enforced && dbProvider != DbProvider.Postgres)
         {
-            "postgres" => new NpgsqlMetadataStore(
-                dbConnStr ?? throw new InvalidOperationException("DB_CONNECTION_STRING required for DB_PROVIDER=postgres")),
-            _ => new SqliteMetadataStore(BuildSqliteConnectionString(dbPath))
-        };
-        builder.Services.AddSingleton<IMetadataStore>(metadataStore);
+            throw new InvalidOperationException(
+                $"{RowLevelSecurityOptions.ModeKey}=enforce requires DB_PROVIDER=postgres; SQLite has no row-level security.");
+        }
+
+        if (dbProvider == DbProvider.Postgres)
+        {
+            string connectionString = dbConnStr
+                ?? throw new InvalidOperationException("DB_CONNECTION_STRING required for DB_PROVIDER=postgres");
+            builder.Services.AddHttpContextAccessor();
+            builder.Services.AddSingleton<IAmbientTenantScope, HttpContextAmbientTenantScope>();
+            builder.Services.AddSingleton<IMetadataStore>(sp => new NpgsqlMetadataStore(
+                connectionString, rowLevelSecurity, sp.GetRequiredService<IAmbientTenantScope>()));
+        }
+        else
+        {
+            builder.Services.AddSingleton<IMetadataStore>(new SqliteMetadataStore(BuildSqliteConnectionString(dbPath)));
+        }
+
         builder.Services.AddSingleton<SchemaInitializer>();
         builder.Services.AddSingleton<FirstBootService>();
     }
@@ -55,19 +72,20 @@ internal static class StorageStartupExtensions
     // a re-fetch from upstream).
     internal static void AddDependablyBlobStore(this WebApplicationBuilder builder)
     {
-        builder.Services.AddSingleton<TieredBlobStorage>(_ =>
+        builder.Services.AddSingleton<TieredBlobStorage>(sp =>
         {
             var cfg = builder.Configuration;
-            var defaultStore = BlobStoreFactory.Create(cfg);
+            var loggers = sp.GetService<ILoggerFactory>();
+            var defaultStore = BlobStoreFactory.Create(cfg, loggers);
             // A per-tier override (any *_CACHE / *_REGISTRY env var) tells the factory
             // to build that tier its own store. Without an override the tier shares the
             // default instance, preserving the current single-IBlobStore behaviour for
             // legacy deployments.
             var cache = HasTierOverride(cfg, "CACHE")
-                ? BlobStoreFactory.CreateForTier(cfg, "CACHE")
+                ? BlobStoreFactory.CreateForTier(cfg, "CACHE", loggers)
                 : defaultStore;
             var registry = HasTierOverride(cfg, "REGISTRY")
-                ? BlobStoreFactory.CreateForTier(cfg, "REGISTRY")
+                ? BlobStoreFactory.CreateForTier(cfg, "REGISTRY", loggers)
                 : defaultStore;
             return new TieredBlobStorage(cache, registry);
         });
@@ -77,7 +95,16 @@ internal static class StorageStartupExtensions
         // path ever asks a store to sign a URL, so the registry stays the only way artefact
         // bytes leave. Registered unconditionally (including on edge nodes) so the serve paths
         // can take a non-null dependency and branch on Enabled rather than on nullability.
-        builder.Services.AddSingleton(PresignedReadOptions.FromConfiguration(builder.Configuration));
+        var presignedReads = PresignedReadOptions.FromConfiguration(builder.Configuration);
+        if (presignedReads.Signer == PresignedReadSigner.CloudFront)
+        {
+            CloudFrontSignerOptions.EnsureStorageSupported(
+                HasTierOverride(builder.Configuration, "CACHE") || HasTierOverride(builder.Configuration, "REGISTRY"),
+                builder.Configuration["STORAGE_BACKEND"]);
+        }
+
+        builder.Services.AddSingleton(presignedReads);
+        builder.Services.AddSingleton<IProxiedContentVisibility, UpstreamProxiedContentVisibility>();
         builder.Services.AddSingleton<BlobPresignService>();
         // Tenant-aware registry resolver. Singleton lifetime is non-negotiable: the
         // enterprise impl memoizes per-tenant S3BlobStore instances and per-request

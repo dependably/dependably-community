@@ -259,24 +259,23 @@ public sealed class PyPiProxyFetcher(
             // Known checksum — verify and use content-addressed cache. The streaming
             // variant returns a stream we immediately dispose: subsequent consumers
             // (license extraction, response body) open a fresh blob-store stream via
-            // the BlobHandle. SizeBytes is read from the seekable stream's Length when
-            // available (LocalBlobStore → FileStream); remote backends that hand back
-            // a non-seekable network stream leave SizeBytes at 0. That 0 means "not measured",
-            // not "zero bytes": CacheAccessRecorder.BindingFor declines to bind a non-positive
-            // size for exactly that reason, so it cannot shadow the coordinate's recorded size
-            // and be served as this tenant's HEAD Content-Length.
+            // the BlobHandle. SizeBytes is the seekable stream's Length (LocalBlobStore →
+            // FileStream), or one listing of the exact key for a remote backend whose network
+            // stream cannot report it. The recorded size is what the stored-byte reconciliation
+            // sums and what a presigned redirect meters, so an unmeasured 0 would read as drift
+            // and keep the file off the redirect path. A 0 that survives (the store did not list
+            // the key) still means "not measured", not "zero bytes": CacheAccessRecorder.BindingFor
+            // declines to bind a non-positive size, so it cannot shadow the coordinate's recorded
+            // size and be served as this tenant's HEAD Content-Length.
             string blobKey = BlobKeys.Proxy(knownSha256);
             // blobKey is BlobKeys.Proxy of a 64-char hex SHA-256 (no user input); upstreamUrl is operator-configured; Serilog structured rendering prevents log injection.
             var (stream, isHit) = await upstream.GetOrFetchStreamAsync(
                 blobKey, upstreamUrl, new ChecksumSpec(ChecksumAlgorithm.Sha256, knownSha256),
                 "pypi", orgId, ct: ct, authorizationHeader: authorizationHeader);
-            long size = 0;
+            long size;
             await using (stream.ConfigureAwait(false))
             {
-                if (stream.CanSeek)
-                {
-                    size = stream.Length;
-                }
+                size = await blobs.GetStagedSizeAsync(stream, BlobKeys.StoreKey(blobKey), ct);
             }
             var blob = new BlobHandle(blobKey, knownSha256, size,
                 async openCt => await blobs.GetAsync(blobKey, openCt)

@@ -42,7 +42,7 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
 
     private const string PullCapabilitiesJson = """["read:artifact","read:metadata"]""";
 
-    private readonly TestMetadataStore _metadataStore = new();
+    private readonly IntegrationDatabase _db = new();
 
     protected override IHost CreateHost(IHostBuilder _)
     {
@@ -56,14 +56,15 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] = SystemAdminEmail;
         builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] = SystemAdminPassword;
 
+        _db.ConfigureBefore(builder);
+
         Program.ConfigureBuilder(builder);
 
         builder.Services.RemoveAll<IBlobStore>();
         builder.Services.AddSingleton<IBlobStore>(BlobStore);
         builder.Services.RemoveAll<TieredBlobStorage>();
         builder.Services.AddSingleton(new TieredBlobStorage(BlobStore, BlobStore));
-        builder.Services.RemoveAll<IMetadataStore>();
-        builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+        _db.ConfigureServices(builder.Services);
 
         // Point Upstream URLs at WireMock on loopback; the production SSRF validator and
         // connect-time guard both block 127.0.0.0/8, so swap in permissive variants.
@@ -105,7 +106,7 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
 
         var app = builder.Build();
         Program.ConfigureApp(app);
-        app.Start();
+        _db.Start(app);
         return app;
     }
 
@@ -119,8 +120,8 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
     {
         MockUpstream.Stop();
         MockUpstream.Dispose();
-        await _metadataStore.DisposeAsync();
         await base.DisposeAsync();
+        await _db.DisposeAsync();
     }
 
     /// <summary>Returns an HttpClient whose default <c>Host</c> header is <paramref name="host"/>.</summary>
@@ -137,7 +138,7 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
     /// <summary>Issues a system-scoped JWT for the seeded system_admin (apex login realm).</summary>
     public async Task<string> CreateSystemAdminJwt()
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
         string sysId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM system_admins LIMIT 1")
             ?? throw new InvalidOperationException("system_admin not found. Was first-boot run?");
@@ -179,7 +180,7 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
     /// <summary>Issues a tenant-scoped JWT for a user/tenant pair (default role owner).</summary>
     public async Task<string> CreateTenantJwt(string userId, string tenantId, string role = "owner")
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
         string jwtSecret = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");
@@ -222,7 +223,7 @@ public sealed class DependablyMultiUpstreamFactory : WebApplicationFactory<Progr
         var doc = System.Text.Json.JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         string tenantId = doc.RootElement.GetProperty("tenant").GetProperty("id").GetString()!;
 
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
         string ownerId = await conn.ExecuteScalarAsync<string>(
             "SELECT id FROM users WHERE tenant_id = @tenantId LIMIT 1", new { tenantId })
             ?? throw new InvalidOperationException("owner user missing after tenant creation");

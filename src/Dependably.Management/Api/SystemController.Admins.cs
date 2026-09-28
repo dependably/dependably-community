@@ -181,6 +181,11 @@ public sealed partial class SystemController
             return NotFound();
         }
 
+        // A password reset is the compromise-response path: any system token minted under the
+        // target's old session must stop working immediately, the same way it cuts off the
+        // target's outstanding JWT sessions and trusted devices.
+        await _systemTokens.DeleteByOwnerAsync(id, ct);
+
         await _audit.LogSystemAsync(
             action: "system_admin.admin_password_reset",
             actorId: actor,

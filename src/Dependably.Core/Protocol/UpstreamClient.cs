@@ -5,6 +5,7 @@ using System.Text.Json;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit.Events;
 using Dependably.Infrastructure.Observability;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Security;
 using Dependably.Storage;
 
@@ -502,6 +503,10 @@ public sealed partial class UpstreamClient
     // per-caller waits (waiters only observe the shared Task in FetchWithTelemetryAsync).
     private async Task<UpstreamFetchResult> FetchAndStageAsync(UpstreamFetchRequest req, CancellationToken ct)
     {
+        // The single-flight map is keyed by blob, so this shared fetch runs on the flow of whichever
+        // caller started it; bind its own writes (quota reservation, refusal audits) to the org it was
+        // requested for, not to that caller's request.
+        using var tenantScope = req.OrgId is { Length: > 0 } orgId ? DbScope.ForOrg(orgId) : null;
         // now-ok: measures real elapsed time for a duration log/metric only — no control
         // flow branches on the value, so a substitutable clock would change the reported
         // number without changing what the code does.

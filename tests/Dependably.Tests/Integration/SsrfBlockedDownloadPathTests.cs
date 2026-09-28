@@ -139,6 +139,14 @@ public sealed class SsrfBlockedDownloadPathTests : IAsyncLifetime
     /// </summary>
     private sealed class BlockingFactory : WebApplicationFactory<Program>
     {
+        private readonly IntegrationDatabase _db = new();
+
+        public override async ValueTask DisposeAsync()
+        {
+            await base.DisposeAsync();
+            await _db.DisposeAsync();
+        }
+
         public ToggleableBlockingValidator BlockingValidator { get; } = new();
 
         private readonly WireMockServer _mock;
@@ -157,6 +165,8 @@ public sealed class SsrfBlockedDownloadPathTests : IAsyncLifetime
                 ["DEPLOYMENT_MODE"] = "single",
             });
 
+            _db.ConfigureBefore(builder);
+
             Program.ConfigureBuilder(builder);
 
             var inMemBlob = new InMemoryBlobStore();
@@ -165,9 +175,7 @@ public sealed class SsrfBlockedDownloadPathTests : IAsyncLifetime
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(inMemBlob, inMemBlob));
 
-            var metaStore = new TestMetadataStore();
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(metaStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.Services.RemoveAll<IUpstreamUrlValidator>();
             builder.Services.AddSingleton<IUpstreamUrlValidator>(BlockingValidator);
@@ -194,7 +202,7 @@ public sealed class SsrfBlockedDownloadPathTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
     }

@@ -411,7 +411,7 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
     private sealed class EnforcedRequireMfaFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -420,14 +420,14 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
             // at service-registration time, so a UseSetting after this line is inert.
             // See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.WebHost.UseTestServer();
             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
@@ -443,7 +443,7 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -455,13 +455,13 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         private async Task<(string orgId, string adminId, string jwtSecret)> GetBootstrapIds()
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             string orgId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
                 ?? throw new InvalidOperationException("Default org not found.");
@@ -496,7 +496,7 @@ public sealed class MfaRequireEnforcedSettingsTests : IAsyncLifetime
         public async Task<string> CreateEnrolledAdminJwt()
         {
             var (orgId, adminId, jwtSecret) = await GetBootstrapIds();
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             await conn.ExecuteAsync(
                 "UPDATE users SET mfa_enabled = 1 WHERE id = @adminId", new { adminId });
             // JWT is minted; the guard re-reads mfa_enabled from DB on each request, so we
@@ -695,7 +695,7 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
         public const string ApexHost = "localhost";
 
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -709,14 +709,14 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
             // at service-registration time, so a UseSetting after this line is inert.
             // See TestHostEnv.
             TestHostEnv.PinAmbient(builder, "multi");
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.WebHost.UseTestServer();
             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
@@ -732,7 +732,7 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -744,8 +744,8 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         /// <summary>
@@ -754,7 +754,7 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
         /// </summary>
         public async Task<string> CreateSystemAdminJwt()
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             string adminId = await conn.ExecuteScalarAsync<string>(
                 "SELECT id FROM system_admins LIMIT 1")
                 ?? throw new InvalidOperationException("system_admin not found.");
@@ -764,7 +764,7 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
         /// <summary>Issues a system-scoped JWT for a specific system_admin id.</summary>
         public async Task<string> CreateSystemAdminJwtForUser(string adminId)
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             await conn.ExecuteAsync(
                 "UPDATE system_admins SET must_change_password = 0 WHERE id = @adminId",
                 new { adminId });
@@ -830,7 +830,7 @@ public sealed class SystemMfaRequirePolicyTests : IAsyncLifetime
         /// </summary>
         public async Task SetSystemAdminMfaEnabled(string adminId, bool enabled)
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             // xtenant: system_admins is global, no org_id filter required
             await conn.ExecuteAsync(
                 "UPDATE system_admins SET mfa_enabled = @v WHERE id = @adminId",

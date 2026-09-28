@@ -53,7 +53,9 @@ public sealed class RetentionServiceOciEvictionTests : IAsyncLifetime
             new Dependably.Infrastructure.Mail.EmailOutboxRepository(_db, _clock),
             new Dependably.Infrastructure.Mail.EmailOutboxPolicy(cfg),
             new OrgStatsHistoryRepository(_db),
-            new BackgroundJobRunRepository(_db)));
+            new BackgroundJobRunRepository(_db),
+            new Dependably.Infrastructure.Usage.UsageEventRepository(_db),
+            new Dependably.Infrastructure.Usage.UsageRollupRepository(_db)));
     }
 
     // ── Cache plane ──────────────────────────────────────────────────────────────

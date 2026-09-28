@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Usage;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
@@ -99,13 +100,19 @@ public sealed partial class OciController
             return ranged;
         }
 
-        // Presigned redirect, when enabled and the tier can sign. Reached only after the pull
-        // authorization, the digest validation, the tenant-scoped row lookup, and the block gate
-        // above have all passed — there is no earlier return that mints a URL, and a refusal on
-        // any of them leaves this code unreached.
-        var redirect = await TryRedirectToPresignedBlobAsync(blob, orgId, purl, token, ct);
-        if (redirect is not null)
+        // Presigned redirect, when enabled for OCI and the tier can sign. Reached only after the
+        // pull authorization, the digest validation, the tenant-scoped row lookup, and the block
+        // gate above have all passed — there is no earlier return that mints a URL, and a refusal
+        // on any of them leaves this code unreached. The Distribution Spec explicitly permits a
+        // registry to redirect a blob GET, and a blob is addressed by its own digest, so the URL
+        // cannot go stale the way a tag-addressed one would; manifests, tag lists, and the
+        // upstream cache-miss path all keep streaming. The origin is the row's, never the key's:
+        // an uploaded layer and a proxied one with the same digest share a blob key.
+        if (_svc.Presign is { } presign
+            && await presign.TryRedirectAsync(
+                HttpContext, blob.Tier, blob.BlobKey, blob.SizeBytes, BlobOrigins.FromColumn(Origin), "oci", ct) is { } redirect)
         {
+            await RecordBlobDownloadAsync(orgId, purl, token, ct);
             return redirect;
         }
 
@@ -126,60 +133,6 @@ public sealed partial class OciController
 
         await RecordBlobDownloadAsync(orgId, purl, token, ct);
         return File(stream, MediaType!);
-    }
-
-    /// <summary>
-    /// Answers a full (non-ranged) digest-addressed blob GET with a <c>307</c> to a short-lived
-    /// presigned URL, so the layer bytes move from the object store straight to the client.
-    /// Returns <c>null</c> whenever the read must be streamed instead — the feature is off, the
-    /// tier cannot sign, or the blob is no longer in the store.
-    ///
-    /// <para>
-    /// The Distribution Spec explicitly permits a registry to redirect a blob GET, and a blob is
-    /// addressed by its own digest, so the content behind the URL cannot change under the client
-    /// and the URL cannot go stale in the way a tag-addressed one would. Nothing mutable and
-    /// nothing not digest-addressed is redirected: manifests (tags move), tag lists, and the
-    /// upstream cache-miss path all keep streaming.
-    /// </para>
-    ///
-    /// <para>
-    /// <c>307</c> rather than <c>302</c> keeps the method and headers intact, which is what makes
-    /// a client's HEAD stay a HEAD. The redirect itself carries <c>no-store</c>: the response body
-    /// is a bearer credential with a minutes-or-less lifetime and must not be cached by a proxy or
-    /// a CDN, even though the blob it points at is immutable.
-    /// </para>
-    ///
-    /// <para>
-    /// The download is recorded before the redirect is written, so the activity row lands on
-    /// exactly the same terms as on the streaming path. What the redirect cannot observe is
-    /// whether the client then completed the transfer — that is true of a streamed response the
-    /// client abandons as well, but a redirect additionally means a replay of the URL inside its
-    /// TTL is invisible here. The short TTL is what bounds that, and it is why the feature is
-    /// opt-in.
-    /// </para>
-    /// </summary>
-    private async Task<IActionResult?> TryRedirectToPresignedBlobAsync(
-        ResolvedLocalBlob blob, string orgId, string purl, TokenRecord? token, CancellationToken ct)
-    {
-        if (_svc.Presign is not { Enabled: true } presign)
-        {
-            return null;
-        }
-
-        var url = await presign.TryCreateAsync(blob.Tier, blob.BlobKey, ct);
-        if (url is null)
-        {
-            return null;
-        }
-
-        // Content-Length was pre-set to the blob size for the streamed response; a 307 carries no
-        // body, so leaving it would put a body-size mismatch on the wire.
-        Response.Headers.Remove("Content-Length");
-        Response.ContentType = null;
-        Response.Headers.CacheControl = "private, no-store";
-
-        await RecordBlobDownloadAsync(orgId, purl, token, ct);
-        return new RedirectResult(url.Value.Url.ToString(), permanent: false, preserveMethod: true);
     }
 
     /// <summary>
@@ -252,42 +205,7 @@ public sealed partial class OciController
     {
         if (headOnly)
         {
-            // HEAD: issue a HEAD request to upstream to confirm existence without
-            // downloading the full blob body (which may be gigabytes for large layers).
-            OciBlobMetadata? meta;
-            try
-            {
-                meta = await _svc.Upstream.FetchBlobMetadataAsync(orgId, name, digest, ct);
-            }
-            catch (AirGappedException)
-            {
-                return AirGappedBlobMiss(name, digest);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return ClientWentAway(name, digest);
-            }
-            catch (OciBlobRefusedException ex)
-            {
-                return BlobRefused(ex, name, digest, token);
-            }
-            catch (Exception ex) when (IsUpstreamFailure(ex, ct))
-            {
-                return UpstreamUnreachable(ex, name, digest);
-            }
-
-            if (meta is null)
-            {
-                return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
-            }
-
-            Response.Headers.AcceptRanges = "bytes";
-            Response.Headers["Docker-Content-Digest"] = digest;
-            Response.Headers["X-Cache"] = "MISS";
-            Response.ContentType = meta.MediaType;
-            Response.Headers.ETag = $"\"{digest}\"";
-            Response.Headers.CacheControl = "private, max-age=31536000, immutable";
-            return Ok();
+            return await ServeUpstreamBlobHeadAsync(orgId, name, digest, token, ct);
         }
 
         // Stream-through: hand the resolver somewhere to mirror the layer into, and it commits
@@ -295,43 +213,7 @@ public sealed partial class OciController
         // whole layer has landed. The distinction is invisible on a small blob and decisive on a
         // large one — a store-and-forward pull of a multi-gigabyte layer sends nothing for
         // minutes, which no reverse proxy's read timeout tolerates.
-        var sink = new OciBlobStreamSink(
-            BeginAsync: async (mediaType, contentLength, beginCt) =>
-            {
-                SetUpstreamBlobHeaders(digest, mediaType);
-                if (contentLength is { } declared)
-                {
-                    // Declared up front so the client can size the transfer and, more to the
-                    // point, can tell a reset mid-layer from an honest end.
-                    Response.ContentLength = declared;
-                }
-
-                await Response.StartAsync(beginCt);
-                return Response.Body;
-            },
-            AbortAsync: () =>
-            {
-                // Reset rather than complete: the bytes already sent are ones this registry has
-                // just decided it will not vouch for.
-                HttpContext.Abort();
-                return Task.CompletedTask;
-            },
-            AllowSynchronousWrites: () =>
-            {
-                // Requested only if the blob store turns out to copy the upstream body
-                // synchronously, which Kestrel otherwise refuses on a response body. Granting it
-                // up front would permit synchronous writes on every streamed blob response; asked
-                // for on demand, the common deployment — a store that copies with CopyToAsync —
-                // never grants it at all. Where it is granted, the thread it blocks is the one
-                // the store's own synchronous copy already owns, so no additional worker is
-                // consumed; the alternative, awaiting an async write from inside a synchronous
-                // read, waits on a pool thread while holding one, which is the starvation this
-                // avoids rather than causes.
-                if (HttpContext.Features.Get<IHttpBodyControlFeature>() is { } bodyControl)
-                {
-                    bodyControl.AllowSynchronousIO = true;
-                }
-            });
+        var sink = CreateUpstreamBlobSink(digest);
 
         OciBlobServeResult? upstreamResult;
         try
@@ -384,6 +266,90 @@ public sealed partial class OciController
 
         SetUpstreamBlobHeaders(digest, blob.MediaType);
         return File(blob.Content, blob.MediaType);
+    }
+
+    /// <summary>
+    /// HEAD on a cache miss: asks upstream for the blob's headers to confirm it exists without
+    /// downloading the body, which may be gigabytes for a large layer.
+    /// </summary>
+    private async Task<IActionResult> ServeUpstreamBlobHeadAsync(
+        string orgId, string name, string digest, TokenRecord? token, CancellationToken ct)
+    {
+        OciBlobMetadata? meta;
+        try
+        {
+            meta = await _svc.Upstream.FetchBlobMetadataAsync(orgId, name, digest, ct);
+        }
+        catch (AirGappedException)
+        {
+            return AirGappedBlobMiss(name, digest);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return ClientWentAway(name, digest);
+        }
+        catch (OciBlobRefusedException ex)
+        {
+            return BlobRefused(ex, name, digest, token);
+        }
+        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
+        {
+            return UpstreamUnreachable(ex, name, digest);
+        }
+
+        if (meta is null)
+        {
+            return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
+        }
+
+        SetUpstreamBlobHeaders(digest, meta.MediaType);
+        return Ok();
+    }
+
+    /// <summary>
+    /// The sink a cache-miss GET streams the upstream layer through: it commits the response
+    /// headers and starts the body as soon as upstream answers, and resets the connection when
+    /// the resolver refuses bytes already on the wire.
+    /// </summary>
+    private OciBlobStreamSink CreateUpstreamBlobSink(string digest)
+    {
+        return new OciBlobStreamSink(
+            BeginAsync: async (mediaType, contentLength, beginCt) =>
+            {
+                SetUpstreamBlobHeaders(digest, mediaType);
+                if (contentLength is { } declared)
+                {
+                    // Declared up front so the client can size the transfer and, more to the
+                    // point, can tell a reset mid-layer from an honest end.
+                    Response.ContentLength = declared;
+                }
+
+                await Response.StartAsync(beginCt);
+                return Response.Body;
+            },
+            AbortAsync: () =>
+            {
+                // Reset rather than complete: the bytes already sent are ones this registry has
+                // just decided it will not vouch for.
+                HttpContext.Abort();
+                return Task.CompletedTask;
+            },
+            AllowSynchronousWrites: () =>
+            {
+                // Requested only if the blob store turns out to copy the upstream body
+                // synchronously, which Kestrel otherwise refuses on a response body. Granting it
+                // up front would permit synchronous writes on every streamed blob response; asked
+                // for on demand, the common deployment — a store that copies with CopyToAsync —
+                // never grants it at all. Where it is granted, the thread it blocks is the one
+                // the store's own synchronous copy already owns, so no additional worker is
+                // consumed; the alternative, awaiting an async write from inside a synchronous
+                // read, waits on a pool thread while holding one, which is the starvation this
+                // avoids rather than causes.
+                if (HttpContext.Features.Get<IHttpBodyControlFeature>() is { } bodyControl)
+                {
+                    bodyControl.AllowSynchronousIO = true;
+                }
+            });
     }
 
     /// <summary>Response headers common to every cache-miss blob answer, streamed or not.</summary>

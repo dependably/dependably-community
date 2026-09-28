@@ -138,6 +138,10 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
             Assert.True(doc.RootElement.TryGetProperty("api", out var api));
             Assert.Contains("/cargo/api/v1/crates", dl.GetString());
             Assert.Contains("/cargo", api.GetString());
+            // Anonymous pull is off, so every request needs the token; Cargo only sends it to
+            // the download endpoint when the registry says so.
+            Assert.True(doc.RootElement.TryGetProperty("auth-required", out var authRequired));
+            Assert.Equal(JsonValueKind.True, authRequired.ValueKind);
         }
         finally
         {
@@ -146,7 +150,7 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
     }
 
     [Fact]
-    public async Task GetConfig_AnonymousPullEnabled_NoToken_Returns200()
+    public async Task GetConfig_AnonymousPullEnabled_NoToken_Returns200_WithoutAuthRequired()
     {
         await SetAnonymousPullAsync(true);
         try
@@ -154,6 +158,10 @@ public sealed class CargoControllerTests : IClassFixture<DependablyFactory>, IAs
             using var client = _factory.CreateClient();
             var resp = await client.GetAsync("/cargo/config.json");
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            Assert.True(doc.RootElement.TryGetProperty("dl", out _));
+            Assert.False(doc.RootElement.TryGetProperty("auth-required", out _),
+                "an anonymous-pull org must not make Cargo demand a token it does not need");
         }
         finally
         {

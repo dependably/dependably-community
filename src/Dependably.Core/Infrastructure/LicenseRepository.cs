@@ -19,9 +19,17 @@ public sealed class LicenseRepository
     private const int SqliteConstraintUnique = 2067;
     private const int SqliteConstraintPrimaryKey = 1555;
 
-    private static bool IsUniquenessViolation(Microsoft.Data.Sqlite.SqliteException ex) =>
-        ex.SqliteErrorCode == SqliteConstraintErrorCode
-        && ex.SqliteExtendedErrorCode is SqliteConstraintUnique or SqliteConstraintPrimaryKey;
+    // Postgres reports the same collision as unique_violation; its foreign-key failure is a
+    // different state (23503), so the distinction above holds on both engines.
+    private const string PostgresUniqueViolation = "23505";
+
+    private static bool IsUniquenessViolation(System.Data.Common.DbException ex) => ex switch
+    {
+        Microsoft.Data.Sqlite.SqliteException sqlite =>
+            sqlite.SqliteErrorCode == SqliteConstraintErrorCode
+            && sqlite.SqliteExtendedErrorCode is SqliteConstraintUnique or SqliteConstraintPrimaryKey,
+        _ => ex.SqlState == PostgresUniqueViolation,
+    };
 
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
@@ -214,7 +222,7 @@ public sealed class LicenseRepository
                 """,
                 new { id, orgId, licenseSpdx = normalized, disposition, note, createdBy });
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (IsUniquenessViolation(ex))
+        catch (System.Data.Common.DbException ex) when (IsUniquenessViolation(ex))
         {
             // UNIQUE constraint — already exists
             return null;
@@ -310,7 +318,7 @@ public sealed class LicenseRepository
                 """,
                 new { id, orgId, licenseSpdx = normalized, note, createdBy });
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (IsUniquenessViolation(ex))
+        catch (System.Data.Common.DbException ex) when (IsUniquenessViolation(ex))
         {
             return null;
         }

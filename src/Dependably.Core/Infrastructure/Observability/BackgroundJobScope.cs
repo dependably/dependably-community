@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Dependably.Infrastructure.RowLevelSecurity;
 using Serilog;
 using Serilog.Context;
 
@@ -95,6 +96,7 @@ public sealed class BackgroundJobScope : IDisposable
     {
         _outcome = outcome;
         _errorMessage = exception?.Message;
+        RowLevelSecurityViolations.Record(exception);
         _activity?.SetTag("dependably.outcome", outcome);
         _activity?.SetStatus(ActivityStatusCode.Error, exception?.Message);
         if (exception is not null)

@@ -220,6 +220,16 @@ public sealed class GoControllerTests : IClassFixture<DependablyFactory>, IAsync
             new { module, version });
         Assert.True(artifactCount > 0, "cache_artifact row should exist after a Go .zip proxy fetch.");
 
+        // A first fetch has no index row to read a size from, so the size recorded is the staged
+        // blob's own; zero would read as stored-byte drift in the weekly reconciliation.
+        long sizeBytes = await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn,
+            """
+            SELECT size_bytes FROM cache_artifact
+            WHERE ecosystem = 'golang' AND name = @module AND version = @version
+            """,
+            new { module, version });
+        Assert.Equal(fakeZip.Length, sizeBytes);
+
         long accessCount = await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn,
             """
             SELECT taa.access_count

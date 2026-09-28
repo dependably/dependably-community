@@ -5,6 +5,7 @@ using Dependably.Infrastructure.Audit.Events;
 using Dependably.Infrastructure.Edge;
 using Dependably.Infrastructure.Hex;
 using Dependably.Infrastructure.Publish;
+using Dependably.Infrastructure.Usage;
 using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Protocol.Hex;
@@ -43,6 +44,7 @@ public sealed partial class HexApiController : OrgScopedControllerBase
     /// <summary>GET /hex/api/users/me — the caller's identity, which <c>mix hex.publish</c> reads before publishing.</summary>
     [HttpGet("/hex/api/users/me")]
     [EnableRateLimiting("download")]
+    // egress-ok: identity echo, a fixed few bytes
     public async Task<IActionResult> GetMe(CancellationToken ct)
     {
         string orgId = CurrentTenantId();
@@ -74,6 +76,7 @@ public sealed partial class HexApiController : OrgScopedControllerBase
     [HttpGet("/hex/api/packages/{name}")]
     [HttpGet("/hex/api/repos/{repo}/packages/{name}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Metadata, "hex")]
     public async Task<IActionResult> GetPackage(string name, string? repo, CancellationToken ct)
     {
         if (!RepoAliasOk(repo) || !HexNaming.IsValidPackageName(name))
@@ -96,6 +99,7 @@ public sealed partial class HexApiController : OrgScopedControllerBase
     [HttpGet("/hex/api/packages/{name}/releases/{version}")]
     [HttpGet("/hex/api/repos/{repo}/packages/{name}/releases/{version}")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Metadata, "hex")]
     public async Task<IActionResult> GetRelease(string name, string version, string? repo, CancellationToken ct)
     {
         if (!RepoAliasOk(repo) || !HexNaming.IsValidPackageName(name) || !HexNaming.IsValidVersion(version))
@@ -453,6 +457,7 @@ public sealed partial class HexApiController : OrgScopedControllerBase
     [HttpGet("/hex/api/packages/{name}/releases/{version}/docs")]
     [HttpGet("/hex/api/repos/{repo}/packages/{name}/releases/{version}/docs")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Artifact, "hex")]
     public IActionResult GetDocs(string name, string version, string? repo)
         => !RepoAliasOk(repo) || !HexNaming.IsValidPackageName(name) || !HexNaming.IsValidVersion(version)
             ? NotFoundTerm()
@@ -522,6 +527,7 @@ public sealed partial class HexApiController : OrgScopedControllerBase
     [HttpPut("/hex/api/{**path}")]
     [HttpDelete("/hex/api/{**path}")]
     [EnableRateLimiting("download")]
+    // egress-ok: refusal body only; never serves package bytes
     public IActionResult Unsupported(string? path)
     {
         _ = path;

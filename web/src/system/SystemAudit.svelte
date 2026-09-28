@@ -169,6 +169,18 @@
     }
   }
 
+  // A system API token acting as a request's principal (actorKind === 'service') has no
+  // system_admins row to resolve an email from — actorEmail is always null for it, and
+  // system_tokens is hard-deleted on revocation, so actorLabel (the token's name, denormalized
+  // at write time) is the only durable identifier. Falls back to the raw actor_id (the token's
+  // own id) only if the label itself is missing, matching the backend's own fallback shape.
+  function actorDisplay(e) {
+    if (e.actorKind === 'service') {
+      return $t('system.audit.tokenActor', { values: { name: e.actorLabel ?? e.actorId ?? '—' } })
+    }
+    return e.actorEmail ?? e.actorId ?? '—'
+  }
+
   // ── Init ─────────────────────────────────────────────────────────────────
   onMount(() => {
     loadEvents()
@@ -249,7 +261,7 @@
       <tr>
         <td>{$formatDate(e.createdAt)}</td>
         <td><code>{e.action}</code></td>
-        <td>{e.actorEmail ?? e.actorId ?? '—'}</td>
+        <td>{actorDisplay(e)}</td>
         <td>{e.orgSlug ?? (e.orgId ?? $t('system.audit.apexTenant'))}</td>
         <td><pre>{fmtDetail(e.detail)}</pre></td>
       </tr>

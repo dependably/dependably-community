@@ -375,7 +375,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
         public const string SecondAdminPassword = "SysEnroll2!";
 
         private readonly InMemoryBlobStore _blob = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -386,14 +386,15 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
             builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_EMAIL"] = AdminEmail;
             builder.Configuration["FIRST_BOOT_SYSTEM_ADMIN_PASSWORD"] = AdminPassword;
 
+            _db.ConfigureBefore(builder);
+
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blob);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blob, _blob));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.WebHost.UseTestServer();
             // Boots a real host via Program.ConfigureBuilder; disable the background jobs
@@ -408,7 +409,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -420,13 +421,13 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
 
         public async Task SetBootstrapAdminMfaEnabled(bool enabled)
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             // xtenant: system_admins is a global table with no org_id column
             await conn.ExecuteAsync(
                 "UPDATE system_admins SET mfa_enabled = @v WHERE email = @email",
@@ -435,7 +436,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
 
         public async Task SetAdminMfaEnabled(string adminId, bool enabled)
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             // xtenant: system_admins is a global table with no org_id column
             await conn.ExecuteAsync(
                 "UPDATE system_admins SET mfa_enabled = @v WHERE id = @adminId",
@@ -453,7 +454,7 @@ public sealed class SystemLoginEnrollmentRequiredTests : IAsyncLifetime
 
         public async Task<string> GetAdminEmail(string adminId)
         {
-            await using var conn = await _metadataStore.OpenAsync();
+            await using var conn = await _db.HarnessStore.OpenAsync();
             // xtenant: system_admins is a global table with no org_id column
             return await conn.ExecuteScalarAsync<string>(
                 "SELECT email FROM system_admins WHERE id = @adminId", new { adminId })

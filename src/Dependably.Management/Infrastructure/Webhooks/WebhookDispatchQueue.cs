@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure.Webhooks;
 
@@ -257,6 +258,8 @@ public sealed class WebhookDispatchQueue : BackgroundService, IPackageEventSink
     /// </summary>
     private async Task<bool> FanOutAsync(PackageEventEnvelope envelope, CancellationToken ct)
     {
+        using var tenantScope = DbScope.ForOrg(envelope.OrgId);
+
         // A suspended/archived/deleting org (see TenantLifecycle) never reaches its own
         // subscription URLs: those are tenant-owned third-party endpoints, exactly the egress the
         // suspension is meant to stop. Checked here rather than at enqueue time — Dispatch is

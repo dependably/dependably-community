@@ -8,6 +8,7 @@ using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit.Events;
 using Dependably.Infrastructure.Edge;
 using Dependably.Infrastructure.Publish;
+using Dependably.Infrastructure.Usage;
 using Dependably.Infrastructure.Webhooks;
 using Dependably.Protocol;
 using Dependably.Security;
@@ -66,6 +67,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
     private readonly BlockGateService _blockGate;
     private readonly LicenseRepository _licenses;
     private readonly ILogger<CargoController> _logger;
+    private readonly BlobPresignService? _presign;
 
     // Route-level ceiling used when no org/instance Cargo upload limit is configured, so the
     // declared crate length is always bounded before any bytes are buffered. crates.io caps
@@ -122,9 +124,11 @@ public sealed partial class CargoController : OrgScopedControllerBase
         EdgePublishGuard edgeGuard,
         BlockGateService blockGate,
         LicenseRepository licenses,
-        ILogger<CargoController> logger)
+        ILogger<CargoController> logger,
+        BlobPresignService? presign = null)
 #pragma warning restore S107
     {
+        _presign = presign;
         _orgs = orgs;
         _packages = packages;
         _tokens = tokens;
@@ -175,9 +179,12 @@ public sealed partial class CargoController : OrgScopedControllerBase
     /// The <c>dl</c> field is the download URL template; Cargo appends
     /// <c>{crate}/{version}/download</c> to form the full download URL.
     /// The <c>api</c> field points to the registry API base for publish/yank.
+    /// <c>auth-required: true</c> is present exactly when the org's anonymous-pull switch is
+    /// off: it is what makes Cargo send its token on crate downloads as well as index reads.
     /// </summary>
     [HttpGet("/cargo/config.json")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Metadata, "cargo")]
     public async Task<IActionResult> GetConfig(CancellationToken ct)
     {
         string orgId = CurrentTenantId();
@@ -191,11 +198,17 @@ public sealed partial class CargoController : OrgScopedControllerBase
         }
 
         string baseUrl = _urls.BaseUrl(HttpContext);
-        var config = new
+        var config = new Dictionary<string, object>(StringComparer.Ordinal)
         {
-            dl = $"{baseUrl}/cargo/api/v1/crates",
-            api = $"{baseUrl}/cargo",
+            ["dl"] = $"{baseUrl}/cargo/api/v1/crates",
+            ["api"] = $"{baseUrl}/cargo",
         };
+        if (!settings.AnonymousPull)
+        {
+            // Cargo sends its token only to the index unless the registry declares every
+            // request authenticated; without this a download is sent bare and gets 401.
+            config["auth-required"] = true;
+        }
 
         return new JsonResult(config);
     }
@@ -211,6 +224,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
     /// </summary>
     [HttpGet("/cargo/api/v1/crates")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Metadata, "cargo")]
     public async Task<IActionResult> Search(
         [FromQuery] string? q,
         [FromQuery(Name = "per_page")] int perPage = 10,
@@ -339,6 +353,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
     /// </summary>
     [HttpGet("/cargo/api/v1/crates/{name}/owners")]
     [EnableRateLimiting("download")]
+    [MeteredEgress(EgressKind.Metadata, "cargo")]
     public async Task<IActionResult> GetOwners(string name, CancellationToken ct)
     {
         string orgId = CurrentTenantId();

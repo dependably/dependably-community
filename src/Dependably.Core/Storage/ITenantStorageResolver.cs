@@ -20,11 +20,20 @@ public interface ITenantStorageResolver
     /// <summary>
     /// Returns the registry-tier <see cref="IBlobStore"/> for <paramref name="tenantId"/>.
     /// Throws <see cref="TenantNotReadyException"/> when <c>orgs.status</c> is anything
-    /// other than <c>active</c>, or when a <c>tenant_provisioning_jobs</c> row exists
-    /// for <c>kind='registry_bucket_create'</c> with a state other than <c>ready</c>.
-    /// Absent provisioning rows count as ready (community has no async provisioning).
+    /// other than <c>active</c> or (for a read intent) <c>read_only</c>, or when a
+    /// <c>tenant_provisioning_jobs</c> row exists for <c>kind='registry_bucket_create'</c> with a
+    /// state other than <c>ready</c>. Absent provisioning rows count as ready (community has no
+    /// async provisioning).
     /// </summary>
-    Task<IBlobStore> GetRegistryAsync(string tenantId, CancellationToken ct = default);
+    /// <param name="forWrite">
+    /// True when the caller intends to write through the returned store (<c>PutAsync</c>/
+    /// <c>DeleteAsync</c>), rather than only read it. A <c>read_only</c> org admits a read but
+    /// throws <see cref="TenantNotReadyException"/> with <see cref="TenantNotReadyReason.ReadOnlyWrite"/>
+    /// for a write intent — this is the same defence-in-depth posture as the existing lifecycle
+    /// and provisioning gates, independent of whatever HTTP-layer refusal
+    /// <c>TenantStatusEnforcementMiddleware</c> already applied upstream.
+    /// </param>
+    Task<IBlobStore> GetRegistryAsync(string tenantId, bool forWrite = false, CancellationToken ct = default);
 
     /// <summary>
     /// Cache-tier blob store. Shared across all tenants by design — proxy artefacts are

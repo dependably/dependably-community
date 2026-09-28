@@ -128,6 +128,14 @@ public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
     /// </summary>
     private sealed class BlockingFactory : WebApplicationFactory<Program>
     {
+        private readonly IntegrationDatabase _db = new();
+
+        public override async ValueTask DisposeAsync()
+        {
+            await base.DisposeAsync();
+            await _db.DisposeAsync();
+        }
+
         public RecordingBlockingValidator BlockingValidator { get; } = new();
 
         private readonly WireMockServer _mock;
@@ -141,6 +149,7 @@ public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
             // DEPLOYMENT_MODE at service-registration time, so a UseSetting after this
             // line is inert. See TestHostEnv.
             TestHostEnv.PinAmbient(builder);
+            _db.ConfigureBefore(builder);
             Program.ConfigureBuilder(builder);
 
             // Use in-memory stores so the factory can start without a real database.
@@ -150,9 +159,7 @@ public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(inMemBlob, inMemBlob));
 
-            var metaStore = new TestMetadataStore();
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(metaStore);
+            _db.ConfigureServices(builder.Services);
 
             // Inject a blocking validator so redirects to denied URLs raise
             // SsrfBlockedException — the signal that the handler is in the pipeline.
@@ -179,7 +186,7 @@ public sealed class SsrfRedirectHandlerWiringTests : IAsyncLifetime
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
     }

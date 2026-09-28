@@ -165,7 +165,8 @@ public sealed class NuGetSymbolProxyFetcher(
         // Content-addressed coordinate: the PDB filename is the name and the debug-id is the
         // version, which is the only stable identity a debug-id lookup carries.
         string purl = $"pkg:{SymbolEcosystem}/{request.PdbName}@{request.SsqpKey}";
-        // proxy-request-ok: BlockDeprecatedMode — a PDB carries no deprecation of its own; SSQP has no package identity to check, and the parent package's deprecation is enforced at its own serve path.
+        // proxy-request-ok: BlockDeprecatedMode — a PDB carries no deprecation of its own; SSQP has no
+        // package identity to check, and the parent package's deprecation is enforced at its own serve path.
         // proxy-request-ok: BlockInstallScriptsMode — a PDB is debug metadata, not an installable package; ScriptDetectionService never computes this signal for nuget-symbols.
         // proxy-request-ok: VerifyProvenanceMode — no signature/provenance verification is implemented for symbol packages; ProvenanceStatus is never computed for this ecosystem.
         return new ProxyFetchRequest(

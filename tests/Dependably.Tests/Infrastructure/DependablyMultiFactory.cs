@@ -49,7 +49,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public Dependably.Infrastructure.Mail.SmtpMailSender? MailSenderOverride { get; init; }
 
-    private readonly TestMetadataStore _metadataStore = new();
+    private readonly IntegrationDatabase _db = new();
 
     protected override IHost CreateHost(IHostBuilder _)
     {
@@ -66,14 +66,15 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         // unless a test opts in by setting MasterKey.
         builder.Configuration["DEPENDABLY_MASTER_KEY"] = MasterKey;
 
+        _db.ConfigureBefore(builder);
+
         Program.ConfigureBuilder(builder);
 
         builder.Services.RemoveAll<IBlobStore>();
         builder.Services.AddSingleton<IBlobStore>(BlobStore);
         builder.Services.RemoveAll<TieredBlobStorage>();
         builder.Services.AddSingleton(new TieredBlobStorage(BlobStore, BlobStore));
-        builder.Services.RemoveAll<IMetadataStore>();
-        builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+        _db.ConfigureServices(builder.Services);
 
         if (MailSenderOverride is not null)
         {
@@ -105,7 +106,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
 
         var app = builder.Build();
         Program.ConfigureApp(app);
-        app.Start();
+        _db.Start(app);
         return app;
     }
 
@@ -117,8 +118,8 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
 
     public new async Task DisposeAsync()
     {
-        await _metadataStore.DisposeAsync();
         await base.DisposeAsync();
+        await _db.DisposeAsync();
     }
 
     /// <summary>
@@ -147,9 +148,13 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public async Task<string> CreateSystemAdminJwt()
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
+        // Filtered by the fixture's own well-known bootstrap email, not `LIMIT 1` with no
+        // ORDER BY: a test that adds and later disables/deletes a second system_admin in this
+        // shared factory makes an unqualified LIMIT 1 nondeterministic, silently minting a
+        // session for a row a sibling test tears down mid-suite.
         string sysId = await conn.ExecuteScalarAsync<string>(
-            "SELECT id FROM system_admins LIMIT 1")
+            "SELECT id FROM system_admins WHERE email = @email LIMIT 1", new { email = SystemAdminEmail })
             ?? throw new InvalidOperationException("system_admin not found. Was first-boot run?");
         // Onboarded-admin session: clear the first-boot must_change_password flag so
         // PasswordRotationGuard doesn't 403 non-allowlisted /api/v1/system calls.
@@ -186,7 +191,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public async Task<string> CreateSystemAdminJwtForUser(string adminId)
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
         string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");
@@ -219,7 +224,7 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public async Task<string> CreateTenantJwt(string userId, string tenantId, string role = "owner")
     {
-        await using var conn = await _metadataStore.OpenAsync();
+        await using var conn = await _db.HarnessStore.OpenAsync();
         string jwtSecretStored = await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'jwt_secret'")
             ?? throw new InvalidOperationException("jwt_secret missing");

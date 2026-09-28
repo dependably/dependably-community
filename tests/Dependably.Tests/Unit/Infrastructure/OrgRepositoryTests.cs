@@ -511,6 +511,20 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         Assert.Equal("active", active!.Status);
     }
 
+    [Fact]
+    public async Task UpdateOrgStatusAsync_Accepts_ReadOnly()
+    {
+        string id = await OrgSeeder.InsertAsync(_fixture.Store, $"ro-{Guid.NewGuid():N}");
+
+        Assert.True(await _repo.UpdateOrgStatusAsync(id, "read_only"));
+        var readOnly = await _repo.GetByIdAsync(id);
+        Assert.Equal("read_only", readOnly!.Status);
+
+        Assert.True(await _repo.UpdateOrgStatusAsync(id, "active"));
+        var active = await _repo.GetByIdAsync(id);
+        Assert.Equal("active", active!.Status);
+    }
+
     [Theory]
     [InlineData("archived")]
     [InlineData("deleting")]
@@ -554,7 +568,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.UpdateOrgStatusAsync(deletedId, "suspended");
         await _repo.SoftDeleteOrgAsync(deletedId);
 
-        var (Active, Suspended, SoftDeleted) = await _repo.CountByStatusAsync();
+        var (Active, Suspended, ReadOnly, SoftDeleted) = await _repo.CountByStatusAsync();
         // Other tests in this fixture may have left rows behind; assert deltas after seeding
         // a known set of our own — pull a "before" baseline and re-count.
 
@@ -564,15 +578,19 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.UpdateOrgStatusAsync(bobId, "suspended");
         string charlieId = await OrgSeeder.InsertAsync(_fixture.Store, $"charlie-{Guid.NewGuid():N}");
         await _repo.SoftDeleteOrgAsync(charlieId);
+        string daveId = await OrgSeeder.InsertAsync(_fixture.Store, $"dave-{Guid.NewGuid():N}");
+        await _repo.UpdateOrgStatusAsync(daveId, "read_only");
 
         var after = await _repo.CountByStatusAsync();
         Assert.Equal(Active + 1, after.Active);
         Assert.Equal(Suspended + 1, after.Suspended);
+        Assert.Equal(ReadOnly + 1, after.ReadOnly);
         Assert.Equal(SoftDeleted + 1, after.SoftDeleted);
 
         // Touch the unused locals so the seeds are kept "live" for the assertion narrative.
         Assert.NotNull(activeId);
         Assert.NotNull(aliceId);
+        Assert.NotNull(daveId);
     }
 
     // ── Session revocation on account-status change ──────────────────────────────────────

@@ -54,6 +54,16 @@ internal static partial class InfrastructureStartupExtensions
         builder.Services.AddHostedService<BlobStoreSizePoller>();
         builder.Services.AddHostedService<TenantCountPoller>();
         builder.Services.AddHostedService<AdvisoryInventoryPoller>();
+
+        // Usage-metering rollup/snapshot/reconciliation jobs. Registered with the core wiring
+        // (not the management-only jobs below) because their repositories are core singletons and
+        // an edge node still records its own egress — DEPLOYMENT_MODE=edge force-disables them via
+        // IAirGapMode.IsJobDisabled anyway (not in BackgroundJobs.EdgeAllowed), so a cache-only
+        // node never actually runs them, but the registration itself stays with their data layer.
+        builder.Services.AddHostedService<Usage.UsageRollupHourlyService>();
+        builder.Services.AddHostedService<Usage.UsageRollupDailyService>();
+        builder.Services.AddHostedService<Usage.UsageStorageSnapshotService>();
+        builder.Services.AddHostedService<Usage.UsageReconciliationService>();
     }
 
     internal static void AddDependablyStagingMonitor(this WebApplicationBuilder builder)

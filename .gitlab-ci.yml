@@ -146,6 +146,7 @@ variables:
   - { job: unit-tests,             artifacts: false }
   - { job: api-contract,           artifacts: false }
   - { job: integration-tests,      artifacts: false }
+  - { job: integration-tests-postgres-rls, artifacts: false }
   - { job: schema-integrity,       artifacts: false }
   - { job: frontend-tests,         artifacts: false }
   - { job: e2e,                    artifacts: false }
@@ -1104,12 +1105,48 @@ integration-tests:
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
   script:
-    - dotnet test --filter "Category=Integration" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration.xml"
+    - dotnet test --filter "Category=Integration&Category!=Benchmark" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration.xml"
   artifacts:
     when: always
     expire_in: 7 days
     reports:
       junit: test-results/integration.xml
+
+# The integration suite again, on Postgres with row-level security enforced. The unit and
+# integration jobs run on SQLite, so without this job nothing exercises the production engine end
+# to end, and nothing proves the RLS backstop leaves every request path and background job working.
+# Each test host creates its own database owned by a non-superuser CREATEROLE role (superusers skip
+# RLS, so a superuser-owned run would pass for the wrong reason); TEST_POSTGRES_CONNECTION is the
+# superuser the harness uses only to create and drop those databases.
+# Every hosted test factory wires its database through IntegrationDatabase, so the single-org,
+# multi-org and bespoke hosts all run here; the edge host stays on SQLite by design (the edge
+# image refuses Postgres), as do the in-process tests that construct services on an in-memory
+# store. IntegrationDatabaseModeTests fails the job if the hosts are not actually on enforced
+# Postgres. Background passes a test drives directly run via TestHarnessDbScope.AsHostAsync, so a
+# pass missing its DbScope fails here as it would in production.
+integration-tests-postgres-rls:
+  stage: test
+  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  # Compiles from source and reads no build-stage artifact — released from stage ordering.
+  needs: []
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  tags: [amd64]
+  services:
+    - name: ${DEP_IMAGE_REGISTRY}/library/postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
+      alias: postgres
+  variables:
+    POSTGRES_DB: dependably_test
+    POSTGRES_USER: dependably
+    POSTGRES_PASSWORD: dependably_test_pw
+    TEST_POSTGRES_CONNECTION: "Host=postgres;Port=5432;Database=dependably_test;Username=dependably;Password=dependably_test_pw"
+    TEST_INTEGRATION_DB: postgres-rls
+  script:
+    - dotnet test --filter "Category=Integration&Category!=Benchmark" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration-postgres-rls.xml"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: test-results/integration-postgres-rls.xml
 
 # Schema/migration guard. Two test categories, both gating:
 #   Category=Schema         — applies the full schema to a fresh SQLite DB and asserts structural
@@ -1407,7 +1444,7 @@ sonarqube-check:
     # quarantine), which otherwise report 0% and drag new-code coverage below the gate.
     # ApiContract (boots the app to diff the live OpenAPI) and SchemaPostgres (needs a
     # live Postgres) stay excluded — neither runs in this job's environment.
-    - dotnet test --filter "Category!=ApiContract&Category!=SchemaPostgres" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
+    - dotnet test --filter "Category!=ApiContract&Category!=SchemaPostgres&Category!=Benchmark" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
     # coverlet.collector now emits opencover (per coverlet.runsettings <Format>opencover</Format>)
     # at test-results/<guid>/coverage.opencover.xml. Move to a deterministic path so the
     # scanner config can point at a literal filename.

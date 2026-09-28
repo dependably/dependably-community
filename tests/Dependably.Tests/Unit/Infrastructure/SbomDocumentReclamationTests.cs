@@ -259,7 +259,7 @@ public sealed class SbomDocumentReclamationTests : IAsyncLifetime
     {
         public IBlobStore Cache => store;
 
-        public Task<IBlobStore> GetRegistryAsync(string tenantId, CancellationToken ct = default)
+        public Task<IBlobStore> GetRegistryAsync(string tenantId, bool forWrite = false, CancellationToken ct = default)
             => Task.FromResult(store);
     }
 }

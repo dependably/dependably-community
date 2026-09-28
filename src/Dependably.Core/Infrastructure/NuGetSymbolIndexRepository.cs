@@ -90,14 +90,17 @@ public sealed class NuGetSymbolIndexRepository
         }
 
         await using var conn = await _db.OpenAsync(ct);
+        var (versionIds, versionIdsParams) = DapperInClause.Expand("packageVersionIds", packageVersionIds);
+        versionIdsParams.AddDynamicParams(new { orgId });
+        // rawsql: versionIds is a parameterized IN (@packageVersionIds0, …) list built in C# by DapperInClause.
         var rows = await conn.QueryAsync<(string PackageVersionId, int Count)>(
             """
             SELECT package_version_id, COUNT(*)
             FROM nuget_symbol_index
             WHERE org_id = @orgId AND package_version_id IN @packageVersionIds
             GROUP BY package_version_id
-            """,
-            new { orgId, packageVersionIds });
+            """.Replace("@packageVersionIds", versionIds, StringComparison.Ordinal),
+            versionIdsParams);
         return rows.ToDictionary(r => r.PackageVersionId, r => r.Count);
     }
 

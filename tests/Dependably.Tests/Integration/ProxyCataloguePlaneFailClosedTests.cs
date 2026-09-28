@@ -397,20 +397,20 @@ public sealed class ProxyCataloguePlaneFailClosedTests
     private static async Task BreakCachePlaneAsync(DependablyFactory factory)
     {
         await using var conn = await OpenAsync(factory);
-        await conn.ExecuteAsync(
-            $"""
-            CREATE TRIGGER {OutageTrigger} BEFORE INSERT ON cache_artifact
-            BEGIN SELECT RAISE(ABORT, 'cache plane unavailable'); END
-            """);
+        await FailingInsertTrigger.InstallAsync(
+            conn, Provider(factory), OutageTrigger, "cache_artifact", "cache plane unavailable");
     }
 
     private static async Task RestoreCachePlaneAsync(DependablyFactory factory)
     {
         await using var conn = await OpenAsync(factory);
-        await conn.ExecuteAsync($"DROP TRIGGER IF EXISTS {OutageTrigger}");
+        await FailingInsertTrigger.DropAsync(conn, Provider(factory), OutageTrigger, "cache_artifact");
     }
 
     // ── Fixtures and probes ───────────────────────────────────────────────────
+
+    private static DbProvider Provider(DependablyFactory factory) =>
+        factory.Services.GetRequiredService<IMetadataStore>().Provider;
 
     private static Task<System.Data.Common.DbConnection> OpenAsync(DependablyFactory factory)
     {

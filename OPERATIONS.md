@@ -20,8 +20,12 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `BASE_URL` | `http://localhost:8080` | Public base URL. Unless `APEX_HOST` is set, the host portion (scheme and port stripped) is the apex hostname for multi-tenant subdomain routing and host-header filtering. When the host is non-localhost, the `AllowedHosts` allowlist is derived at startup — unknown `Host` headers are rejected before tenant resolution. In `DEPLOYMENT_MODE=single`, only the apex host and localhost are permitted. In `DEPLOYMENT_MODE=multi`, the apex host, `*.apex` (all tenant subdomains), and localhost are permitted. When `BASE_URL` is unset or localhost (local/dev), filtering fails closed to loopback hosts only (`localhost`/`127.0.0.1`/`[::1]`, plus `*.localhost` in `DEPLOYMENT_MODE=multi`) — never `AllowedHosts=*` — and a startup warning is logged; a reverse-proxied deployment that never sets `BASE_URL` has every non-loopback `Host` header rejected. |
 | `APEX_HOST` | unset | Optional. Overrides the apex hostname that is otherwise the host portion of `BASE_URL`: the host that serves the system administrator in `DEPLOYMENT_MODE=multi`, whose subdomains are the tenants, and which host-header filtering admits. Accepts a bare host or a URL (scheme, port and path are stripped). Leave unset unless the tenant apex differs from the `BASE_URL` host. A blank value falls back to `BASE_URL`; a loopback value leaves no usable apex. |
 | `DB_PATH` | `/data/dependably.db` | SQLite database file path |
-| `DB_PROVIDER` | `sqlite` | Database backend: `sqlite` (default, uses `DB_PATH`) or `postgres` (requires `DB_CONNECTION_STRING`). |
+| `DB_PROVIDER` | `sqlite` | Database backend: `sqlite` (default, uses `DB_PATH`) or `postgres` (requires `DB_CONNECTION_STRING`). Case and surrounding whitespace are ignored; any other value (`postgresql`, `pg`, …) fails startup rather than falling back to SQLite. |
 | `DB_CONNECTION_STRING` | — | Postgres connection string. Required when `DB_PROVIDER=postgres`; ignored for SQLite. |
+| `DB_PASSWORD` | — | Postgres password. When set, overrides any `Password=` in `DB_CONNECTION_STRING`, so an orchestrator that injects secrets as separate variables (ECS task-definition `secrets`, a rotated RDS/Aurora managed credential) can supply it without splicing it into the string. Applies to the app and to the `migrate-to-postgres` / `verify-postgres-migration` default target; an explicit `--target` is used verbatim. |
+| `DB_USERNAME` | — | Postgres username, with the same override rule as `DB_PASSWORD`. |
+| `DB_ROW_LEVEL_SECURITY` | `enforce` on multi-tenant Postgres, else `off` | Postgres only: `off` or `enforce`. Unset, it is `enforce` when `DB_PROVIDER=postgres` and `DEPLOYMENT_MODE` is `multi` or `header`, and `off` otherwise; an explicit `off` on such a deployment is honoured and logged as a warning at startup. **The default never blocks startup:** if the database cannot host it — the connecting role lacks `CREATEROLE` (and no pre-provisioned role, below), the server is older than Postgres 15, or `DB_CONNECTION_STRING` sets `Multiplexing=true` — the node boots with it off, exactly as before, logs a warning naming the reason, and reports `dependably.db.rls_enforced=0`; fix the cause to enable it, or set `off` to acknowledge. An explicit `enforce` instead refuses to boot on any of these. With `enforce`, row-level security backs the application's `org_id` filter: tenant connections switch to `DB_ROW_LEVEL_SECURITY_ROLE` and can read or write only their own tenant's rows, and a connection with no tenant raises rather than returning an empty result. Startup applies the policies to every table with an `org_id`/`tenant_id` column — and, through their parent row, to `package_versions` and its version-scoped tables — and, with an explicit `enforce`, refuses to boot if any table or view is left uncovered, the server is older than Postgres 15, the role is a superuser, has `BYPASSRLS` or inherits the owner, or `DB_CONNECTION_STRING` sets `Multiplexing=true` (a defaulted `enforce` falls back to off in those cases). Transaction-mode poolers (PgBouncer `pool_mode=transaction`) are unsupported; RDS Proxy is fine. Any other value fails startup. Refusals are counted on `dependably.db.rls_violations`; `dependably.db.rls_enforced` reports the state. A code path that reaches a tenant table with no tenant fails with SQLSTATE `DR001` rather than reading another tenant's rows; the whole integration suite runs this way in CI. |
+| `DB_ROW_LEVEL_SECURITY_ROLE` | `dependably_rls` | The non-login role tenant connections switch to under `DB_ROW_LEVEL_SECURITY=enforce`. Startup creates it and grants it to the connecting role, which needs `CREATEROLE`; to pre-provision it instead, create it `NOLOGIN NOBYPASSRLS` and grant it to the connecting role (with `SET` on Postgres 16+). Must be a lower-case identifier. |
 | `DEFAULT_ORG_SLUG` | `default` | Slug of the org created on first boot |
 | `DEFAULT_TENANT_SLUG` | — | Preferred spelling of `DEFAULT_ORG_SLUG`; when both are set, `DEFAULT_TENANT_SLUG` takes precedence. |
 | `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost apex: `APEX_HOST`, or the host portion of `BASE_URL`. `header` routes each request to the tenant named by `TENANT_HEADER_NAME` (default `X-Dependably-Tenant`), for transparent-intercept deployments where the host belongs to an impersonated public registry and cannot carry the slug; it **requires `TRUSTED_PROXIES`**, because the header is accepted only from a listed socket peer (an unlisted caller resolves to no tenant, so an unset `TRUSTED_PROXIES` serves nothing). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). `edge` runs a headless cache-only node whose sole upstream for every ecosystem is one central master (requires `EDGE_MASTER_URL` + `EDGE_MASTER_TOKEN`; collapses to one implicit realm; no admin user is created). |
@@ -103,8 +107,15 @@ Storage has two tiers: **cache** (proxy artefacts, eviction-friendly) and **regi
 | `S3_REGION` | — | AWS region (required when `STORAGE_BACKEND=s3`) |
 | `AZURE_CONNECTION_STRING` | — | Azure Storage connection string (required when `STORAGE_BACKEND=azure`) |
 | `AZURE_CONTAINER` | — | Azure blob container name (required when `STORAGE_BACKEND=azure`) |
-| `STORAGE_PRESIGNED_READS` | `false` (off) | When on, a **full, digest-addressed OCI blob `GET`** that hits the local cache is answered with a `307` to a short-lived presigned URL on the object store, so the layer bytes never transit the application tier. Applies only to object-store backends that can sign (`s3`, and `azure` when the container client holds an account key); the `local` backend and any store that cannot sign stream as before. The redirect is issued **after** the same pull authorization, tenant-scoped lookup, and block gate the streaming path runs, and only for immutable digest-addressed content — manifests, tag lists, ranged reads, and the upstream cache-miss path are never redirected. Off by default: the URL is a replayable bearer credential for that one blob until it expires, and a redirected read is not observable by this instance beyond the moment it is granted. |
+| `STORAGE_PRESIGNED_READS` | `false` (off) | When on, a full artefact `GET` in an ecosystem named in `STORAGE_PRESIGNED_READ_ECOSYSTEMS` that hits the local store is answered with a `307` (a `302` for apk) to a short-lived presigned URL, so the artefact bytes never transit the application tier. The redirect is issued **after** the same authorization, tenancy, claim, and block-gate checks the streaming path runs, and only for immutable artefacts — metadata, `HEAD`, ranged reads, and cache misses always stream. With the default `store` signer this applies only to object-store backends that can sign (`s3`, and `azure` when the container client holds an account key); the `local` backend and any store that cannot sign stream as before. `STORAGE_PRESIGNED_READ_SIGNER=cloudfront` signs through a CloudFront distribution instead. Off by default: the URL is a replayable bearer credential for that one object until it expires, and a redirected read is not observable by this instance beyond the moment it is granted. See [Presigned reads](#presigned-reads). |
+| `STORAGE_PRESIGNED_READ_ECOSYSTEMS` | `oci` | Comma-separated list of the ecosystems whose artefact downloads may redirect when `STORAGE_PRESIGNED_READS` is on: any of `apk`, `cargo`, `go`, `hex`, `maven`, `npm`, `nuget`, `oci`, `pypi`, `rpm`, `terraform`. Case and surrounding spaces are ignored; an unknown name fails startup rather than silently leaving an ecosystem streaming. The default keeps an upgrade from redirecting anything that did not redirect before. Remove an ecosystem from the list if one of its clients turns out to mishandle a redirect. |
 | `STORAGE_PRESIGNED_READ_TTL_SECONDS` | `60` | Lifetime of a minted presigned read URL. Clamped to `5`–`900`; an unparseable value falls back to the default. Keep it just long enough for a client to follow the redirect — it bounds the window in which a leaked URL is useful. |
+| `STORAGE_PRESIGNED_READ_SIGNER` | `store` | Which signer mints presigned read URLs: `store` (the object store's own signer — S3 SigV4 or an Azure SAS) or `cloudfront` (CloudFront signed URLs; see [Signing with CloudFront](#signing-with-cloudfront)). `cloudfront` requires `STORAGE_BACKEND=s3` with no `_CACHE` / `_REGISTRY` storage overrides; any other layout, or any other signer value, fails startup. |
+| `CLOUDFRONT_URL_BASE` | — | Required with the `cloudfront` signer. The distribution's base URL, e.g. `https://d111111abcdef8.cloudfront.net` — absolute, `https`, no query string. |
+| `CLOUDFRONT_KEY_PAIR_ID` | — | Required with the `cloudfront` signer. The ID of the CloudFront public key (in a trusted key group on the distribution) whose private half is `CLOUDFRONT_PRIVATE_KEY`. |
+| `CLOUDFRONT_PRIVATE_KEY` | — | Required with the `cloudfront` signer. **Secret.** The PEM-encoded RSA private key (PKCS#1 or PKCS#8) the URLs are signed with; a single-line value with literal `\n` escapes is accepted. Parsed and checked at startup — a missing, malformed, or public-only key fails startup — and never written to a log or error message. Supply it from a secret store, not a checked-in file. |
+| `CLOUDFRONT_CACHED_PATH_PREFIX` | — (distribution root) | Path prefix for **public proxied** objects, which the distribution may cache at the edge: an object at key `k` is signed as `{CLOUDFRONT_URL_BASE}/{prefix}/k`. A proxied object is public only when every upstream its org has configured for that ecosystem is credential-free; see [Signing with CloudFront](#signing-with-cloudfront). |
+| `CLOUDFRONT_UNCACHED_PATH_PREFIX` | — (unset) | Path prefix for **private** objects (uploaded ones, and proxied ones from an org with any credentialed upstream for the ecosystem), which the distribution must map to a behaviour with caching disabled. **While unset, private objects are never signed through CloudFront**: they use the object store's own signer, or stream when the store cannot sign. Setting it is the deliberate act that routes customer-owned bytes through the CDN — check it against any data-residency commitment first. |
 | `PROXY_STAGING_PATH` | OS temp dir | Hash-and-stage directory for the proxy-fetch MISS path. Container deployments expecting large artefacts should set this to a disk-backed volume (e.g. `/data/staging`) — `/tmp` is often tmpfs (RAM-backed), which defeats the memory-bounding goal. |
 | `PROXY_SOURCE_PINNING` (`Proxy__SourcePinning`) | `false` (off) | Dependency-confusion guard for non-OCI proxying. When on, the **first** upstream host to successfully serve a proxied `(org, ecosystem, package-name)` binds that name to that host; a later proxy fetch resolving the same name from a **different** upstream host is refused (before any version row is written). Off by default so it never surprises an existing multi-mirror deployment or blocks proxying after an operator legitimately re-points an upstream. **Set this to `true` on any deployment that mixes a private/internal registry with a public one** (the confusion window a public squatter would exploit); OCI already gets equivalent protection from per-upstream repository-prefix routing. Note the two fail-open skips: when pinning is off, or when an upstream row has no parseable URL, the pin check is bypassed. |
 | `STAGING_DISK_WARN_THRESHOLD_PERCENT` | `10` | Serilog `Warning` is emitted when available space on the staging volume falls below this percentage of total volume size. Set `0` to disable the warning. |
@@ -133,6 +144,7 @@ Instance-wide defaults for per-tenant caps.
 | Variable | Default | Description |
 |---|---|---|
 | `DEFAULT_STORAGE_QUOTA_BYTES` | — (unlimited) | Default aggregate hosted-storage quota (bytes) applied to every tenant that has no explicit per-tenant override. Seeded into `instance_settings` at first boot, and only when set — upgrading an existing install does not suddenly impose a ceiling. Editable afterward from the system_admin Settings page. |
+| `USAGE_CAP_INFO_URL` | — (unset) | Absolute `http`/`https` URL that a tenant refused for reaching a [usage cap](#usage-caps) is pointed to. When set, it becomes the `type` of the `402` problem response and a `Link: <…>; rel="help"` header, and the `detail.infoUrl` of the OCI `DENIED` error. Unset, or any value that is not an absolute web URL, leaves `type` as `about:blank` and adds no link. |
 | `MAX_ACTIVE_TOKENS_PER_TENANT` | `1000` | Maximum number of active (non-revoked) tokens a single tenant may hold at once. Seeded into `instance_settings` at first boot; editable afterward from the system_admin Settings page. |
 | `MAX_CONCURRENT_OCI_UPLOADS_PER_TENANT` | `32` | Maximum number of concurrent OCI chunked-upload sessions a single tenant may have open. Bounds staging-volume exposure from abandoned `docker push` sessions. Seeded into `instance_settings` at first boot; editable afterward from the system_admin Settings page. |
 | `OCI_UPLOAD_TTL_MINUTES` | `60` | Age (minutes) after which an OCI upload session's `created_at` makes it eligible for cleanup by the staging janitor. Read directly from configuration on every janitor pass — not an `instance_settings` value, so it can be changed by restarting with a new value. |
@@ -157,7 +169,7 @@ Instance-wide defaults for per-tenant caps.
 | `Rpm__PrimaryMapCacheSizeLimitBytes` | `314572800` (300 MiB) | Size bound, in bytes, for the dedicated in-memory cache of parsed `primary.xml.gz` package maps. Kept separate from the shared metadata cache because a Fedora/EPEL-scale primary map (tens to 100+ MB) would otherwise evict the rest of that cache, or silently fail to insert if it exceeds the shared budget. Size up for a deployment mirroring several large distro repos at once. |
 | `Oci__ManifestTagTtl` / `Oci__TokenCacheDuration` / `Oci__UpstreamHttpTimeout` | 1h / 55m / 30m | Instance-level OCI proxy tunings. **Upstream OCI registries are no longer configured here** — they are per-org and managed in Settings → Proxy → Upstream registries (host + repository-prefix routing + auth type), like every other ecosystem. Every org is seeded with Docker Hub and `mcr.microsoft.com` defaults. `ManifestTagTtl` bounds how long a cached tag → digest mapping is served before upstream is *asked* again (moving tags rebuild on the order of days/weeks, so hourly is ample and cuts Docker Hub 429 exposure ~12× vs the old 5m; lower it for faster tag pickup). A 1h TTL does **not** delay acceptance by an hour — it only spaces out the asking; whether a newly observed digest is *promoted* is governed independently by the org's `min_release_age_hours` (Settings → Proxy), measured from the digest's first local observation. The two compose; they do not stack. |
 | `Oci__ManifestTagStaleGrace` | `1.00:00:00` (24h) | How long past its TTL a tag's last accepted digest may still be served while the upstream is unavailable (429/5xx/timeout/transport failure). Within the window the pull succeeds with `X-Cache: STALE` and the serve is audited; past it the pull fails 502. Measured from the moment the entry became stale (`last_revalidated + ManifestTagTtl`) and never extended by further failed attempts, so an outage cannot become serve-stale-forever. A genuine upstream 404 is a miss, never a stale serve. |
-| `Oci__MaxBlobProxyBytes` | `10737418240` (10 GiB) | Largest single blob this registry will proxy from an OCI upstream. The OCI plane needs its own bound because its unit of transfer is an image layer: a CUDA/ML base image routinely ships one layer several GB wide, where a metadata document or an npm tarball does not — so this is sized here rather than by raising the shared upstream-fetch constant, which would widen every other ecosystem's bound at the same time. **This is a disk bound, not a memory one:** blobs stream straight into the cache-tier blob store and are never buffered whole, so raising it commits cache-tier storage (`LOCAL_STORAGE_PATH_CACHE` and the eviction settings governing it), not process memory. Size the cache tier before raising it. A blob over the cap is refused with **502 `UNAVAILABLE`**, never 404 — a refusal is not an absence, and reporting it as one sends operators looking for a corrupt cache. Minimum accepted value is 1 MiB; the instance refuses to start below it. |
+| `Oci__MaxBlobProxyBytes` | `10737418240` (10 GiB) | Largest single blob this registry will proxy from an OCI upstream. The OCI plane needs its own bound because its unit of transfer is an image layer: a CUDA/ML base image routinely ships one layer several GB wide, where a metadata document or an npm tarball does not — so this is sized here rather than by raising the shared upstream-fetch constant, which would widen every other ecosystem's bound at the same time. **This is a disk bound, not a memory one:** blobs stream straight into the cache-tier blob store and are never buffered whole, so raising it commits cache-tier storage (`LOCAL_STORAGE_PATH_CACHE` and the eviction settings governing it), not process memory. Size the cache tier before raising it. A blob over the cap is refused with **502 `UNAVAILABLE`**, never 404 — a refusal is not an absence, and reporting it as one sends operators looking for a corrupt cache. Minimum accepted value is 1 MiB; the instance refuses to start below it. On an S3 cache tier a proxied blob is uploaded in 8 MiB parts and S3 allows at most 10,000 parts per object, so S3 cannot store a blob over about 78 GiB, whatever this cap is set to. |
 | `Sbom__MaxUploadBytes` | `52428800` (50 MiB) | Instance-level ceiling, in bytes, on one uploaded SBOM/VEX/SARIF document. Checked before any byte is written to the blob store, so an oversized document is refused with `413` rather than staged and discarded. Instance-level on purpose: these are analysis documents about a team's own build, not registry artefacts, so they do not walk the per-org ecosystem/global upload-limit ladder. |
 | `Apk__Upstream` | `https://dl-cdn.alpinelinux.org/alpine` | Upstream Alpine apk mirror seeded for new orgs. The route is 1:1 with dl-cdn's `{release}/{repo}/{arch}/{file}` layout, so a sed rewrite of `/etc/apk/repositories` is the only client-side change. Per-org registries are managed from Settings → Proxy; this value seeds the initial row. apk is proxy-only (no hosted push, like Go). |
 | `Terraform__Upstream` | `https://registry.terraform.io` | Upstream Terraform provider registry seeded for new orgs. Its **host** is also what admits a provider to the mirror: a provider is addressed by its own source address (`{hostname}/{namespace}/{type}`), and only providers whose hostname matches a configured upstream are served — the request path never becomes the fetch host. Note this registry serves metadata only; archives come from whatever host it names in `download_url` (`releases.hashicorp.com` for HashiCorp's own providers), discovered per version rather than configured. Terraform is proxy-only (no hosted push, like Go and apk), and the client must reach the mirror over **https** — terraform rejects an `http:` mirror while parsing its CLI config. |
@@ -747,7 +759,7 @@ The activity and download-count writers buffer DB inserts off the hot path via b
 
 ### Rate limiting
 
-All limiters are per-token (download/push) or per-source-IP (login/anonymous/metadata). Defaults are sized for a single developer's worst burst; increase for larger fleets or stricter abuse budgets.
+All limiters are per-token (download/push), per-source-IP (login/anonymous/metadata) or, for the optional tenant budget, per-tenant. Defaults are sized for a single developer's worst burst; increase for larger fleets or stricter abuse budgets.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -766,6 +778,10 @@ All limiters are per-token (download/push) or per-source-IP (login/anonymous/met
 | `METADATA_RATE_LIMIT_PERMITS` | `500` | Sliding-window permits per second per source IP for metadata GET endpoints (npm packument, PyPI simple index, NuGet registration). |
 | `METADATA_RATE_LIMIT_QUEUE` | `100` | Queue depth for the metadata rate limiter. Short bursts are absorbed; sustained floods return `429` once the queue fills. |
 | `PROTOCOL_DEFAULT_RATE_LIMIT_PERMITS` | `300` | Sliding-window permits per minute per source IP for the default-deny backstop applied by the global limiter to any protocol route that declares no explicit rate-limit policy. A route needing more throughput carries an explicit `download`/`metadata` policy; this only bounds otherwise-unmetered routes so a forgotten policy is never entirely unlimited. |
+| `TENANT_RATE_LIMIT_PERMITS` | — (off) | Sliding-window permits per second per tenant for protocol-plane requests, shared by every token and source address in the org, including anonymous requests to the tenant's host. Chained after the per-caller limits, so a request must pass both. Bounds one org's aggregate rate however it spreads the load. Unset, `0` or an unparseable value switches it off. Per replica, like `download` and `push`. The management plane (`/api/v1/*`) and the health, readiness, metrics and version probes are never counted. |
+| `TENANT_RATE_LIMIT_QUEUE` | `100` | Queue depth for the per-tenant budget. Requests over the budget wait up to this depth before returning `429`. |
+| `TENANT_THROTTLED_RATE_LIMIT_PERMITS` | `10` | Sliding-window permits per second for a tenant whose usage posture is `downloads_throttled` (see [Usage caps](#usage-caps)). Replaces `TENANT_RATE_LIMIT_PERMITS` for that tenant and applies whether or not the budget is on. Always on: a value that is not a positive number falls back to the default. |
+| `TENANT_THROTTLED_RATE_LIMIT_QUEUE` | `20` | Queue depth for the throttled tenant budget. A short burst waits for a permit instead of failing at once, which is what makes the posture a throttle rather than a refusal. |
 | `RATE_LIMIT_REDIS_FAILURE_MODE` | `open` | What the Redis-backed abuse-prevention limiters (`login`, `invite`, `token-create`) do when Redis cannot be reached, or replies with something the limiter cannot parse, and there is no counter to decide with. `open` grants the request — a Redis outage does not lock every user out, at the cost of running with no login rate limiting for its duration. `closed` denies with `429` instead (`Retry-After` = the policy's window length), keeping the abuse budget enforced through the outage at the cost of refusing legitimate logins. Either way every such decision is logged at `Warning` and counted on `dependably.rate_limit.backend_unavailable` (attributes `policy`, `decision`, and `cause` — `connection` when Redis could not be reached, `malformed_reply` when it replied but not in the shape the limiter's script expects) — alert on that counter: under `open` it is the only signal that login rate limiting is currently switched off. Applies only to the Redis-backed limiters; the in-process limiters have no such failure mode. Any value other than `open` or `closed` fails startup rather than silently resolving to the permissive default. |
 | `RATE_LIMIT_IPV6_PREFIX` | `64` | IPv6 network prefix (bits, `1`–`128`) that per-IP rate-limit partition keys collapse to. A routed `/64` is the smallest per-subscriber allocation, so keying below it lets one attacker mint a fresh budget per source address. IPv4 always partitions at the full `/32`; audit `source_ip` fields always record the full address regardless of this setting. |
 | `ACCOUNT_SEND_MAX_PER_WINDOW` | `5` | Account-targeted transactional emails (today: the self-serve password-reset link) permitted per **target account** per window, independent of source IP. Every per-IP limiter is blind to who the mail is addressed to, so a distributed attacker can mail-bomb one mailbox from many prefixes without ever tripping one; this budget is what stops that. Raising it weakens the mail-bomb defense; lowering it lets an attacker deny a specific user their reset link for longer. |
@@ -792,6 +808,13 @@ S3_REGION=us-east-1
 # AWS credentials via standard SDK chain (env vars, instance role, etc.)
 ```
 
+The credential needs `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject` on the bucket's objects,
+`s3:ListBucket` on the bucket, and `s3:AbortMultipartUpload` on its objects. A body whose length is
+not known in advance, such as an OCI blob fetched through the proxy, is uploaded in 8 MiB parts
+(multipart upload), and a failed upload is aborted so its parts are not left behind. A process that
+dies mid-upload cannot abort it, so also give the bucket an `AbortIncompleteMultipartUpload`
+lifecycle rule (seven days is plenty).
+
 **Azure Blob Storage**
 
 ```bash
@@ -799,6 +822,91 @@ STORAGE_BACKEND=azure
 AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=..."
 AZURE_CONTAINER=dependably-blobs
 ```
+
+## Presigned reads
+
+With `STORAGE_PRESIGNED_READS=true`, an artefact download can be answered with a `307 Temporary Redirect` (a `302 Found` for apk) to a short-lived signed URL instead of being streamed through Dependably. The client fetches the bytes straight from the object store, which takes the transfer off the application tier. It is a throughput option, not a different access decision: every check the streaming path runs — authentication, capability, tenancy, claim state, the block gate — has already passed before a URL is signed, and a request that any of them refuses gets the same refusal it always did, with no URL.
+
+**Which downloads redirect.** Only immutable artefacts, and only in the ecosystems listed in `STORAGE_PRESIGNED_READ_ECOSYSTEMS` (default `oci`):
+
+| Ecosystem | Redirected | Always streamed |
+|---|---|---|
+| `oci` | Blob `GET` by digest (layers, configs) | Manifests, tag lists, ranged blob reads |
+| `npm` | Tarballs, on both the `/npm/tarballs/…` and conventional `/{pkg}/-/{file}` paths | Packuments, dist-tags, search |
+| `pypi` | Distribution files (wheels, sdists), including the CDN-shaped `/packages/{h1}/{h2}/{sha256}/{file}` path | Simple index, JSON API |
+| `nuget` | `.nupkg` (and other files) from the flat container | Service index, registration, search, version lists, symbol downloads |
+| `maven` | Release jars, POMs, and other release files | `maven-metadata.xml`, checksum sidecars (rendered from stored digests), every SNAPSHOT file — the `-SNAPSHOT` name is an alias that moves |
+| `rpm` | `.rpm` packages | `repodata/` and the signing key |
+| `go` | Module `.zip` | `@v/list`, `@latest`, `.info`, `.mod`, the checksum-database passthrough |
+| `cargo` | `.crate` downloads | Sparse index, `config.json`, API responses |
+| `apk` | `.apk` packages | `APKINDEX.tar.gz` and other index files |
+| `terraform` | Provider archives (`.zip`) | Version index and version documents |
+| `hex` | Package tarballs | Signed registry resources, documentation tarballs, the `/hex/api/` plane |
+
+Within a listed ecosystem a download still streams when: the request is a `HEAD` or carries a `Range` header; the artefact is a cache miss (the first fetch streams through while it is verified and cached); the metadata row records no size for the object (a redirect is metered by that size, so an unknown size would be unmetered); the backend cannot sign; or the object is missing from the store, in which case the request falls through exactly as a streamed read would.
+
+**What the redirect carries.** `Cache-Control: private, no-store` — the response body is a bearer credential, so no proxy or CDN may cache it, even though the object it points at is immutable. The URL lives for `STORAGE_PRESIGNED_READ_TTL_SECONDS`.
+
+**Tracking and metering.** Download counts, activity rows, and cache-access tracking are recorded exactly as they are for a streamed read. Each redirect emits one usage event on the `egress_bytes` meter with `delivery = redirect` and the object's full recorded size. What a redirect cannot observe is whether the client then completed the transfer, or replayed the URL within its lifetime; the short TTL bounds that, and it is why the feature is off by default.
+
+**Client compatibility.** A registry redirect is standard HTTP, but each client follows it with its own HTTP stack. A client that keeps the `Authorization` header it sent to Dependably and sends it on to the signed URL breaks the download: the URL already carries its own signature, and AWS S3 refuses a request that carries both with `400`. Only enable an ecosystem once its clients have been checked against your deployment.
+
+Except for containerd and Podman, which carry over an earlier check that was not repeated against the dual-authentication store, these results come from a clean install run twice per client, the second time against a warm cache so that the download redirected. They used the default `store` signer on an S3-compatible store set up to refuse dual authentication the way AWS S3 does. One version of each client was tested unless more are listed; other versions may behave differently.
+
+| Client | Version tested | Auth to Dependably | Result |
+|---|---|---|---|
+| Docker (`docker pull`) | dockerd 28.5.2 | Registry login | Verified |
+| containerd (`ctr`, `nerdctl`, Kubernetes) | Not recorded | Registry login | Verified |
+| Podman | Not recorded | Registry login | Verified |
+| npm | 12.0.1, 10.9.9 | Bearer | Verified |
+| pnpm | 9.15.0 | Bearer | Verified |
+| Yarn (Berry) | 4.5.0 | Bearer | Verified |
+| Yarn classic | 1.22.22 | Bearer (`always-auth=true`) | **Fails.** Re-sends `Authorization` to the redirect target, which refuses it with `400` |
+| pip | 26.1.2, 25.0.1 | Basic | Verified for uploaded files (see the note below) |
+| uv | 0.7.15, 0.9.30 | Basic | Verified for uploaded files |
+| Poetry | 2.1.3 | Basic | Verified for uploaded files |
+| `dotnet` / NuGet | .NET SDK 10.0.401 (NuGet 7.9.0) | Basic | Verified. `nuget.exe` was not tested |
+| Maven | 3.9.16 | Basic | Verified |
+| Gradle | 8.14.5 | Basic (preemptive) | Verified |
+| dnf | dnf 4.22.0, dnf5 5.2.18 | Basic | Verified. EL7 `yum` was not tested; on Fedora and EL8+, `yum` is dnf |
+| `go` | 1.23.12 | Basic (`.netrc`) | Verified |
+| Cargo | 1.98.1 | Registry token | Follows the redirect when `config.json` carries `"auth-required": true`, verified with that field injected by a test proxy; not yet re-tested against a Dependably build that sends it. Dependably now sends it whenever anonymous pull is off; without it, Cargo sends no token with the download and gets `401` before any redirect |
+| apk | apk-tools 2.14.4, 2.14.10, 3.0.7 | Basic (URL userinfo) | apk-tools does not follow a `307` at all. Dependably answers apk downloads with a `302` instead, which apk-tools follows without sending the credential on, according to a minimal-server test. Not yet re-tested against Dependably |
+| Terraform | 1.14.9 | Basic (URL userinfo in `network_mirror`) | Verified |
+| OpenTofu | 1.10.10 | Basic (URL userinfo) | Verified |
+| Mix (Hex) | Hex 2.5.1, Elixir 1.18.4 | API key | **Fails.** Re-sends `authorization` to the redirect target, which refuses it with `400` |
+| rebar3 | 3.27.0 (OTP 27) | API key | Verified |
+
+- **Yarn classic and Mix.** The `npm` entry in `STORAGE_PRESIGNED_READ_ECOSYSTEMS` covers every npm client, and `hex` covers both Mix and rebar3. With the `store` signer, leave `npm` off the list if your users run Yarn 1.x, and leave `hex` off if they run Mix. With the `cloudfront` signer these clients are expected to work, as long as the distribution's cache policy does not forward the viewer's `Authorization` header: the header then never reaches the bucket, and origin access control signs the request to the bucket itself. This has not been verified.
+- **Proxied PyPI files.** On an object-store backend, proxied PyPI files fetched before this release have no recorded size, so they keep streaming until they are evicted and fetched again. Files fetched from this release on record their size and redirect like uploaded ones.
+- **apk status code.** apk is the only ecosystem answered with `302 Found` rather than `307 Temporary Redirect`. Only `GET` requests redirect, and a `GET` stays a `GET` under either status, so the two mean the same thing here.
+- **Testing in a lab.** MinIO on its own is not a faithful stand-in for AWS S3 here. It refuses a signed URL that arrives with `Authorization: Bearer`, but it accepts one that arrives with `Basic` credentials or a bare token (the style Hex and Cargo use), where AWS S3 answers `400`. A lab test against plain MinIO misses those clients. Put a proxy in front of MinIO that refuses any request carrying both a query signature and an `Authorization` header, or test against AWS S3.
+
+### Signing with CloudFront
+
+**Storage requirement.** The CloudFront signer needs both storage tiers to be one S3 store: `STORAGE_BACKEND=s3` and no `_CACHE` / `_REGISTRY` storage overrides. A signed URL names one distribution whose origin is one bucket, but the serve paths read OCI and RPM proxied bytes from the cache tier and everything else from the registry tier, so with split tiers a URL could point at a bucket the distribution does not serve — and with a `local` or `azure` backend there is no S3 object behind it at all. Startup refuses either layout rather than hand clients URLs that fail at the edge.
+
+With `STORAGE_PRESIGNED_READ_SIGNER=cloudfront`, redirects point at a CloudFront distribution instead of the bucket, using CloudFront signed URLs with a canned policy (the URL carries `Expires`, `Signature`, and `Key-Pair-Id`; the policy restricts it to that one object until `STORAGE_PRESIGNED_READ_TTL_SECONDS` from the moment it is signed). Before any URL is signed — by CloudFront or by the store — the object's existence is checked once, so a missing object falls through instead of producing a URL that fails at the edge, and a redirected read costs one existence check against the bucket, not two.
+
+Which path an object is signed under depends on whether it is **public** or **private**. Only the cached prefix can be held at a CloudFront edge, and only public objects are signed under it. An object is public only when both of these hold:
+
+1. Its metadata row records it as proxied from an upstream, not uploaded. The row decides, never the storage tier or key prefix, because an uploaded OCI layer and a proxied layer with the same digest share one key.
+2. The org that requested it has at least one upstream configured for that ecosystem (Settings → Proxy), and every one of them is credential-free. A credential-free upstream has auth type `anonymous`, or `dockerhub_token_exchange` with no username (Docker Hub's anonymous pull token). It stores no username or secret, and its URL has no `user:pass@` part and no query string.
+3. The org has no recorded credentialed upstream for that ecosystem. From this release on, adding one records the org and ecosystem permanently, so deleting the upstream, or replacing it with an anonymous one, does not make the objects it fetched edge-cacheable. Once recorded, that org's proxied objects for that ecosystem stay private: they are signed under the uncached prefix, or by the object store. There is deliberately no setting or API to clear the record; it goes only when the org is deleted.
+
+   For upstreams added before this release, the record is built at startup from two sources: the credentialed upstreams that still exist, and the `upstream_registry_added` audit events still in `audit_log`. The audit events cover upstreams that have since been deleted. The audit log only reaches back so far. A credentialed upstream that was deleted before this release is not known if its audit event is older than `AUDIT_LOG_RETENTION_DAYS`, or if the event's detail was cleared (after `AUDIT_LOG_PII_DAYS`, or by removing the member who added it). If an org ever pulled through a credentialed upstream that has since been deleted, delete that org's cached proxied objects for the ecosystem before you enable the CloudFront signer, or leave the signer off.
+
+Everything else is private and is never signed under the cached prefix. That covers uploaded objects. It also covers proxied objects when the org has any `basic`, `bearer`, or `aws_ecr` upstream for the ecosystem, when an auth type is not recognized, when the org has ever had a credentialed upstream for the ecosystem, and when no upstream is left for the ecosystem. The rule applies to the whole ecosystem, not the upstream that served the object, because nothing records which upstream supplied an org's copy. One private OCI registry with Basic auth therefore makes every proxied image layer for that org private, Docker Hub layers included. A proxied object is also private when the check cannot be completed: no tenant on the request, a database error, or an edge node, whose upstream is its master. The check reads the upstream table on every redirect and caches nothing, so a credentialed upstream takes effect on every instance as soon as it is saved.
+
+| Object | Signed as |
+|---|---|
+| Public: proxied, and every upstream for the ecosystem is credential-free | `{CLOUDFRONT_URL_BASE}/{CLOUDFRONT_CACHED_PATH_PREFIX}/{key}` |
+| Private, `CLOUDFRONT_UNCACHED_PATH_PREFIX` set | `{CLOUDFRONT_URL_BASE}/{CLOUDFRONT_UNCACHED_PATH_PREFIX}/{key}` |
+| Private, `CLOUDFRONT_UNCACHED_PATH_PREFIX` unset (default) | Not through CloudFront: signed by the object store, or streamed if the store cannot sign |
+
+The rule sees only the upstream configuration. An upstream that asks for no credentials but admits only your network, for example by an IP allowlist, looks public to it, and so does one whose credential is written into the URL path. Configure such an upstream with its real auth type, or keep the CloudFront signer off.
+
+The distribution needs one behaviour per prefix, each restricted to the trusted key group that holds `CLOUDFRONT_KEY_PAIR_ID`, with an origin that serves the object at `{key}` (for example an S3 origin with origin access control, and a CloudFront Function that strips the prefix). The uncached prefix's behaviour must use a caching-disabled policy, so a private artefact is never held at the edge. The cached prefix's behaviour may cache: a URL is only signed after the block gate passes and stops working when it expires, so edge caching does not widen who can read an object. Keep its edge TTL finite, though — Go, Cargo, apk, Terraform, and Hex store proxied bytes under a coordinate key rather than a content hash, so an evicted and re-fetched artefact can land under the same key.
 
 ---
 
@@ -812,6 +920,86 @@ Two token types are available per org:
 Both carry an explicit **capability** subset chosen at creation — fine-grained permission strings like `read:artifact`, `publish:npm`, or the family wildcard `publish:*` — rather than a coarse scope. A token can only be minted with capabilities the caller's own role already grants (no privilege escalation); a mint request asking for more returns 400. At request time, a token used against a route requiring a capability it wasn't minted with returns 403, not 401. Capabilities are the single source of truth for permission checks. Tokens are stored as SHA-256 hashes; the raw value is shown only once on creation.
 
 Which capabilities a role can grant to a token it mints follows the role→capability mapping below (see [Multitenancy](#multitenancy) for the full role list): `member` gets read-only capabilities, `admin` adds publish/import/yank and tenant:configure, `owner` adds tenant:admin, and `auditor` is limited to audit-read.
+
+---
+
+## System API tokens
+
+**Multi mode only.** A tenant token (above) cannot reach `/api/v1/system/*` — the apex operator plane exists only in `DEPLOYMENT_MODE=multi`, so a system API token is unusable in `single`, `header`, or `bound` mode by design. Where it applies, a system admin logs in at the apex and mints a token (System console → Tokens, or `POST /api/v1/system/tokens`) so CI, Terraform, or a provisioning script can create and manage tenants without an interactive session.
+
+Reach is fixed, not chosen at mint time — a system token authenticates exactly eight actions:
+
+- `GET /api/v1/system/tenants`
+- `POST /api/v1/system/tenants`
+- `DELETE /api/v1/system/tenants/{slug}`
+- `PATCH /api/v1/system/tenants/{slug}/storage-quota`
+- `PATCH /api/v1/system/tenants/{slug}/status`
+- `PATCH /api/v1/system/tenants/{slug}/restore`
+- `GET /api/v1/system/tenants/{slug}/usage-limits`
+- `PATCH /api/v1/system/tenants/{slug}/usage-limits`
+
+Every other `/api/v1/system/*` action — admin management, instance settings, audit, and minting a token itself — stays on the interactive JWT session; a system token presented there gets 401. A system token also cannot mint another token: `POST /api/v1/system/tokens` requires a session.
+
+Each token is owned by the admin who minted it and carries a required expiry, at most 365 days out. Ownership drives three cascades:
+
+- Deleting the owning admin deletes their tokens (FK cascade).
+- Disabling or locking the owning admin's account stops their tokens from resolving on the very next request — there is no cache to wait out.
+- An operator-initiated password reset on the owner (`POST /api/v1/system/admins/{id}/password-reset`) revokes their tokens too, the same compromise-response posture as the owner's own outstanding sessions. The owner's own self-service password change (`POST /api/v1/system/me/password`) does not — that is a routine rotation, not a compromise response.
+
+Any system admin can list or revoke any token, not just their own.
+
+```bash
+# Mint a token as a logged-in system admin (session cookie in $COOKIE):
+curl -s -b "$COOKIE" -H "Content-Type: application/json" \
+  -X POST "https://<apex>/api/v1/system/tokens" \
+  -d '{"name":"terraform-provisioning","expiresAt":"2027-01-01T00:00:00Z"}'
+# => { "token": "dpsys_...", "record": { "id": "...", "name": "terraform-provisioning", ... } }
+
+# Use the returned token to provision a tenant:
+curl -s -H "Authorization: Bearer dpsys_..." -H "Content-Type: application/json" \
+  -X POST "https://<apex>/api/v1/system/tenants" \
+  -d '{"slug":"acme","ownerEmail":"owner@acme.example"}'
+```
+
+---
+
+## Usage caps
+
+**Multi mode only**, like the rest of the operator plane. A system admin, or a control plane holding a [system API token](#system-api-tokens), can cap a tenant's usage per meter. Caps are plain quantities in each meter's own unit. Community stores the numbers and enforces them; it does not price anything or decide which meters are billed.
+
+| Meter | Unit | Measured as |
+|---|---|---|
+| `egress_bytes` | bytes | Artefact downloads since the start of the current UTC month, including redirected downloads |
+| `egress_metadata_bytes` | bytes | Metadata responses (packuments, indexes, tag lists) since the start of the current UTC month |
+| `storage_bytes` | bytes | Billable storage in the latest daily storage snapshot. This is not the proxy-cache-inclusive figure `storage_quota_bytes` checks |
+| `artifact_count` | artefacts | Uploaded package versions plus uploaded OCI manifests in the latest daily storage snapshot |
+
+Set or clear caps with `PATCH /api/v1/system/tenants/{slug}/usage-limits`. The body is a meter-to-cap map. A positive number sets that meter's cap, `null` clears it, and a meter you leave out keeps its current cap. Zero, a negative number or an unknown meter returns `422`, and nothing in that request is applied. `GET` on the same path returns the current caps and posture. Each change writes a `tenant.usage_limits_changed` audit row with the old and new caps.
+
+```bash
+curl -s -H "Authorization: Bearer dpsys_..." -H "Content-Type: application/json" \
+  -X PATCH "https://<apex>/api/v1/system/tenants/acme/usage-limits" \
+  -d '{"caps":{"egress_bytes":500000000000,"artifact_count":null}}'
+# => { "slug": "acme", "caps": { "egress_bytes": 500000000000 }, "usagePosture": "normal" }
+```
+
+The hourly usage rollup compares each capped tenant's usage with its caps and records one of three postures:
+
+| Posture | When | Effect |
+|---|---|---|
+| `normal` | Every capped meter is under its cap, or the tenant has no caps | None |
+| `uploads_refused` | Any capped meter is at or over 100 % of its cap | Protocol-plane `POST`, `PUT` and `PATCH` get `402` (`403 DENIED` on `/v2/`). Downloads, `DELETE`, the management plane and npm's advisory lookup (the `POST` that `npm install` and `npm audit` send) keep working |
+| `downloads_throttled` | A capped egress meter is at or over 110 % of its cap | Uploads are refused as above, and the tenant's protocol-plane requests draw on the small [`TENANT_THROTTLED_RATE_LIMIT_PERMITS`](#rate-limiting) budget. Downloads slow down; they are not refused |
+
+Nothing is deleted at any posture. `DELETE` stays open so a tenant at its storage or artefact cap can get back under it.
+
+The tenant budgets are aggregate: every protocol request on the tenant's host draws on them, authenticated or not. Where a tenant allows anonymous pull, an anonymous client can use up a throttled tenant's budget and slow that tenant's own users.
+
+A tenant with no caps is metered but never enforced, which is how a pilot runs. Clearing every cap returns the tenant to `normal`.
+
+The `PATCH` recomputes that tenant's posture before it responds and clears the replica's tenant cache, so raising or lifting a cap restores service on the next request to that replica. Other replicas pick it up within five seconds. Without a `PATCH`, the egress caps can trip up to an hour late, because they read the hourly rollup. The storage and artefact caps can trip up to a day late, because they read the daily snapshot. A tenant with no snapshot yet counts as zero on both.
+
+Point `USAGE_CAP_INFO_URL` at the page that explains the cap to your tenants; see [Tenant limits](#tenant-limits).
 
 ---
 
@@ -914,7 +1102,7 @@ Set `REPLICA_HINT=true` (or `INSTANCE_ROLE=replica`) on each replica instance; D
 
 ### In-process rate limiters — per-tenant limits are per-replica without Redis
 
-The download, push, import, management-API, and anonymous-probe rate limiters maintain their sliding-window counters in process memory on each replica. Without a shared backing store, each replica enforces the configured limit independently. A client that distributes requests across N replicas can exceed the nominal per-tenant limit by up to a factor of N before any single replica returns `429`.
+The download, push, import, management-API, per-tenant (`TENANT_RATE_LIMIT_PERMITS`, `TENANT_THROTTLED_RATE_LIMIT_PERMITS`), and anonymous-probe rate limiters maintain their sliding-window counters in process memory on each replica. Without a shared backing store, each replica enforces the configured limit independently. A client that distributes requests across N replicas can exceed the nominal per-tenant limit by up to a factor of N before any single replica returns `429`.
 
 The login, invite, and token-create limiters are Redis-backed when `REDIS_CONNECTION_STRING` is set (`DEPENDABLY_DEPLOYMENT_MODE=ha`), so those abuse-prevention limits hold across replicas in HA mode. When Redis cannot be reached these limiters have no counter to decide with; the request is resolved by [`RATE_LIMIT_REDIS_FAILURE_MODE`](#rate-limiting) (`open` by default — the request is granted, so login rate limiting is off for the duration of the outage) and the decision is logged at `Warning` and counted on `dependably.rate_limit.backend_unavailable`. Alert on that counter.
 

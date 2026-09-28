@@ -56,10 +56,13 @@ public sealed class OciOrphanBlobDeleter
     {
         await using (await _blobKeyLock.AcquireAsync(blobKey, ct))
         {
-            await using var conn = await _db.OpenAsync(ct);
-
             // xtenant: deliberately cross-org — content-addressed OCI blobs are shared, so the
-            // physical blob is orphaned only when no org's row still references this key.
+            // physical blob is orphaned only when no org's row still references this key. Opened as
+            // the owner whoever the caller is: under row-level security a tenant-bound count sees
+            // only the caller's rows and would delete a blob another tenant still references.
+            await using var conn = await _db.OpenCrossTenantAsync("shared OCI blob reference count", ct);
+
+            // xtenant: the count spans every org's rows, on the owner connection opened above.
             long remainingRefs = await conn.ExecuteScalarAsync<long>(
                 "SELECT COUNT(*) FROM oci_blobs WHERE blob_key = @key",
                 new { key = blobKey });

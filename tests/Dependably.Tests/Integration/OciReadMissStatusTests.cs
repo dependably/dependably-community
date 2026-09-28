@@ -203,12 +203,14 @@ public sealed class OciReadMissStatusTests
     private static async Task ConfigureUnreachableOciUpstreamAsync(IMetadataStore store)
     {
         await using var conn = await store.OpenAsync();
+        string orgId = (await Dapper.SqlMapper.ExecuteScalarAsync<string>(conn,
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1"))!;
         await Dapper.SqlMapper.ExecuteAsync(conn,
             """
             INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type, prefixes)
-            SELECT lower(hex(randomblob(16))), id, 'oci', 'https://127.0.0.1:9', 0, 'anonymous', '[""]'
-            FROM orgs
-            """);
+            VALUES (@id, @orgId, 'oci', 'https://127.0.0.1:9', 0, 'anonymous', '[""]')
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId });
     }
 
     /// <summary>
@@ -233,7 +235,7 @@ public sealed class OciReadMissStatusTests
     private sealed class AirGappedOciFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         private readonly InMemoryBlobStore _blobStore = new();
-        private readonly TestMetadataStore _metadataStore = new();
+        private readonly IntegrationDatabase _db = new();
 
         protected override IHost CreateHost(IHostBuilder _)
         {
@@ -245,14 +247,15 @@ public sealed class OciReadMissStatusTests
                 ["DEPLOYMENT_MODE"] = "single",
             });
 
+            _db.ConfigureBefore(builder);
+
             Program.ConfigureBuilder(builder);
 
             builder.Services.RemoveAll<IBlobStore>();
             builder.Services.AddSingleton<IBlobStore>(_blobStore);
             builder.Services.RemoveAll<TieredBlobStorage>();
             builder.Services.AddSingleton(new TieredBlobStorage(_blobStore, _blobStore));
-            builder.Services.RemoveAll<IMetadataStore>();
-            builder.Services.AddSingleton<IMetadataStore>(_metadataStore);
+            _db.ConfigureServices(builder.Services);
 
             builder.WebHost.UseTestServer();
             builder.WebHost.UseSetting("AIR_GAPPED", "true");
@@ -266,7 +269,7 @@ public sealed class OciReadMissStatusTests
 
             var app = builder.Build();
             Program.ConfigureApp(app);
-            app.Start();
+            _db.Start(app);
             return app;
         }
 
@@ -276,12 +279,12 @@ public sealed class OciReadMissStatusTests
             return Task.CompletedTask;
         }
 
-        public Task EnableAnonymousPullAsync() => OciReadMissStatusTests.EnableAnonymousPullAsync(_metadataStore);
+        public Task EnableAnonymousPullAsync() => OciReadMissStatusTests.EnableAnonymousPullAsync(_db.HarnessStore);
 
         public new async Task DisposeAsync()
         {
-            await _metadataStore.DisposeAsync();
             await base.DisposeAsync();
+            await _db.DisposeAsync();
         }
     }
 }

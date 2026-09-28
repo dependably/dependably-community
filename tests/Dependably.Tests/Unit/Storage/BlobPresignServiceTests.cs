@@ -26,7 +26,7 @@ public sealed class BlobPresignServiceTests
     public async Task Disabled_NeverAsksTheStoreToSign()
     {
         var store = new CapableStore();
-        Assert.Null(await Sut(enabled: false).TryCreateAsync(store, "k"));
+        Assert.Null(await Sut(enabled: false).TryCreateAsync(store, "k", BlobVisibility.Public));
         Assert.Equal(0, store.SignCalls);
     }
 
@@ -34,14 +34,14 @@ public sealed class BlobPresignServiceTests
     public async Task Enabled_StoreWithoutTheCapability_ReturnsNull()
     {
         // The local backend's shape: it does not implement IPresignedReadBlobStore at all.
-        Assert.Null(await Sut(enabled: true).TryCreateAsync(new InMemoryBlobStore(_clock), "k"));
+        Assert.Null(await Sut(enabled: true).TryCreateAsync(new InMemoryBlobStore(_clock), "k", BlobVisibility.Public));
     }
 
     [Fact]
     public async Task Enabled_StoreThatCannotSignRightNow_ReturnsNull()
     {
         var store = new CapableStore { CanSign = false };
-        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "k"));
+        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "k", BlobVisibility.Public));
         Assert.Equal(0, store.SignCalls);
     }
 
@@ -50,7 +50,7 @@ public sealed class BlobPresignServiceTests
     {
         var store = new CapableStore();
 
-        var result = await Sut(enabled: true, ttlSeconds: 45).TryCreateAsync(store, "oci/sha256/abc");
+        var result = await Sut(enabled: true, ttlSeconds: 45).TryCreateAsync(store, "oci/sha256/abc", BlobVisibility.Public);
 
         Assert.NotNull(result);
         Assert.Equal(_clock.GetUtcNow().AddSeconds(45), result!.Value.ExpiresAt);
@@ -59,10 +59,29 @@ public sealed class BlobPresignServiceTests
     }
 
     [Fact]
-    public async Task Enabled_StoreReturnsNullForAMissingBlob_ReturnsNull()
+    public async Task Enabled_MissingBlob_ReturnsNullWithoutSigning()
+    {
+        // The seam owns the existence check; the store signer only mints, so a missing blob must
+        // be refused before the signer is ever asked.
+        var store = new CapableStore { Exists = false };
+        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "gone", BlobVisibility.Public));
+        Assert.Equal(1, store.ExistsCalls);
+        Assert.Equal(0, store.SignCalls);
+    }
+
+    [Fact]
+    public async Task Enabled_StoreDeclinesToSign_ReturnsNull()
     {
         var store = new CapableStore { ReturnUrl = false };
-        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "gone"));
+        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "k", BlobVisibility.Public));
+    }
+
+    [Fact]
+    public async Task Enabled_ExistenceCheckThrows_FallsBackToStreamingRatherThanFailingTheRead()
+    {
+        var store = new CapableStore { ExistsThrows = true };
+        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "k", BlobVisibility.Public));
+        Assert.Equal(0, store.SignCalls);
     }
 
     [Fact]
@@ -71,7 +90,7 @@ public sealed class BlobPresignServiceTests
         // A signing outage must degrade to "serve it yourself", never to a failed pull — the
         // redirect is a throughput optimisation on a read that is already authorized.
         var store = new CapableStore { Throw = true };
-        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "k"));
+        Assert.Null(await Sut(enabled: true).TryCreateAsync(store, "k", BlobVisibility.Public));
     }
 
     [Fact]
@@ -82,7 +101,7 @@ public sealed class BlobPresignServiceTests
         await cts.CancelAsync();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => Sut(enabled: true).TryCreateAsync(store, "k", cts.Token));
+            () => Sut(enabled: true).TryCreateAsync(store, "k", BlobVisibility.Public, cts.Token));
     }
 
     // ── Options binding ───────────────────────────────────────────────────────
@@ -133,7 +152,10 @@ public sealed class BlobPresignServiceTests
         public bool ReturnUrl { get; init; } = true;
         public bool Throw { get; init; }
         public bool ThrowCancellation { get; init; }
+        public bool Exists { get; init; } = true;
+        public bool ExistsThrows { get; init; }
         public int SignCalls { get; private set; }
+        public int ExistsCalls { get; private set; }
         public DateTimeOffset? LastExpiry { get; private set; }
 
         public bool SupportsPresignedReads => CanSign;
@@ -152,7 +174,11 @@ public sealed class BlobPresignServiceTests
 
         public Task PutAsync(string key, Stream data, CancellationToken ct = default) => Task.CompletedTask;
         public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => Task.FromResult<Stream?>(null);
-        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => Task.FromResult(true);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default)
+        {
+            ExistsCalls++;
+            return ExistsThrows ? throw new IOException("object store unreachable") : Task.FromResult(Exists);
+        }
         public Task DeleteAsync(string key, CancellationToken ct = default) => Task.CompletedTask;
         public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => Task.FromResult(0L);
         public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)

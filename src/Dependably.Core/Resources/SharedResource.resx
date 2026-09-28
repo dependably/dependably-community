@@ -101,6 +101,22 @@
     <value>Name is required.</value>
     <comment>Creating a service token without a display name.</comment>
   </data>
+  <data name="error.token.descriptionTooLong" xml:space="preserve">
+    <value>Description must be {0} characters or fewer.</value>
+    <comment>422 detail: token description over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.token.descriptionInvalidChars" xml:space="preserve">
+    <value>Description must not contain control characters.</value>
+    <comment>422 detail: token description carrying control characters.</comment>
+  </data>
+  <data name="error.token.expiryRequired" xml:space="preserve">
+    <value>An expiry date is required, and must be in the future.</value>
+    <comment>422 detail: minting a system API token with no expiresAt, or one that is not in the future.</comment>
+  </data>
+  <data name="error.token.expiryTooFar" xml:space="preserve">
+    <value>Expiry must be no more than {0} days from now.</value>
+    <comment>422 detail: minting a system API token with an expiresAt beyond the cap. {0} = the day cap.</comment>
+  </data>
   <data name="error.invite.emailRequired" xml:space="preserve">
     <value>Email is required.</value>
     <comment>Inviting an organization member without an email address.</comment>
@@ -277,6 +293,10 @@
     <value>Active token limit ({0}) reached for this tenant. Revoke unused tokens before creating new ones.</value>
     <comment>422 detail. {0} = the per-tenant active-token cap.</comment>
   </data>
+  <data name="error.systemToken.limitReached" xml:space="preserve">
+    <value>Active system token limit ({0}) reached for this instance. Revoke unused tokens before creating new ones.</value>
+    <comment>422 detail. {0} = the instance-wide active-system-token cap (system API tokens, not per-tenant tokens).</comment>
+  </data>
   <data name="error.list.patternRequired" xml:space="preserve">
     <value>pattern is required.</value>
     <comment>422 detail. 'pattern' is the JSON field name - keep it verbatim.</comment>
@@ -421,8 +441,16 @@
     <value>Quota must be a positive number of bytes, or null to clear.</value>
     <comment>422 detail for the tenant storage quota.</comment>
   </data>
+  <data name="error.system.usageCapInvalid" xml:space="preserve">
+    <value>A usage cap must be a positive quantity, or null to clear it.</value>
+    <comment>422 detail for a per-meter usage cap on PATCH /api/v1/system/tenants/{slug}/usage-limits.</comment>
+  </data>
+  <data name="error.system.usageMeterUnknown" xml:space="preserve">
+    <value>Unknown meter. Must be 'egress_bytes', 'egress_metadata_bytes', 'storage_bytes', or 'artifact_count'.</value>
+    <comment>422 detail for an unrecognized key in the usage-limits caps map. The quoted values are API literals.</comment>
+  </data>
   <data name="error.system.tenantStatusInvalid" xml:space="preserve">
-    <value>Must be 'active' or 'suspended'. ('archived' and 'deleting' are enterprise-only.)</value>
+    <value>Must be 'active', 'suspended', or 'read_only'. ('archived' and 'deleting' are enterprise-only.)</value>
     <comment>422 detail for tenant status. The quoted values are API literals.</comment>
   </data>
   <data name="error.system.tenantAlreadyActive" xml:space="preserve">
@@ -448,6 +476,22 @@
   <data name="error.system.unsupportedTimezone" xml:space="preserve">
     <value>Unrecognised timezone '{0}'. Use an IANA zone name, for example America/Toronto.</value>
     <comment>422 detail. {0} = the rejected timezone identifier.</comment>
+  </data>
+  <data name="error.system.usageRangeInvalid" xml:space="preserve">
+    <value>Must be a date in YYYY-MM-DD format.</value>
+    <comment>422 detail for the usage report's from/to query parameters.</comment>
+  </data>
+  <data name="error.system.usageRangeOrder" xml:space="preserve">
+    <value>'to' must not be earlier than 'from'.</value>
+    <comment>422 detail for the usage report date range. The quoted values are API query parameter names.</comment>
+  </data>
+  <data name="error.system.usageRangeTooLarge" xml:space="preserve">
+    <value>Range cannot exceed {0} days.</value>
+    <comment>422 detail for the usage report date range. {0} = the maximum span in days.</comment>
+  </data>
+  <data name="error.system.usageGranularityInvalid" xml:space="preserve">
+    <value>Must be 'day' or 'hour'.</value>
+    <comment>422 detail for the per-tenant usage series endpoint. The quoted values are API literals.</comment>
   </data>
   <data name="error.password.currentRequired" xml:space="preserve">
     <value>Current password is required.</value>

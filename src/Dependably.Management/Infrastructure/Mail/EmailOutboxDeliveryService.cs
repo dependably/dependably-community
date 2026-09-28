@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using Dependably.Infrastructure.Alerts;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure.Mail;
 
@@ -173,6 +174,9 @@ public sealed class EmailOutboxDeliveryService : BackgroundService
     /// </summary>
     internal async Task RunPassAsync(CancellationToken ct)
     {
+        // xtenant: claims due mail across every tenant, including operator-scope mail with no org.
+        using var ownerScope = DbScope.CrossTenant("email outbox delivery");
+
         int expired = await _outbox.ExpireOverdueAsync(ct);
         if (expired > 0)
         {

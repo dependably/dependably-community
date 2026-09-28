@@ -29,6 +29,10 @@ namespace Dependably.Api;
 [ApiController]
 [Authorize]
 [Route("api/v1/system")]
+// The whole apex operator surface, one partial file per concern; the coupling is the sum of those
+// concerns, and the remedy is splitting them into separate controllers, a separate change.
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S1200:Classes should not be coupled to too many other classes",
+    Justification = "Apex operator surface split into per-concern partial files; the remedy is separate controllers, a separate change.")]
 public sealed partial class SystemController : ControllerBase
 {
     // Maximum page size for system admin list responses.
@@ -41,6 +45,7 @@ public sealed partial class SystemController : ControllerBase
 
     private readonly OrgRepository _orgs;
     private readonly SystemAdminRepository _systemAdmins;
+    private readonly SystemTokenRepository _systemTokens;
     private readonly IMetadataStore _db;
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
@@ -57,12 +62,13 @@ public sealed partial class SystemController : ControllerBase
     private static readonly string[] BackgroundJobOutcomes = ["success", "server_error", "cancelled"];
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
-        Justification = "Controller aggregates 11 independent DI-resolved services (3 repos, metadata store, problem-results helper, " +
+        Justification = "Controller aggregates 12 independent DI-resolved services (4 repos, metadata store, problem-results helper, " +
             "configuration, password policy, clock, secret protector, logger, optional cache invalidator). Bundling into a wrapper record " +
             "would obscure the DI graph and force every test setup to materialise the wrapper for unrelated callers.")]
     public SystemController(
         OrgRepository orgs,
         SystemAdminRepository systemAdmins,
+        SystemTokenRepository systemTokens,
         IMetadataStore db,
         AuditRepository audit,
         ProblemResults problems,
@@ -76,6 +82,7 @@ public sealed partial class SystemController : ControllerBase
     {
         _orgs = orgs;
         _systemAdmins = systemAdmins;
+        _systemTokens = systemTokens;
         _db = db;
         _audit = audit;
         _problems = problems;
@@ -90,6 +97,7 @@ public sealed partial class SystemController : ControllerBase
 
     /// <summary>GET /api/v1/system/tenants — list all tenants.</summary>
     [HttpGet("tenants")]
+    [Authorize(AuthenticationSchemes = "Bearer," + SystemTokenDefaults.Scheme)]
     public async Task<IActionResult> ListTenants(
         [FromQuery] int limit = 50, [FromQuery] int page = 1, CancellationToken ct = default)
     {
@@ -133,6 +141,7 @@ public sealed partial class SystemController : ControllerBase
 
     /// <summary>POST /api/v1/system/tenants — atomically create a tenant + its first owner.</summary>
     [HttpPost("tenants")]
+    [Authorize(AuthenticationSchemes = "Bearer," + SystemTokenDefaults.Scheme)]
     public async Task<IActionResult> CreateTenant([FromBody] CreateTenantRequest req, CancellationToken ct)
     {
         if (req is null)
@@ -206,16 +215,20 @@ public sealed partial class SystemController : ControllerBase
 
         // Audit on a fresh connection — opening it inside the BEGIN IMMEDIATE above would
         // deadlock SQLite's single writer lock.
-        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst("sub")?.Value;
+        var actor = SystemActor.From(User);
         await _audit.LogSystemAsync(
             action: "tenant.created",
-            actorId: actor,
+            actorId: actor.Id,
             orgId: orgId,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, ownerEmail = req.OwnerEmail }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { slug, ownerEmail = req.OwnerEmail, via_token_owner = actor.OwnerId },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            actorKind: actor.Kind,
+            actorLabel: actor.Label,
             ct: ct);
         _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
-            "tenant.created", slug, null, actor));
+            "tenant.created", slug, null, actor.Id));
 
         return Ok(new
         {
@@ -232,6 +245,7 @@ public sealed partial class SystemController : ControllerBase
     /// </summary>
     [HttpDelete("tenants/{slug}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [Authorize(AuthenticationSchemes = "Bearer," + SystemTokenDefaults.Scheme)]
     public async Task<IActionResult> SoftDeleteTenant(string slug, CancellationToken ct)
     {
         var org = await _orgs.GetBySlugAsync(slug, ct: ct);
@@ -243,16 +257,18 @@ public sealed partial class SystemController : ControllerBase
         await _orgs.SoftDeleteOrgAsync(org.Id, ct);
         _tenantCache?.InvalidateSlug(slug);
 
-        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst("sub")?.Value;
+        var actor = SystemActor.From(User);
         await _audit.LogSystemAsync(
             action: "tenant.deleted",
-            actorId: actor,
+            actorId: actor.Id,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, via_token_owner = actor.OwnerId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            actorKind: actor.Kind,
+            actorLabel: actor.Label,
             ct: ct);
         _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
-            "tenant.deleted", slug, null, actor));
+            "tenant.deleted", slug, null, actor.Id));
 
         return NoContent();
     }
@@ -264,6 +280,7 @@ public sealed partial class SystemController : ControllerBase
     /// values are rejected as 422 — clearing must go through an explicit <c>null</c>.
     /// </summary>
     [HttpPatch("tenants/{slug}/storage-quota")]
+    [Authorize(AuthenticationSchemes = "Bearer," + SystemTokenDefaults.Scheme)]
     public async Task<IActionResult> SetTenantStorageQuota(
         string slug,
         [FromBody] SetStorageQuotaRequest? req,
@@ -287,18 +304,21 @@ public sealed partial class SystemController : ControllerBase
 
         await _orgs.SetStorageQuotaBytesAsync(org.Id, req.QuotaBytes, ct);
 
-        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst("sub")?.Value;
+        var actor = SystemActor.From(User);
         await _audit.LogSystemAsync(
             action: "tenant.quota_changed",
-            actorId: actor,
+            actorId: actor.Id,
             orgId: org.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new
             {
                 slug,
                 quotaBytes = req.QuotaBytes,
                 priorQuotaBytes = org.StorageQuotaBytes,
+                via_token_owner = actor.OwnerId,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            actorKind: actor.Kind,
+            actorLabel: actor.Label,
             ct: ct);
 
         return Ok(new { slug, quotaBytes = req.QuotaBytes });
@@ -306,21 +326,25 @@ public sealed partial class SystemController : ControllerBase
 
     /// <summary>
     /// PATCH /api/v1/system/tenants/{slug}/status — flip the tenant lifecycle gate between
-    /// <c>'active'</c> and <c>'suspended'</c>. Suspending is a full lockout, not just a write
-    /// refusal: <c>Infrastructure.TenantStatusEnforcementMiddleware</c> refuses every tenant-bound
-    /// request for the org — protocol plane, management API, and login alike — and
-    /// <see cref="Storage.ITenantStorageResolver"/> applies the same status check independently as
-    /// defence in depth. <c>ITenantSlugCacheInvalidator.InvalidateSlug</c> below evicts this
-    /// process's subdomain cache immediately, but it is process-local: on this community's
-    /// single-process SQLite deployment that is instance-wide by construction, while on a
-    /// multi-replica Postgres deployment each other replica keeps serving from its own slug cache
-    /// for up to its remaining TTL (5 seconds) before it re-reads the new status. Existing data is
-    /// preserved. Body: <c>{ "status": "active" | "suspended" }</c>. Soft-deleted tenants must be
-    /// restored first. <c>'archived'</c> and <c>'deleting'</c> get the identical lockout but are
-    /// enterprise-only and rejected here.
+    /// <c>'active'</c>, <c>'suspended'</c>, and <c>'read_only'</c>. Suspending is a full lockout,
+    /// not just a write refusal: <c>Infrastructure.TenantStatusEnforcementMiddleware</c> refuses
+    /// every tenant-bound request for the org — protocol plane, management API, and login alike —
+    /// and <see cref="Storage.ITenantStorageResolver"/> applies the same status check
+    /// independently as defence in depth. <c>read_only</c> is narrower: reads (GET/HEAD/OPTIONS)
+    /// and every management-plane request keep working — only a state-changing protocol-plane
+    /// request (publish/upload/delete/yank) is refused — the Phase-1 billing-dunning posture
+    /// (past_due → read-only) where artefacts are never deleted. <c>ITenantSlugCacheInvalidator.InvalidateSlug</c>
+    /// below evicts this process's subdomain cache immediately, but it is process-local: on this
+    /// community's single-process SQLite deployment that is instance-wide by construction, while
+    /// on a multi-replica Postgres deployment each other replica keeps serving from its own slug
+    /// cache for up to its remaining TTL (5 seconds) before it re-reads the new status. Existing
+    /// data is preserved. Body: <c>{ "status": "active" | "suspended" | "read_only" }</c>.
+    /// Soft-deleted tenants must be restored first. <c>'archived'</c> and <c>'deleting'</c> get the
+    /// identical full lockout but are enterprise-only and rejected here.
     /// </summary>
     [HttpPatch("tenants/{slug}/status")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [Authorize(AuthenticationSchemes = "Bearer," + SystemTokenDefaults.Scheme)]
     public async Task<IActionResult> SetTenantStatus(
         string slug,
         [FromBody] SetTenantStatusRequest? req,
@@ -331,7 +355,7 @@ public sealed partial class SystemController : ControllerBase
             return _problems.ValidationErrorActionKey("body", "error.common.bodyRequired");
         }
 
-        if (req.Status is not ("active" or "suspended"))
+        if (req.Status is not ("active" or "suspended" or "read_only"))
         {
             return _problems.ValidationErrorActionKey("status", "error.system.tenantStatusInvalid");
         }
@@ -351,16 +375,20 @@ public sealed partial class SystemController : ControllerBase
 
         _tenantCache?.InvalidateSlug(slug);
 
-        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst("sub")?.Value;
+        var actor = SystemActor.From(User);
         await _audit.LogSystemAsync(
             action: "tenant.status_changed",
-            actorId: actor,
+            actorId: actor.Id,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, status = req.Status, priorStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { slug, status = req.Status, priorStatus, via_token_owner = actor.OwnerId },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            actorKind: actor.Kind,
+            actorLabel: actor.Label,
             ct: ct);
         _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
-            "tenant.status_changed", slug, null, actor));
+            "tenant.status_changed", slug, null, actor.Id));
 
         return NoContent();
     }
@@ -371,6 +399,7 @@ public sealed partial class SystemController : ControllerBase
     /// </summary>
     [HttpPatch("tenants/{slug}/restore")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [Authorize(AuthenticationSchemes = "Bearer," + SystemTokenDefaults.Scheme)]
     public async Task<IActionResult> RestoreTenant(string slug, CancellationToken ct)
     {
         var org = await _orgs.GetBySlugAsync(slug, includeDeleted: true, ct: ct);
@@ -392,16 +421,18 @@ public sealed partial class SystemController : ControllerBase
 
         _tenantCache?.InvalidateSlug(slug);
 
-        string? actor = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst("sub")?.Value;
+        var actor = SystemActor.From(User);
         await _audit.LogSystemAsync(
             action: "tenant.restored",
-            actorId: actor,
+            actorId: actor.Id,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, via_token_owner = actor.OwnerId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            actorKind: actor.Kind,
+            actorLabel: actor.Label,
             ct: ct);
         _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
-            "tenant.restored", slug, null, actor));
+            "tenant.restored", slug, null, actor.Id));
 
         return NoContent();
     }
@@ -538,7 +569,7 @@ public sealed partial class SystemController : ControllerBase
         [FromServices] PackageAnalyticsRepository analytics,
         CancellationToken ct = default)
     {
-        var (activeTenants, suspendedTenants, softDeletedTenants) = await _orgs.CountByStatusAsync(ct);
+        var (activeTenants, suspendedTenants, readOnlyTenants, softDeletedTenants) = await _orgs.CountByStatusAsync(ct);
         var (activeAdmins, lockedAdmins, disabledAdmins) = await _systemAdmins.CountByAccountStatusAsync(ct);
         var (recentJobs, _) = await jobs.ListAsync(
             new BackgroundJobRunQuery(SortBy: "startedAt", SortDir: "desc", Limit: 5, Offset: 0),
@@ -558,8 +589,9 @@ public sealed partial class SystemController : ControllerBase
             {
                 active = activeTenants,
                 suspended = suspendedTenants,
+                readOnly = readOnlyTenants,
                 softDeleted = softDeletedTenants,
-                total = activeTenants + suspendedTenants + softDeletedTenants,
+                total = activeTenants + suspendedTenants + readOnlyTenants + softDeletedTenants,
             },
             admins = new
             {

@@ -160,13 +160,16 @@ public sealed class PackageVersionFilesRepository
         }
 
         await using var conn = await _db.OpenAsync(ct);
+        var (versionIds, versionIdsParams) = DapperInClause.Expand("packageVersionIds", packageVersionIds);
+        versionIdsParams.AddDynamicParams(new { orgId });
+        // rawsql: versionIds is a parameterized IN (@packageVersionIds0, …) list built in C# by DapperInClause.
         var rows = await conn.QueryAsync<(string PackageVersionId, string Filename)>(
             """
             SELECT package_version_id, filename
             FROM package_version_files
             WHERE org_id = @orgId AND package_version_id IN @packageVersionIds
-            """,
-            new { orgId, packageVersionIds });
+            """.Replace("@packageVersionIds", versionIds, StringComparison.Ordinal),
+            versionIdsParams);
         // Suffix-matched in C# rather than with a SQL LIKE '%…' no index could serve; the row set
         // is already bounded by the page's version ids.
         return rows

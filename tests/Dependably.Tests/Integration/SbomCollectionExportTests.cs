@@ -171,11 +171,11 @@ public sealed class SbomCollectionExportTests : IClassFixture<DependablyFactory>
         string scannedProjectId = await FindProjectIdAsync(client, scanned);
         int stamped = await conn.ExecuteAsync(
             """
-            UPDATE sbom_components SET vuln_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            UPDATE sbom_components SET vuln_checked_at = @now
             WHERE project_version_id IN (
                 SELECT id FROM project_versions WHERE project_id = @scannedProjectId)
             """,
-            new { scannedProjectId });
+            new { scannedProjectId, now = TimeProvider.System.GetUtcNow().ToUtcIso() });
         Assert.True(stamped > 0, "the fixture must contribute at least one component to stamp");
 
         var doc = await ExportAsync(client, folder, "inventory");

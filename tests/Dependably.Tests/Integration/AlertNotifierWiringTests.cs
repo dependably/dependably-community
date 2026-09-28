@@ -92,7 +92,7 @@ public sealed class AlertNotifierWiringTests : IAsyncLifetime
     private static Task<OutboxRow> ReadOutboxRowAsync(System.Data.Common.DbConnection conn, string correlationId) =>
         conn.QuerySingleAsync<OutboxRow>(
             """
-            SELECT attempts AS Attempts, last_error AS LastError,
+            SELECT CAST(attempts AS BIGINT) AS Attempts, last_error AS LastError,
                    failure_class AS FailureClass, state AS State
             FROM email_outbox WHERE correlation_id = @id
             """,

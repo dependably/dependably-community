@@ -158,10 +158,10 @@ public sealed partial class PackageRepository
                 await conn.ExecuteAsync(
                     """
                     UPDATE packages
-                    SET is_proxy = NOT EXISTS (
+                    SET is_proxy = CASE WHEN EXISTS (
                         SELECT 1 FROM package_versions
                         WHERE package_id = @pkgId AND origin = 'uploaded'
-                    )
+                    ) THEN 0 ELSE 1 END
                     WHERE id = @pkgId
                     """,
                     new { pkgId = packageId }, dbTx);
@@ -268,32 +268,40 @@ public sealed partial class PackageRepository
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
-        // xtenant: instance-wide by design. The registry blob tier is shared across every tenant,
-        // so the reconciler's referenced set has to span every tenant — an org-filtered set would
-        // classify every OTHER tenant's artefacts as orphans and delete them.
-        await foreach (string key in conn.QueryUnbufferedAsync<string>(
-            // plane-ok: orphan reconciler walks only the hosted/ blob prefix; cache_artifact/oci_blobs keys carry proxy//oci/ prefixes and are deliberately out of scope.
-            """
-            SELECT blob_key FROM package_versions
-            UNION ALL
-            SELECT blob_key FROM package_version_files
-            UNION ALL
-            SELECT blob_key FROM maven_version_files
-            UNION ALL
-            SELECT snupkg_blob_key FROM nuget_symbol_index
-            UNION ALL
-            SELECT blob_key FROM project_documents
-            """,
-            commandTimeout: 0))
+        await foreach (var row in conn.QueryUnbufferedAsync<ReferencedBlobRow>(
+            HostedReferencedBlobsSql, commandTimeout: 0))
         {
             if (ct.IsCancellationRequested)
             {
                 yield break;
             }
 
-            yield return key;
+            yield return row.BlobKey;
         }
     }
+
+    /// <summary>
+    /// The one definition of the rows that reference a hosted blob, with the size each row
+    /// records: <see cref="StreamAllBlobKeysAsync"/> projects the keys for the orphan sweep, and
+    /// the weekly stored-byte reconciliation sums the sizes, so garbage collection and that check
+    /// cannot disagree about which rows hold a hosted plane's bytes. <c>nuget_symbol_index</c>
+    /// records no size, so its arm carries NULL.
+    /// </summary>
+    // xtenant: instance-wide by design. The registry blob tier is shared across every tenant,
+    // so the reconciler's referenced set has to span every tenant — an org-filtered set would
+    // classify every OTHER tenant's artefacts as orphans and delete them.
+    // plane-ok: orphan reconciler walks only the hosted/ blob prefix; cache_artifact/oci_blobs keys carry proxy//oci/ prefixes and are deliberately out of scope.
+    internal const string HostedReferencedBlobsSql = """
+        SELECT blob_key AS BlobKey, size_bytes AS SizeBytes FROM package_versions
+        UNION ALL
+        SELECT blob_key, size_bytes FROM package_version_files
+        UNION ALL
+        SELECT blob_key, size_bytes FROM maven_version_files
+        UNION ALL
+        SELECT snupkg_blob_key, CAST(NULL AS BIGINT) FROM nuget_symbol_index
+        UNION ALL
+        SELECT blob_key, size_bytes FROM project_documents
+        """;
 
     public async Task SetManualBlockStateAsync(string versionId, string? state, CancellationToken ct = default)
     {
@@ -547,4 +555,15 @@ public sealed partial class PackageRepository
         public string? ContentHash { get; init; }
         public string? Origin { get; init; }
     }
+}
+
+/// <summary>
+/// One row naming a blob, as its table stores the key (database form, see
+/// <see cref="Storage.BlobKeys.StoreKey"/>), and the size that row records for it —
+/// <c>null</c> where the column is NULL or the table records no size.
+/// </summary>
+public sealed class ReferencedBlobRow
+{
+    public string BlobKey { get; set; } = "";
+    public long? SizeBytes { get; set; }
 }

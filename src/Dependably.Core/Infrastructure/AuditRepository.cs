@@ -2,6 +2,8 @@ using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using Dapper;
 using Dependably.Infrastructure.Audit;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure;
 
@@ -10,12 +12,40 @@ public sealed class AuditRepository
     private readonly IMetadataStore _db;
     private readonly ActivityWriter? _activityWriter;
     private readonly TimeProvider _time;
+    private readonly ILogger<AuditRepository> _logger;
 
-    public AuditRepository(IMetadataStore db, ActivityWriter? activityWriter = null, TimeProvider? time = null)
+    public AuditRepository(
+        IMetadataStore db,
+        ActivityWriter? activityWriter = null,
+        TimeProvider? time = null,
+        ILogger<AuditRepository>? logger = null)
     {
         _db = db;
         _activityWriter = activityWriter;
         _time = time ?? TimeProvider.System;
+        _logger = logger ?? NullLogger<AuditRepository>.Instance;
+    }
+
+    /// <summary>
+    /// The <c>actor_label</c> value a row may carry: the caller's label when the actor is a service
+    /// actor, and NULL otherwise. A label is denormalized for service actors only, because a user's
+    /// display name is an email and the member-removal and retention scrubs clear a fixed column
+    /// list that this column is not on. <c>AuditActorIdComplianceTests</c> requires every label to
+    /// come from a derived accessor, which proves the spelling; this makes the stored value right
+    /// by construction, so a producer that returns a label for a non-service actor degrades to a
+    /// missing label and a warning rather than personal data at rest.
+    /// </summary>
+    private string? ClampActorLabel(string? actorLabel, string? actorKind, string action)
+    {
+        if (actorLabel is null || string.Equals(actorKind, ActorKinds.Service, StringComparison.Ordinal))
+        {
+            return actorLabel;
+        }
+
+        _logger.LogWarning(
+            "Dropped the actor label on audit write {Action}: a label is stored for service actors only, and this actor's kind is {ActorKind}",
+            action, actorKind ?? "(none)");
+        return null;
     }
 
     // Millisecond-precision UTC ISO-8601, so multiple events emitted in the same wall-clock
@@ -41,27 +71,38 @@ public sealed class AuditRepository
         string? sourceIp = null,
         string? actorLabel = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp, actorLabel), ct);
+        => WriteAsync(new AuditWrite(action, "tenant", orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp,
+            ClampActorLabel(actorLabel, actorKind, action)), ct);
 
     // System-scope events (operator dashboard) — keeps tenant-business events filtered out of
-    // the system audit list and vice versa. system_admin actors aren't users or service tokens,
-    // so actorKind stays NULL — the system audit list joins to system_admins, not users.
+    // the system audit list and vice versa. A system_admin actor carries no actorKind (the
+    // system audit list joins to system_admins, not users); a system-token actor passes
+    // actorKind = ActorKinds.Service and actorLabel = the token name, the same denormalized-label
+    // shape service_tokens uses on the tenant plane, because system_tokens rows are hard-deleted
+    // on revocation too. Both new parameters are optional and appended last so every existing
+    // positional call site is unaffected.
+    // S107: the parameters are the audit row's own columns, all optional and all passed by name at
+    // every call site — the same shape and the same reasoning as the conn/tx overload below.
+    [SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters", Justification = "The parameters are the audit row's columns; callers pass them by name.")]
     public Task LogSystemAsync(
         string action,
         string? actorId = null,
         string? orgId = null,
         string? detail = null,
         string? sourceIp = null,
+        string? actorKind = null,
+        string? actorLabel = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp, null), ct);
+        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, actorKind, null, null, detail, sourceIp,
+            ClampActorLabel(actorLabel, actorKind, action)), ct);
 
     /// <summary>
-    /// <see cref="LogSystemAsync(string,string?,string?,string?,string?,CancellationToken)"/> written
-    /// on a caller-supplied connection and transaction, so the audit row lands in the same atomic
-    /// unit as the work it records. <see cref="Dependably.Background.TenantHardDeleteService"/> needs
-    /// this: its erasure sequence is one transaction, and a <c>tenant.hard_deleted</c> row written
-    /// outside it would either claim a deletion that later rolled back, or be lost while the
-    /// deletion committed.
+    /// <see cref="LogSystemAsync(string,string?,string?,string?,string?,string?,string?,CancellationToken)"/>
+    /// written on a caller-supplied connection and transaction, so the audit row lands in the same
+    /// atomic unit as the work it records. <see cref="Dependably.Background.TenantHardDeleteService"/>
+    /// needs this: its erasure sequence is one transaction, and a <c>tenant.hard_deleted</c> row
+    /// written outside it would either claim a deletion that later rolled back, or be lost while
+    /// the deletion committed.
     /// </summary>
     // S107: the parameters are the audit row's own columns, all optional and all passed by name at
     // every call site. Bundling them into a record would only move the same list behind a
@@ -76,12 +117,20 @@ public sealed class AuditRepository
         string? orgId = null,
         string? detail = null,
         string? sourceIp = null,
+        string? actorKind = null,
+        string? actorLabel = null,
         CancellationToken ct = default)
-        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, null, null, null, detail, sourceIp, null), conn, tx, ct);
+        => WriteAsync(new AuditWrite(action, "system", orgId, actorId, actorKind, null, null, detail, sourceIp,
+            ClampActorLabel(actorLabel, actorKind, action)), conn, tx, ct);
 
     private async Task WriteAsync(AuditWrite entry, CancellationToken ct)
     {
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: a row with no org_id is instance-scoped — it belongs to no tenant, so under
+        // row-level security it can only be written by the owner. A row naming an org goes
+        // through the caller's tenant binding like any other tenant write.
+        await using var conn = entry.OrgId is null
+            ? await _db.OpenCrossTenantAsync("instance-scoped audit row", ct)
+            : await _db.OpenAsync(ct);
         await WriteAsync(entry, conn, tx: null, ct);
     }
 
@@ -141,7 +190,7 @@ public sealed class AuditRepository
             EventType: eventType,
             ActorId: actorId,
             ActorKind: actorKind,
-            ActorLabel: actorLabel,
+            ActorLabel: ClampActorLabel(actorLabel, actorKind, eventType),
             Detail: detail,
             SourceIp: sourceIp,
             CreatedAt: NowMs());
@@ -443,7 +492,8 @@ public sealed class AuditRepository
         // rawsql: only the whitelisted ORDER BY column/direction are interpolated (see S2077 justification above).
         string listSql = $"""
             SELECT a.id, a.scope as Scope, a.org_id as OrgId, o.slug as OrgSlug, a.actor_id as ActorId,
-                   sa.email as ActorEmail, a.action as Action,
+                   sa.email as ActorEmail, a.actor_kind as ActorKind, a.actor_label as ActorLabel,
+                   a.action as Action,
                    a.ecosystem as Ecosystem, a.purl as Purl, a.detail as Detail,
                    a.source_ip as SourceIp,
                    a.created_at as CreatedAt
@@ -602,7 +652,12 @@ public sealed class AuditRepository
         string? afterCursor,
         CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: a null orgId is the platform-admin feed over every org's rows and the
+        // instance-scoped ones; opened as the owner so row-level security cannot narrow it to
+        // whichever host served the call. A tenant feed keeps its tenant binding.
+        await using var conn = orgId is null
+            ? await _db.OpenCrossTenantAsync("platform auth-event feed", ct)
+            : await _db.OpenAsync(ct);
 
         string[] filters = ResolveAuthEventFilters(actionFilter);
 

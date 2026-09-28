@@ -31,7 +31,7 @@ namespace Dependably.Tests.Compliance;
 /// </para>
 /// </summary>
 [Trait("Category", "Compliance")]
-public sealed class BlockGateRequestConstructionComplianceTests
+public sealed partial class BlockGateRequestConstructionComplianceTests
 {
     private readonly ITestOutputHelper _output;
     public BlockGateRequestConstructionComplianceTests(ITestOutputHelper output) => _output = output;
@@ -184,10 +184,14 @@ public sealed class BlockGateRequestConstructionComplianceTests
         int next = source.IndexOf("public static BlockGateRequest ", start + 1, StringComparison.Ordinal);
         string body = next > start ? source[start..next] : source[start..];
 
-        return Regex.Matches(body, @"\b([A-Za-z]\w*(?:Mode|Tolerance)):")
+        return PolicyNamedArgument().Matches(body)
             .Select(m => m.Groups[1].Value)
             .ToHashSet(StringComparer.Ordinal);
     }
+
+    // A `…Mode:` / `…Tolerance:` named argument inside a factory body.
+    [GeneratedRegex(@"\b([A-Za-z]\w*(?:Mode|Tolerance)):")]
+    private static partial Regex PolicyNamedArgument();
 
     /// <summary>
     /// Scanner self-test: the detector must fire on a bare construction and stand down for an

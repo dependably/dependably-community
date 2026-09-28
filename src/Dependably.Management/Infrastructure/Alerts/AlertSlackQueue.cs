@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure.Alerts;
 
@@ -232,6 +233,8 @@ public sealed class AlertSlackQueue : BackgroundService, IAlertNotifier
     /// </summary>
     internal async Task<bool> DeliverAsync(AlertRecord alert, CancellationToken ct)
     {
+        using var tenantScope = DbScope.ForOrg(alert.OrgId);
+
         var destination = await ResolveDestinationAsync(alert, ct);
         return destination.Url is null
             ? destination.Reached

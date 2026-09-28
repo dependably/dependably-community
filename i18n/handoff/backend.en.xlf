@@ -1810,8 +1810,8 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <note category="translator">422 detail for tenant status. The quoted values are API literals.</note>
       </notes>
       <segment state="translated">
-        <source>Must be &apos;active&apos; or &apos;suspended&apos;. (&apos;archived&apos; and &apos;deleting&apos; are enterprise-only.)</source>
-        <target>Doit être « active » ou « suspended ». (« archived » et « deleting » sont réservés à l&apos;édition entreprise.)</target>
+        <source>Must be &apos;active&apos;, &apos;suspended&apos;, or &apos;read_only&apos;. (&apos;archived&apos; and &apos;deleting&apos; are enterprise-only.)</source>
+        <target>Doit être « active », « suspended » ou « read_only ». (« archived » et « deleting » sont réservés à l&apos;édition entreprise.)</target>
       </segment>
     </unit>
     <unit id="error.system.unknownSettingKey">
@@ -1839,6 +1839,105 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Unrecognised timezone &apos;{0}&apos;. Use an IANA zone name, for example America/Toronto.</source>
         <target>Fuseau horaire non reconnu « {0} ». Utilisez un nom de zone IANA, par exemple America/Toronto.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.usageCapInvalid">
+      <notes>
+        <note category="translator">422 detail for a per-meter usage cap on PATCH /api/v1/system/tenants/{slug}/usage-limits.</note>
+      </notes>
+      <segment state="translated">
+        <source>A usage cap must be a positive quantity, or null to clear it.</source>
+        <target>Un plafond d&apos;utilisation doit être une quantité positive, ou null pour l&apos;effacer.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.usageGranularityInvalid">
+      <notes>
+        <note category="translator">422 detail for the per-tenant usage series endpoint. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be &apos;day&apos; or &apos;hour&apos;.</source>
+        <target>Doit être « day » ou « hour ».</target>
+      </segment>
+    </unit>
+    <unit id="error.system.usageMeterUnknown">
+      <notes>
+        <note category="translator">422 detail for an unrecognized key in the usage-limits caps map. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>Unknown meter. Must be &apos;egress_bytes&apos;, &apos;egress_metadata_bytes&apos;, &apos;storage_bytes&apos;, or &apos;artifact_count&apos;.</source>
+        <target>Compteur inconnu. Doit être « egress_bytes », « egress_metadata_bytes », « storage_bytes » ou « artifact_count ».</target>
+      </segment>
+    </unit>
+    <unit id="error.system.usageRangeInvalid">
+      <notes>
+        <note category="translator">422 detail for the usage report&apos;s from/to query parameters.</note>
+      </notes>
+      <segment state="translated">
+        <source>Must be a date in YYYY-MM-DD format.</source>
+        <target>Doit être une date au format AAAA-MM-JJ.</target>
+      </segment>
+    </unit>
+    <unit id="error.system.usageRangeOrder">
+      <notes>
+        <note category="translator">422 detail for the usage report date range. The quoted values are API query parameter names.</note>
+      </notes>
+      <segment state="translated">
+        <source>&apos;to&apos; must not be earlier than &apos;from&apos;.</source>
+        <target>« to » ne doit pas être antérieur à « from ».</target>
+      </segment>
+    </unit>
+    <unit id="error.system.usageRangeTooLarge">
+      <notes>
+        <note category="translator">422 detail for the usage report date range. {0} = the maximum span in days.</note>
+      </notes>
+      <segment state="translated">
+        <source>Range cannot exceed {0} days.</source>
+        <target>La plage ne peut pas dépasser {0} jours.</target>
+      </segment>
+    </unit>
+    <unit id="error.systemToken.limitReached">
+      <notes>
+        <note category="translator">422 detail. {0} = the instance-wide active-system-token cap (system API tokens, not per-tenant tokens).</note>
+      </notes>
+      <segment state="translated">
+        <source>Active system token limit ({0}) reached for this instance. Revoke unused tokens before creating new ones.</source>
+        <target>Limite de jetons système actifs ({0}) atteinte pour cette instance. Révoquez des jetons inutilisés avant d&apos;en créer de nouveaux.</target>
+      </segment>
+    </unit>
+    <unit id="error.token.descriptionInvalidChars">
+      <notes>
+        <note category="translator">422 detail: token description carrying control characters.</note>
+      </notes>
+      <segment state="translated">
+        <source>Description must not contain control characters.</source>
+        <target>La description ne doit pas contenir de caractères de contrôle.</target>
+      </segment>
+    </unit>
+    <unit id="error.token.descriptionTooLong">
+      <notes>
+        <note category="translator">422 detail: token description over the length cap. {0} = the cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Description must be {0} characters or fewer.</source>
+        <target>La description doit compter au plus {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.token.expiryRequired">
+      <notes>
+        <note category="translator">422 detail: minting a system API token with no expiresAt, or one that is not in the future.</note>
+      </notes>
+      <segment state="translated">
+        <source>An expiry date is required, and must be in the future.</source>
+        <target>Une date d&apos;expiration est requise et doit être dans le futur.</target>
+      </segment>
+    </unit>
+    <unit id="error.token.expiryTooFar">
+      <notes>
+        <note category="translator">422 detail: minting a system API token with an expiresAt beyond the cap. {0} = the day cap.</note>
+      </notes>
+      <segment state="translated">
+        <source>Expiry must be no more than {0} days from now.</source>
+        <target>L&apos;expiration ne doit pas dépasser {0} jours à partir de maintenant.</target>
       </segment>
     </unit>
     <unit id="error.token.limitReached">
