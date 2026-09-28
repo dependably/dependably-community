@@ -1724,6 +1724,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Doit être null (hérite de la valeur par défaut de l&apos;instance), « passthrough » ou « merged ».</target>
       </segment>
     </unit>
+    <unit id="error.system.cacheSizeWarnInvalid">
+      <notes>
+        <note category="translator">422 detail for instance_settings.cache_size_warn_bytes. Zero is valid — it disables the alert.</note>
+      </notes>
+      <segment state="translated">
+        <source>Cache size warning threshold must be a non-negative number of bytes.</source>
+        <target>Le seuil d&apos;alerte de taille du cache doit être un nombre d&apos;octets non négatif.</target>
+      </segment>
+    </unit>
     <unit id="error.system.lookupQueryRequired">
       <notes>
         <note category="translator">422 detail for user lookup. The field names are API literals.</note>
@@ -2406,6 +2415,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Dependably [system]: operator account deleted by {0}</source>
         <target>Dependably [système] : compte opérateur supprimé par {0}</target>
+      </segment>
+    </unit>
+    <unit id="system.slack.cacheSizeThresholdExceeded">
+      <notes>
+        <note category="translator">Operator-Slack message template for system.cache_size_threshold_exceeded. No placeholders — the byte counts are in the audit-log detail, not the Slack line.</note>
+      </notes>
+      <segment state="translated">
+        <source>Dependably [system]: the instance-wide proxy cache exceeded its configured size threshold — see System Health for details.</source>
+        <target>Dependably [système] : le cache proxy de l&apos;instance a dépassé son seuil de taille configuré — voir la santé de l&apos;instance pour plus de détails.</target>
       </segment>
     </unit>
     <unit id="system.slack.genericEvent">

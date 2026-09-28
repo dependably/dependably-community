@@ -21,7 +21,7 @@ public sealed class PyPiDownloadHandler(
     TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
     AuditRepository audit,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     BlockGateService blockGate,
     ClaimResolver claimResolver,
     ReservedNamespaceService reserved,
@@ -104,7 +104,7 @@ public sealed class PyPiDownloadHandler(
         }
 
         string blobKeyUploaded = BlobKeys.StoreKey(fileRec.BlobKey);
-        if (!await blobs.ExistsAsync(blobKeyUploaded, ct))
+        if (!await blobs.Registry.ExistsAsync(blobKeyUploaded, ct))
         {
             return new NotFoundResult();
         }
@@ -173,7 +173,7 @@ public sealed class PyPiDownloadHandler(
 
         // blobkey-ok: proxy blob key from cache_artifact; no filename suffix needed for HEAD.
         string blobKey = BlobKeys.StoreKey(caFacts.BlobKey);
-        if (!await blobs.ExistsAsync(blobKey, ct))
+        if (!await blobs.Cache.ExistsAsync(blobKey, ct))
         {
             return new NotFoundResult();
         }
@@ -487,11 +487,11 @@ public sealed class PyPiDownloadHandler(
         var redirect = presign is null
             ? null
             : await presign.TryRedirectAsync(
-                httpContext, blobs, storeKey, hit.File.SizeBytes, BlobOrigins.FromColumn(hit.Version.Origin), "pypi", ct);
+                httpContext, blobs.Registry, storeKey, hit.File.SizeBytes, BlobOrigins.FromColumn(hit.Version.Origin), "pypi", ct);
         Stream? blob = null;
         if (redirect is null)
         {
-            blob = await blobs.GetAsync(storeKey, ct);
+            blob = await blobs.Registry.GetAsync(storeKey, ct);
             if (blob is null)
             {
                 return null;
@@ -529,15 +529,15 @@ public sealed class PyPiDownloadHandler(
             }
         }
 
-        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
+        // blobkey-ok: proxy blob key from cache_artifact; proxied bytes live in the cache tier.
         string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
         var redirect = presign is null
             ? null
-            : await presign.TryRedirectAsync(httpContext, blobs, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "pypi", ct);
+            : await presign.TryRedirectAsync(httpContext, blobs.Cache, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "pypi", ct);
         Stream? blob = null;
         if (redirect is null)
         {
-            blob = await blobs.GetAsync(storeKey, ct);
+            blob = await blobs.Cache.GetAsync(storeKey, ct);
             if (blob is null)
             {
                 return null;

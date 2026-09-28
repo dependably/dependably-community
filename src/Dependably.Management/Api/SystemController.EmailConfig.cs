@@ -104,6 +104,7 @@ public sealed partial class SystemController
                 passwordRotated = !string.IsNullOrEmpty(req.Password),
                 cleartextCredentials,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(EmailConfigEditing.BuildView(resolved, _envelope.IsConfigured));

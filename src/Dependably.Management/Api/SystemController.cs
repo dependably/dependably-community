@@ -650,6 +650,10 @@ public sealed partial class SystemController : ControllerBase
                 stagingAvailableBytes = report.Storage.StagingAvailableBytes,
                 stagingUsedBytes = report.Storage.StagingUsedBytes,
                 stagingBelowThreshold = report.Storage.StagingBelowThreshold,
+                cacheSizeWarnBytes = report.Storage.CacheSizeWarnBytes,
+                cacheAboveThreshold = report.Storage.CacheAboveThreshold,
+                cacheSizeLastBytes = report.Storage.CacheSizeLastBytes,
+                cacheSizeLastMeasuredAt = report.Storage.CacheSizeLastMeasuredAt,
             },
             tenants = new
             {
@@ -690,6 +694,13 @@ public sealed partial class SystemController : ControllerBase
             }
         }
 
+        if (settings.TryGetValue("cache_size_warn_bytes", out string? cacheSizeWarnRaw)
+            && !string.IsNullOrEmpty(cacheSizeWarnRaw)
+            && (!long.TryParse(cacheSizeWarnRaw, out long cacheSizeWarnBytes) || cacheSizeWarnBytes < 0))
+        {
+            return _problems.ValidationErrorActionKey("settings", "error.system.cacheSizeWarnInvalid");
+        }
+
         foreach (var (key, value) in settings)
         {
             await _orgs.SetInstanceSettingAsync(key, value, ct);
@@ -705,6 +716,7 @@ public sealed partial class SystemController : ControllerBase
                 keys = settings.Keys.ToArray(),
                 values = settings,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();
@@ -749,6 +761,7 @@ public sealed partial class SystemController : ControllerBase
             action: "system_admin.account_status_changed",
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(statusChangeDetail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();
@@ -806,6 +819,7 @@ public sealed partial class SystemController : ControllerBase
             action: "system_admin.password_reset",
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(new { email, tenantSlug = req.TenantSlug }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(new
@@ -879,6 +893,7 @@ public sealed partial class SystemController : ControllerBase
         await _audit.LogSystemAsync(
             action: "system_admin.password_changed",
             actorId: sub,
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         // Re-issue the caller's own session at the new token_version so the admin who just
@@ -952,6 +967,7 @@ public sealed partial class SystemController : ControllerBase
             action: "system_admin.language_changed",
             actorId: sub,
             detail: System.Text.Json.JsonSerializer.Serialize(new { language = req.Language }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();
@@ -986,6 +1002,7 @@ public sealed partial class SystemController : ControllerBase
             action: "system_admin.timezone_changed",
             actorId: sub,
             detail: System.Text.Json.JsonSerializer.Serialize(new { timezone = requested }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();

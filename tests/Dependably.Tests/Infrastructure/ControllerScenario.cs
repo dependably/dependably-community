@@ -54,6 +54,7 @@ public sealed class ControllerScenario : IAsyncDisposable
     private string? _actorOrgOverride;
     private bool _masterKeyConfigured;
     private bool _allowInsecureUpstreams;
+    private bool _splitTiers;
     private readonly Dictionary<string, string?> _settings = new(StringComparer.OrdinalIgnoreCase);
     private bool _built;
 
@@ -108,6 +109,18 @@ public sealed class ControllerScenario : IAsyncDisposable
     {
         EnsureNotBuilt();
         _settings[key] = value;
+        return this;
+    }
+
+    /// <summary>
+    /// Puts the cache tier on its own store (<see cref="ControllerScenarioResult.CacheBlobs"/>)
+    /// instead of sharing <see cref="ControllerScenarioResult.Blobs"/>, which stays the registry
+    /// tier — the shape of a deployment with per-tier storage overrides.
+    /// </summary>
+    public ControllerScenario WithSplitTiers()
+    {
+        EnsureNotBuilt();
+        _splitTiers = true;
         return this;
     }
 
@@ -365,6 +378,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), Clock);
         var samlConfig = new SamlConfigRepository(db, Clock);
         var blobs = new Dependably.Storage.InMemoryBlobStore();
+        var cacheBlobs = _splitTiers ? new Dependably.Storage.InMemoryBlobStore() : blobs;
+        var tiered = new Dependably.Storage.TieredBlobStorage(cacheBlobs, blobs);
         var publicUrl = new RequestPublicUrlBuilder(new ConfigurationBuilder().Build());
         var orgAuditEmitter = Substitute.For<Dependably.Infrastructure.Audit.IAuditEmitter>();
         var login = new LoginService(new LoginService.Dependencies(
@@ -439,9 +454,9 @@ public sealed class ControllerScenario : IAsyncDisposable
             StatsSnapshots: statsSnapshots,
             Tokens: tokens, Invites: invites,
             Allowlist: allowlist, Blocklist: blocklist, Audit: audit, Guard: guard,
-            Blobs: blobs, BlobStorage: new Dependably.Storage.TieredBlobStorage(blobs, blobs),
+            BlobStorage: tiered,
             OrphanBlobs: new Dependably.Protocol.OciOrphanBlobDeleter(
-                db, new Dependably.Storage.TieredBlobStorage(blobs, blobs), new Dependably.Protocol.OciBlobKeyLock()),
+                db, tiered, new Dependably.Protocol.OciBlobKeyLock()),
             Config: new ConfigurationBuilder().Build(),
             Logger: NullLogger<OrgController>.Instance, Problems: problems,
             Licenses: licenses, Vulns: vulns, Urls: publicUrl,
@@ -524,7 +539,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             Cache: claimCacheArtifacts,
             CacheOrphanBlobs: new Dependably.Infrastructure.CacheOrphanBlobDeleter(
                 claimCacheArtifacts, new Dependably.Infrastructure.CacheBlobKeyLock()),
-            Blobs: blobs,
+            Blobs: tiered,
             Logger: NullLogger<ClaimsController>.Instance, Time: Clock);
         var claims = new ClaimsController(claimSvc) { ControllerContext = ctx };
 
@@ -554,7 +569,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             Invalidation: TestMetadataInvalidation.Coordinator(scenarioCache),
             SymbolIndexer: new Dependably.Infrastructure.NuGetSymbolIndexer(
                 new Dependably.Infrastructure.NuGetSymbolIndexRepository(db, Clock),
-                blobs,
+                tiered,
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<Dependably.Infrastructure.NuGetSymbolIndexer>.Instance),
             Logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<ImportController>.Instance);
         var import = new ImportController(importSvc) { ControllerContext = ctx };
@@ -590,7 +605,8 @@ public sealed class ControllerScenario : IAsyncDisposable
             cacheArtifacts,
             tenantAccess,
             blobs,
-            policy);
+            policy,
+            cacheBlobs);
     }
 
     /// <summary>NSubstitute mock for the publish pipeline. Override return values on a test to exercise rejection paths.</summary>
@@ -641,12 +657,14 @@ public sealed record ControllerScenarioResult(
     QuarantineController QuarantineController,
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
-    // Backing store for OrgControllerServices' Blobs/BlobStorage (both tiers point at this same
-    // instance unless a test constructs its own tiering — see BuildAsync). Exposed so tests can
-    // assert directly on physical blob presence/absence rather than only DB-row state.
+    // The registry-tier store behind every controller's TieredBlobStorage, and the cache tier too
+    // unless the scenario was built WithSplitTiers. Exposed so tests can assert directly on
+    // physical blob presence/absence rather than only DB-row state.
     Dependably.Storage.InMemoryBlobStore Blobs,
     // Appended last — same positional-record convention as every field above it.
-    PolicyController PolicyController) : IAsyncDisposable
+    PolicyController PolicyController,
+    // The cache-tier store: the same instance as Blobs unless the scenario was built WithSplitTiers.
+    Dependably.Storage.InMemoryBlobStore CacheBlobs) : IAsyncDisposable
 {
     public IMetadataStore Db => Fixture.Store;
 

@@ -447,7 +447,7 @@ public sealed partial class HexApiController : OrgScopedControllerBase
                 new Dictionary<string, object?> { ["tarball"] = "documentation must be a gzipped tarball" });
         }
 
-        await _svc.Blobs.PutAsync(BlobKeys.HexDocs(gate.OrgId, name, version), new MemoryStream(body), ct);
+        await _svc.Blobs.Registry.PutAsync(BlobKeys.HexDocs(gate.OrgId, name, version), new MemoryStream(body), ct);
         await _svc.Releases.SetHasDocsAsync(gate.OrgId, name, version, true, ct);
         Response.Headers.Location = $"{BaseUrl()}/hex/api/packages/{name}/releases/{version}/docs";
         return StatusCode(StatusCodes.Status201Created);
@@ -480,7 +480,7 @@ public sealed partial class HexApiController : OrgScopedControllerBase
             return gate.Error;
         }
 
-        await _svc.Blobs.DeleteAsync(BlobKeys.HexDocs(gate.OrgId, name, version), ct);
+        await _svc.Blobs.Registry.DeleteAsync(BlobKeys.HexDocs(gate.OrgId, name, version), ct);
         await _svc.Releases.SetHasDocsAsync(gate.OrgId, name, version, false, ct);
         return NoContent();
     }
@@ -510,8 +510,8 @@ public sealed partial class HexApiController : OrgScopedControllerBase
         }
 
         var ver = gate.Version!;
-        await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
-        await _svc.Blobs.DeleteAsync(BlobKeys.HexDocs(gate.OrgId, name, version), ct);
+        await _svc.Blobs.Registry.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+        await _svc.Blobs.Registry.DeleteAsync(BlobKeys.HexDocs(gate.OrgId, name, version), ct);
         await _svc.Packages.DeleteVersionAsync(ver.Id, ct);
         await _svc.Packages.DeletePackageIfEmptyAsync(gate.Package!.Id, ct);
         await _api.Audit.LogActivityAsync(gate.OrgId, Ecosystem, ver.Purl, "delete", gate.Token!.AuditActorId,

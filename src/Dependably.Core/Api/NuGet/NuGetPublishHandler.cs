@@ -28,7 +28,7 @@ public sealed class NuGetPublishHandler(
     OrgRepository orgs,
     PackageRepository packages,
     TokenRepository tokens,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     IMetadataStore db,
     PublishGate publishGate,
     IPackagePublishService publish,
@@ -234,7 +234,7 @@ public sealed class NuGetPublishHandler(
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(symbolFile.BlobKey), ct);
+        var stream = await blobs.Registry.GetAsync(BlobKeys.StoreKey(symbolFile.BlobKey), ct);
         return stream is null
             ? new NotFoundResult()
             : new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = file };
@@ -288,7 +288,10 @@ public sealed class NuGetPublishHandler(
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        var blobStream = await blobs.GetAsync(BlobKeys.StoreKey(row.SnupkgBlobKey), ct);
+        // A hosted row's .snupkg was pushed to the registry tier; a proxied row's was fetched into
+        // the cache tier.
+        var snupkgTier = row.Version is not null ? blobs.Registry : blobs.Cache;
+        var blobStream = await snupkgTier.GetAsync(BlobKeys.StoreKey(row.SnupkgBlobKey), ct);
         if (blobStream is null)
         {
             return new NotFoundResult();
@@ -428,7 +431,7 @@ public sealed class NuGetPublishHandler(
             return new StatusCodeResult(StatusCodes.Status403Forbidden);
         }
 
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
+        var stream = await blobs.Cache.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
         return stream is null
             ? new NotFoundResult()
             : new FileStreamResult(stream, "application/octet-stream") { FileDownloadName = pdbName };

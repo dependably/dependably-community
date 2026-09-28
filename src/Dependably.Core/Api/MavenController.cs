@@ -487,13 +487,13 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         // Primary artifact: redirect when enabled, otherwise stream from blob store.
-        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to cache tier.
+        // blobkey-ok: proxy blob key from cache_artifact; proxied bytes live in the cache tier.
         string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
-        var redirect = await TryRedirectArtifactAsync(coords, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, ct);
+        var redirect = await TryRedirectArtifactAsync(coords, _svc.Blobs.Cache, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, ct);
         Stream? stream = null;
         if (redirect is null)
         {
-            stream = await _svc.Blobs.GetAsync(storeKey, ct);
+            stream = await _svc.Blobs.Cache.GetAsync(storeKey, ct);
             if (stream is null)
             {
                 return NotFound();
@@ -533,8 +533,8 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // Other algorithms require the blob bytes — open from store and compute on-the-fly.
         if (coords.ChecksumAlgorithm is { } algo)
         {
-            // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to cache tier.
-            var blobForChecksum = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
+            // blobkey-ok: proxy blob key from cache_artifact; proxied bytes live in the cache tier.
+            var blobForChecksum = await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(caFacts.BlobKey), ct);
             if (blobForChecksum is null)
             {
                 return NotFound();
@@ -562,7 +562,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         {
             // Compute from the primary artifact's bytes — costs one blob read; cached
             // results would be nice but live in a follow-up if it shows up in profiles.
-            var blob = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(row.BlobKey), ct);
+            var blob = await _svc.Blobs.Registry.GetAsync(BlobKeys.StoreKey(row.BlobKey), ct);
             if (blob is null)
             {
                 return NotFound();
@@ -597,11 +597,11 @@ public sealed partial class MavenController : OrgScopedControllerBase
         }
 
         string storeKey = BlobKeys.StoreKey(row.BlobKey);
-        var redirect = await TryRedirectArtifactAsync(coords, storeKey, row.SizeBytes, BlobOrigins.FromColumn(row.Origin), ct);
+        var redirect = await TryRedirectArtifactAsync(coords, _svc.Blobs.Registry, storeKey, row.SizeBytes, BlobOrigins.FromColumn(row.Origin), ct);
         Stream? stream = null;
         if (redirect is null)
         {
-            stream = await _svc.Blobs.GetAsync(storeKey, ct);
+            stream = await _svc.Blobs.Registry.GetAsync(storeKey, ct);
             if (stream is null)
             {
                 return NotFound();
@@ -636,13 +636,14 @@ public sealed partial class MavenController : OrgScopedControllerBase
     /// never a checksum sidecar, which is rendered from stored columns). A SNAPSHOT is streamed:
     /// the literal <c>-SNAPSHOT</c> name is an alias that moves to each new timestamped build, so
     /// it is not an immutable artefact, and its timestamped builds are left with it rather than
-    /// redirected on a rule a reader has to parse the filename to see.
+    /// redirected on a rule a reader has to parse the filename to see. <paramref name="tier"/> is
+    /// the tier holding the artifact's bytes.
     /// </summary>
     private async Task<IActionResult?> TryRedirectArtifactAsync(
-        MavenCoordinates coords, string storeKey, long sizeBytes, BlobOrigin origin, CancellationToken ct)
+        MavenCoordinates coords, IBlobStore tier, string storeKey, long sizeBytes, BlobOrigin origin, CancellationToken ct)
         => coords.IsSnapshot || _svc.Presign is not { } presign
             ? null
-            : await presign.TryRedirectAsync(HttpContext, _svc.Blobs, storeKey, sizeBytes, origin, "maven", ct);
+            : await presign.TryRedirectAsync(HttpContext, tier, storeKey, sizeBytes, origin, "maven", ct);
 
     /// <summary>
     /// Handles a Maven artifact cache miss by fetching from the org's configured upstream
@@ -782,7 +783,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // and only when the operator opted into PGP verification.
         byte[] artifactBytes;
         // blobkey-ok: result.BlobKey is BlobKeys.Proxy(sha256) from the fetch; StoreKey routes it.
-        await using (var blob = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(result.BlobKey), ct)
+        await using (var blob = await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(result.BlobKey), ct)
             ?? throw new InvalidOperationException($"Blob {result.BlobKey} vanished before signature verification."))
         {
             using var ms = result.SizeBytes is > 0 and <= int.MaxValue
@@ -836,7 +837,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // FetchArtifactAsync); OpenAsync is only consulted for licence extraction or a
         // non-sha256 re-verify, neither of which Maven requests, so it stays unused here.
         var blob = new BlobHandle(result.BlobKey, result.Sha256, result.SizeBytes,
-            async openCt => await _svc.Blobs.GetAsync(BlobKeys.StoreKey(result.BlobKey), openCt)
+            async openCt => await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(result.BlobKey), openCt)
                 ?? throw new InvalidOperationException(
                     $"Blob {result.BlobKey} vanished between fetch and serve."));
 
@@ -937,7 +938,7 @@ public sealed partial class MavenController : OrgScopedControllerBase
         // Serve by streaming the cached blob straight to the response — the artifact never
         // re-enters managed memory on the serve path.
         // blobkey-ok: result.BlobKey is BlobKeys.Proxy(sha256) from the fetch; StoreKey routes it.
-        var serveStream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(result.BlobKey), ct)
+        var serveStream = await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(result.BlobKey), ct)
             ?? throw new InvalidOperationException($"Blob {result.BlobKey} vanished between fetch and serve.");
         Response.Headers["X-Cache"] = "MISS";
         return File(serveStream, ContentTypeFor(resolvedCoords.Extension), resolvedCoords.Filename);
@@ -1154,7 +1155,7 @@ public sealed record MavenControllerServices(
     TokenRepository Tokens,
     AuditRepository Audit,
     OrgRepository Orgs,
-    IBlobStore Blobs,
+    TieredBlobStorage Blobs,
     IMetadataStore Db,
     MavenUpstreamFetcher Upstream,
     IConfiguration Config,

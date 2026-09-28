@@ -2390,6 +2390,8 @@
         "viewJobsLink": "Voir toutes les tâches →",
         "stagingLabel": "Disque intermédiaire",
         "stagingLowDetail": "{free} libres sur {total} — les récupérations proxy peuvent échouer",
+        "cacheSizeLabel": "Taille du cache proxy",
+        "cacheSizeAboveThresholdDetail": "{size} dépasse le seuil configuré de {threshold} — voir Paramètres → Instance pour l'ajuster",
         "ageRelative": {
           "justNow": "à l'instant",
           "minutesAgo": "il y a {n}m",
@@ -2583,6 +2585,7 @@
         "egress": "Sortie d'artefacts",
         "metadata": "Sortie de métadonnées",
         "storage": "Stockage facturable (moy.)",
+        "cacheStorage": "Stockage cache facturable (moy.)",
         "snapshot": "Dernier instantané",
         "requests": "Requêtes mesurées",
         "metadataRequests": "Requêtes de métadonnées",
@@ -2594,6 +2597,7 @@
         "redirect": "Livré par redirection",
         "metadata": "Sortie de métadonnées",
         "storage": "Stockage facturable (moy.)",
+        "cacheStorage": "Stockage cache facturable (moy.)",
         "requests": "Requêtes mesurées",
         "metadataRequests": "Requêtes de métadonnées"
       },
@@ -2625,7 +2629,7 @@
         "billable": "Facturable",
         "hosted": "Hébergé",
         "oci": "OCI téléversé",
-        "cache": "Attribué au cache",
+        "cache": "Stockage cache facturable",
         "capturedAt": "Capturé le {date}",
         "none": "Aucun instantané de stockage capturé pour l'instant."
       },
@@ -2804,7 +2808,8 @@
         "gcSchedule": "Planification GC (cron)",
         "siemMaxLookbackDays": "Lookback SIEM max (jours)",
         "defaultStorageQuotaBytes": "Quota de stockage par défaut — nouveaux locataires",
-        "maxActiveTokensPerTenant": "Jetons actifs max par locataire"
+        "maxActiveTokensPerTenant": "Jetons actifs max par locataire",
+        "cacheSizeWarnBytes": "Seuil d'alerte de taille du cache"
       },
       "placeholders": {
         "string": "non défini",
@@ -2824,7 +2829,8 @@
         "gcSchedule": "0 3 * * * (03:00 UTC, quotidien)",
         "siemMaxLookbackDays": "90 jours",
         "defaultStorageQuotaBytes": "illimité (non défini — aucun quota appliqué aux nouveaux locataires)",
-        "maxActiveTokensPerTenant": "1000 jetons"
+        "maxActiveTokensPerTenant": "1000 jetons",
+        "cacheSizeWarnBytes": "500 Go — 0 désactive l'alerte"
       },
       "save": "Enregistrer",
       "saving": "Enregistrement…",

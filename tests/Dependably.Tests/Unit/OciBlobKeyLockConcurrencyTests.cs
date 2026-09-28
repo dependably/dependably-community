@@ -432,7 +432,6 @@ public sealed class OciBlobKeyLockConcurrencyTests : IAsyncLifetime
             Blocklist: null!,
             Audit: _audit,
             Guard: new OrgAccessGuard(_db, TestProblems.Create()),
-            Blobs: _registry,
             BlobStorage: new TieredBlobStorage(_cache, _registry),
             OrphanBlobs: new OciOrphanBlobDeleter(_db, new TieredBlobStorage(_cache, _registry), sharedLock),
             Config: null!,

@@ -132,4 +132,84 @@ public sealed class ClaimsPurgeSharedBlobTests
 
         Assert.False(await b.Blobs.ExistsAsync(hostedKey, default));
     }
+    [Fact]
+    public async Task LocalOnlyPurge_SplitTiers_ProxyBlobsComeOffTheCacheTier()
+    {
+        // With the tiers on separate stores, a proxied blob lives in the cache tier. Both proxy
+        // loops — the cache-plane row the org held and the legacy content-addressed proxy/ key —
+        // must delete there; a delete aimed at the registry tier is a no-op that strands the
+        // bytes. A copy of each key in the registry tier pins that the purge never reaches it.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        s.WithSplitTiers();
+        var b = await s.BuildAsync();
+
+        string cachePlaneKey = BlobKeys.Proxy(SharedSha);
+        string legacyKey = BlobKeys.Proxy(SoloSha);
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact
+                    (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes,
+                     first_cached_at, last_accessed_at)
+                VALUES ('ca-split', 'npm', 'leftpad', '1.0.0', 'leftpad-1.0.0.tgz', @cachePlaneKey, @sha, 3,
+                        '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+                """,
+                new { cachePlaneKey, sha = SharedSha });
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO tenant_artifact_access
+                    (org_id, cache_artifact_id, first_accessed_at, last_accessed_at, access_count)
+                VALUES (@orgId, 'ca-split', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)
+                """,
+                new { orgId = b.PrimaryOrgId });
+        }
+
+        string packageId = await PackageSeeder.InsertAsync(b.Db, b.PrimaryOrgId, "npm", "leftpad", isProxy: true);
+        await SeedLegacyProxyVersionAsync(b, packageId, "2.0.0", legacyKey);
+
+        foreach (string key in new[] { cachePlaneKey, legacyKey })
+        {
+            await b.CacheBlobs.PutAsync(key, new MemoryStream([1, 2, 3]), default);
+            await b.Blobs.PutAsync(key, new MemoryStream([1, 2, 3]), default);
+        }
+
+        var result = await b.ClaimsController.Create(
+            new CreateClaimRequest("npm", "leftpad", "local_only", "confusion defence"),
+            CancellationToken.None);
+        Assert.IsType<CreatedResult>(result);
+
+        Assert.False(await b.CacheBlobs.ExistsAsync(cachePlaneKey, default), "the cache-plane blob is still in the cache tier");
+        Assert.False(await b.CacheBlobs.ExistsAsync(legacyKey, default), "the legacy proxy blob is still in the cache tier");
+        Assert.True(await b.Blobs.ExistsAsync(cachePlaneKey, default), "the purge reached into the registry tier");
+        Assert.True(await b.Blobs.ExistsAsync(legacyKey, default), "the purge reached into the registry tier");
+    }
+
+    [Fact]
+    public async Task LocalOnlyPurge_SplitTiers_HostedKeyComesOffTheRegistryTier()
+    {
+        // The twin: a hosted/ key names published bytes, which live in the registry tier, and the
+        // cache tier is left alone.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        s.WithSplitTiers();
+        var b = await s.BuildAsync();
+
+        string hostedKey = BlobKeys.Hosted(b.PrimaryOrgId, "npm", "leftpad", "3.0.0", "leftpad-3.0.0.tgz");
+        string packageId = await PackageSeeder.InsertAsync(b.Db, b.PrimaryOrgId, "npm", "leftpad", isProxy: true);
+        await SeedLegacyProxyVersionAsync(b, packageId, "3.0.0", hostedKey);
+        await b.Blobs.PutAsync(hostedKey, new MemoryStream([7, 8, 9]), default);
+        await b.CacheBlobs.PutAsync(hostedKey, new MemoryStream([7, 8, 9]), default);
+
+        var result = await b.ClaimsController.Create(
+            new CreateClaimRequest("npm", "leftpad", "local_only", "confusion defence"),
+            CancellationToken.None);
+        Assert.IsType<CreatedResult>(result);
+
+        Assert.False(await b.Blobs.ExistsAsync(hostedKey, default), "the hosted blob is still in the registry tier");
+        Assert.True(await b.CacheBlobs.ExistsAsync(hostedKey, default), "the hosted delete reached into the cache tier");
+    }
 }

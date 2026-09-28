@@ -47,6 +47,31 @@ public sealed class UsageCapEnforcementMiddlewareTests
         return ctx;
     }
 
+    // The routed endpoint built from a real controller action, as MVC builds it: the action
+    // descriptor plus every attribute the action declares, so a test exercises the markers the
+    // action actually carries rather than a hand-built one. controller overrides the descriptor's
+    // controller type (the action's declaring type by default).
+    private static DefaultHttpContext Request(
+        string method, string path, string posture, string status, MethodInfo action, Type? controller = null)
+    {
+        var ctx = Request(method, path, posture, status);
+        var metadata = new List<object>
+        {
+            new ControllerActionDescriptor
+            {
+                ControllerTypeInfo = (controller ?? action.DeclaringType!).GetTypeInfo(),
+                MethodInfo = action,
+            },
+        };
+        metadata.AddRange(action.GetCustomAttributes(inherit: true));
+        ctx.SetEndpoint(new Endpoint(_ => Task.CompletedTask, new EndpointMetadataCollection(metadata), "test"));
+        return ctx;
+    }
+
+    private static MethodInfo NpmAction(string name) =>
+        typeof(Dependably.Api.NpmController).GetMethod(name)
+        ?? throw new InvalidOperationException($"NpmController.{name} not found");
+
     private static async Task<(bool Reached, DefaultHttpContext Ctx)> RunAsync(DefaultHttpContext ctx, string? infoUrl = null)
     {
         bool reached = false;
@@ -174,6 +199,50 @@ public sealed class UsageCapEnforcementMiddlewareTests
     public async Task A_non_active_status_wins_over_the_usage_posture()
     {
         var (reached, ctx) = await RunAsync(Request("PUT", "/npm/left-pad", UsagePostures.UploadsRefused, status: "read_only"));
+
+        Assert.False(reached);
+        Assert.Equal(StatusCodes.Status423Locked, ctx.Response.StatusCode);
+        Assert.Equal("ReadOnlyWrite", Body(ctx).GetProperty("reason").GetString());
+    }
+
+    [Theory]
+    [InlineData(nameof(Dependably.Api.NpmController.UnpublishRevPut), "/npm/left-pad/-rev/3-abc")]
+    [InlineData(nameof(Dependably.Api.NpmController.UnpublishRevPutScoped), "/npm/@acme/left-pad/-rev/3-abc")]
+    public async Task The_npm_unpublish_prune_PUT_is_admitted_under_uploads_refused(string action, string path)
+    {
+        var (reached, _) = await RunAsync(Request("PUT", path, UsagePostures.UploadsRefused, "active", NpmAction(action)));
+
+        Assert.True(reached);
+    }
+
+    [Theory]
+    [InlineData(nameof(Dependably.Api.NpmController.UnpublishRevPut), "/npm/left-pad/-rev/3-abc")]
+    [InlineData(nameof(Dependably.Api.NpmController.UnpublishRevPutScoped), "/npm/@acme/left-pad/-rev/3-abc")]
+    public async Task The_npm_unpublish_prune_PUT_is_admitted_under_downloads_throttled_too(string action, string path)
+    {
+        var (reached, _) = await RunAsync(Request("PUT", path, UsagePostures.DownloadsThrottled, "active", NpmAction(action)));
+
+        Assert.True(reached);
+    }
+
+    [Theory]
+    [InlineData(nameof(Dependably.Api.NpmController.Publish), "/npm/left-pad")]
+    [InlineData(nameof(Dependably.Api.NpmController.PublishScoped), "/npm/@acme/left-pad")]
+    public async Task An_ordinary_npm_publish_PUT_built_from_its_real_action_stays_refused(string action, string path)
+    {
+        var (reached, ctx) = await RunAsync(Request("PUT", path, UsagePostures.UploadsRefused, "active", NpmAction(action)));
+
+        Assert.False(reached);
+        Assert.Equal(StatusCodes.Status402PaymentRequired, ctx.Response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(nameof(Dependably.Api.NpmController.UnpublishRevPut), "/npm/left-pad/-rev/3-abc", UsagePostures.Normal)]
+    [InlineData(nameof(Dependably.Api.NpmController.UnpublishRevPutScoped), "/npm/@acme/left-pad/-rev/3-abc", UsagePostures.UploadsRefused)]
+    public async Task The_npm_unpublish_prune_PUT_is_still_refused_under_read_only(string action, string path, string posture)
+    {
+        // read_only refuses deletes as well as uploads, so the usage-cap admission does not reach it.
+        var (reached, ctx) = await RunAsync(Request("PUT", path, posture, "read_only", NpmAction(action)));
 
         Assert.False(reached);
         Assert.Equal(StatusCodes.Status423Locked, ctx.Response.StatusCode);

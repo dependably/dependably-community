@@ -96,13 +96,18 @@ public sealed class UsageMeteringPostgresTests
         // packages 1 + oci_blobs 2 + tenant_artifact_access 1 + usage_events 3.
         Assert.Equal(7L, o1.DbRowCount);
 
+        var dailyMarks = await rollups.GetDailyAsync("o1", Day, Day.AddDays(1));
+        Assert.Equal(o1.BillableBytes, dailyMarks.Single(r => r.Meter == UsageMeters.StorageBytes).Quantity);
+        Assert.Equal(
+            o1.CacheAttributedBytes, dailyMarks.Single(r => r.Meter == UsageMeters.CacheStorageBytes).Quantity);
+
         var empty = await snapshots.GetAsync("o2", Day);
         Assert.NotNull(empty);
         Assert.Equal(0L, empty.DbRowCount);
         Assert.Equal(0L, empty.ArtifactCount);
 
         var reports = new UsageReportRepository(store);
-        foreach (string sort in new[] { "requestCount", "metadataRequestCount", "artifactCount", "dbRowCount" })
+        foreach (string sort in new[] { "requestCount", "metadataRequestCount", "artifactCount", "dbRowCount", "cacheStorageBytes" })
         {
             var (items, total) = await reports.ListFleetUsageAsync(Day, Day.AddDays(1), sort, "desc", 50, 0);
             Assert.Equal(2, total);
@@ -115,10 +120,40 @@ public sealed class UsageMeteringPostgresTests
         Assert.Equal(1L, row.MetadataRequestCount);
         Assert.Equal(3L, row.SnapshotArtifactCount);
         Assert.Equal(7L, row.SnapshotDbRowCount);
+        Assert.Equal(o1.CacheAttributedBytes, row.CacheStorageBytes);
 
         var totals = await reports.GetFleetTotalsAsync(Day, Day.AddDays(1));
         Assert.Equal(2L, totals.RequestCount);
         Assert.Equal(1L, totals.MetadataRequestCount);
+        Assert.Equal(o1.CacheAttributedBytes, totals.CacheStorageBytes);
+
+        // A later capture the same day replaces the snapshot's figures in place and never lowers
+        // the day's storage mark.
+        Assert.Equal(22L, o1.BillableBytes);
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync("DELETE FROM oci_blobs WHERE org_id = 'o1' AND origin = 'uploaded'");
+        }
+
+        Assert.Equal(2, await snapshots.CaptureAsync(Day, T0.AddHours(6)));
+
+        var recaptured = await snapshots.GetAsync("o1", Day);
+        Assert.NotNull(recaptured);
+        Assert.Equal(20L, recaptured.BillableBytes);
+        Assert.Equal(T0.AddHours(6).ToUtcIso(), recaptured.CapturedAt);
+
+        var mark = Assert.Single(
+            await rollups.GetDailyAsync("o1", Day, Day.AddDays(1)),
+            r => r.Meter == UsageMeters.StorageBytes);
+        Assert.Equal(22L, mark.Quantity);
+
+        await using (var conn = await store.OpenAsync())
+        {
+            long snapshotRows = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM storage_snapshot WHERE day_utc = @day",
+                new { day = UsageRollupRepository.DayLabel(Day) });
+            Assert.Equal(2L, snapshotRows);
+        }
     }
 
     private static UsageEvent Event(string meter, long bytes, DateTimeOffset at) =>

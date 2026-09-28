@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Dependably.Infrastructure.Alerts;
 using Dependably.Infrastructure.Webhooks;
+using Dependably.Security;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 
@@ -79,6 +80,7 @@ public sealed partial class SystemController
                 enabled = req.Enabled,
                 webhookRotated = !string.IsNullOrEmpty(req.WebhookUrl),
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(await BuildSlackConfigViewAsync(ct));

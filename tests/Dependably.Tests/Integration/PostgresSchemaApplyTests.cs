@@ -374,6 +374,46 @@ public sealed class PostgresSchemaApplyTests
         await initializer.InitializeAsync();
 
         Assert.Equal(before, await ViewOidsAsync(pg.Store));
+        // The option is carried by CREATE OR REPLACE itself: the OIDs are unchanged, so the replace
+        // path (not the drop+create fallback) is what left every view security_invoker.
+        Assert.Equal(AllReadModelViews, await SecurityInvokerViewsAsync(pg.Store));
+    }
+
+    /// <summary>
+    /// The views are shared database objects, so their options cannot depend on the booting node's
+    /// row-level-security mode: <see cref="LivePostgresReset"/> boots with row-level security off,
+    /// and every read-model view must still come out security_invoker. A node that omitted the option
+    /// would strip it for every enforced replica sharing the database.
+    /// </summary>
+    [Fact]
+    public async Task PlainBoot_CreatesSecurityInvokerViews()
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        Assert.False(pg.Store.RowLevelSecurity.Enforced);
+
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        var views = await SecurityInvokerViewsAsync(pg.Store);
+        Assert.Equal(4, views.Count);
+        Assert.Equal(AllReadModelViews, views);
+    }
+
+    private static readonly SortedSet<string> AllReadModelViews = new(StringComparer.Ordinal)
+    {
+        "artifact_inventory", "artifact_license", "org_billable_storage_bytes", "org_storage_bytes",
+    };
+
+    private static async Task<SortedSet<string>> SecurityInvokerViewsAsync(NpgsqlMetadataStore store)
+    {
+        await using var conn = await store.OpenAsync();
+        var names = await conn.QueryAsync<string>(
+            """
+            SELECT c.relname
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema() AND c.relkind = 'v'
+              AND COALESCE('security_invoker=true' = ANY (c.reloptions), false)
+            """);
+        return new SortedSet<string>(names, StringComparer.Ordinal);
     }
 
     /// <summary>

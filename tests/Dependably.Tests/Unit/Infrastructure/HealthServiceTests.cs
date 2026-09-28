@@ -24,6 +24,11 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// </list>
 /// All time reads go through <see cref="FakeTimeProvider"/>; no DateTime.UtcNow.
 /// Seed offsets are kept far from threshold boundaries.
+///
+/// The cache-size threshold flag is derived entirely from instance_settings rows
+/// (<c>cache_size_alert_crossed</c> / <c>cache_size_last_bytes</c> /
+/// <c>cache_size_last_measured_at</c>) that <c>CacheSizeAlertService</c> persists — this class
+/// never touches <see cref="DependablyMeter"/>, so no meter-isolation collection is needed here.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class HealthServiceTests : IAsyncLifetime
@@ -47,7 +52,7 @@ public sealed class HealthServiceTests : IAsyncLifetime
 
         var blobs = new InMemoryBlobStore();
         var sp = new ServiceCollection().BuildServiceProvider();
-        _readiness = new ReadinessAggregator(_db, blobs, sp);
+        _readiness = new ReadinessAggregator(_db, new TieredBlobStorage(blobs, blobs), sp);
 
         _jobRuns = new BackgroundJobRunRepository(_db);
         _statsSnapshots = new StatsSnapshotRepository(_db);
@@ -480,6 +485,136 @@ public sealed class HealthServiceTests : IAsyncLifetime
         // Age should be ~20 minutes (1200 seconds). Seed is well above 0 and well below the threshold.
         Assert.True(job.AgeSeconds is >= 1199 and <= 1210,
             $"Unexpected ageSeconds: {job.AgeSeconds}");
+    }
+
+    // ── Cache size threshold flag ──────────────────────────────────────────────────
+    // HealthService never measures the cache figure itself — CacheSizeLastBytes/
+    // CacheSizeLastMeasuredAt just reflect what CacheSizeAlertService last persisted. But
+    // CacheAboveThreshold is computed LIVE from the current threshold against that last measured
+    // size, never from the sweep's own cache_size_alert_crossed dedup marker — that flag only
+    // changes on a state transition, so it would otherwise go stale the moment the operator
+    // raises/zeroes the threshold or disables the job, with nothing left running to clear it.
+
+    [Fact]
+    public async Task GetReportAsync_LastBytesAboveThreshold_FlagsCacheAboveThreshold_AndDegradesOverall()
+    {
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+        await _orgs.SetInstanceSettingAsync("cache_size_warn_bytes", "1000");
+        await _orgs.SetInstanceSettingAsync("cache_size_last_bytes", "1500");
+        await _orgs.SetInstanceSettingAsync("cache_size_last_measured_at", Now.ToUtcIso());
+
+        var report = await BuildService(clock).GetReportAsync(CancellationToken.None);
+
+        Assert.True(report.Storage.CacheAboveThreshold);
+        Assert.Equal(1000, report.Storage.CacheSizeWarnBytes);
+        Assert.Equal(1500, report.Storage.CacheSizeLastBytes);
+        Assert.Equal(Now, report.Storage.CacheSizeLastMeasuredAt);
+        Assert.Equal("degraded", report.Overall);
+    }
+
+    [Fact]
+    public async Task GetReportAsync_LastBytesBelowThreshold_FlagIsFalse()
+    {
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+        await _orgs.SetInstanceSettingAsync("cache_size_warn_bytes", "1000");
+        await _orgs.SetInstanceSettingAsync("cache_size_last_bytes", "500");
+
+        var report = await BuildService(clock).GetReportAsync(CancellationToken.None);
+
+        Assert.False(report.Storage.CacheAboveThreshold);
+        Assert.Equal(500, report.Storage.CacheSizeLastBytes);
+        Assert.Equal("healthy", report.Overall);
+    }
+
+    [Fact]
+    public async Task GetReportAsync_BeforeFirstMeasurement_FlagFalse_AndLastBytesIsNullNotZero()
+    {
+        // Nothing has been persisted yet (CacheSizeAlertService has not ticked). The rollup must
+        // not fabricate a measured value — CacheSizeLastBytes/LastMeasuredAt are null, not 0.
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+
+        var report = await BuildService(clock).GetReportAsync(CancellationToken.None);
+
+        Assert.False(report.Storage.CacheAboveThreshold);
+        Assert.Null(report.Storage.CacheSizeLastBytes);
+        Assert.Null(report.Storage.CacheSizeLastMeasuredAt);
+        Assert.Equal("healthy", report.Overall);
+    }
+
+    [Fact]
+    public async Task GetReportAsync_ThresholdExplicitlyZero_StaleCrossedFlagIgnored_FlagIsFalse()
+    {
+        // The crossed flag is stale from before the operator disabled the alert (set threshold to
+        // 0) — CacheSizeAlertService itself has not ticked since, so the flag still says "1". The
+        // live threshold must win: 0 disables the alert regardless of the stale marker.
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+        await _orgs.SetInstanceSettingAsync("cache_size_alert_crossed", "1");
+        await _orgs.SetInstanceSettingAsync("cache_size_warn_bytes", "0");
+        await _orgs.SetInstanceSettingAsync("cache_size_last_bytes", "999999999999");
+
+        var report = await BuildService(clock).GetReportAsync(CancellationToken.None);
+
+        Assert.False(report.Storage.CacheAboveThreshold);
+        Assert.Equal("healthy", report.Overall);
+    }
+
+    [Fact]
+    public async Task GetReportAsync_ThresholdRaisedAboveLastMeasurement_StaleCrossedFlagIgnored_FlagIsFalse()
+    {
+        // The crossed flag is stale from a crossing at a lower threshold; the operator has since
+        // raised it above the last measured size. CacheSizeAlertService has not ticked since (the
+        // flag still says "1"), but the live comparison must report not-above-threshold.
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+        await _orgs.SetInstanceSettingAsync("cache_size_alert_crossed", "1");
+        await _orgs.SetInstanceSettingAsync("cache_size_warn_bytes", "5000");
+        await _orgs.SetInstanceSettingAsync("cache_size_last_bytes", "1500");
+
+        var report = await BuildService(clock).GetReportAsync(CancellationToken.None);
+
+        Assert.False(report.Storage.CacheAboveThreshold);
+        Assert.Equal("healthy", report.Overall);
+    }
+
+    [Fact]
+    public async Task GetReportAsync_CacheSizeAlertJobDisabled_FlagIsFalse_EvenAboveThreshold()
+    {
+        // The sweep that would keep cache_size_last_bytes fresh is not running at all (disabled by
+        // name, or AIR_GAPPED, or edge mode — all funnel through IsJobDisabled). Reporting "above
+        // threshold" off a figure nothing is updating would be a false positive that never clears
+        // itself; the rollup reports false outright instead.
+        var clock = TestTime.Frozen(Now);
+        foreach (string jobName in HealthService.RunRowJobs)
+        {
+            await RecordJobRunAsync(jobName, "success", Now.AddMinutes(-5));
+        }
+        await _orgs.SetInstanceSettingAsync("cache_size_warn_bytes", "1000");
+        await _orgs.SetInstanceSettingAsync("cache_size_last_bytes", "1500");
+
+        var svc = BuildServiceWithAirGap(clock, isEnabled: false, disabledJobs: ["cache-size-alert"]);
+        var report = await svc.GetReportAsync(CancellationToken.None);
+
+        Assert.False(report.Storage.CacheAboveThreshold);
+        Assert.Equal("healthy", report.Overall);
     }
 
     // ── Overall rollup ────────────────────────────────────────────────────────────

@@ -47,7 +47,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
     private readonly PackageRepository _packages;
     private readonly TokenRepository _tokens;
     private readonly IMetadataStore _db;
-    private readonly IBlobStore _blobs;
+    private readonly TieredBlobStorage _blobs;
     private readonly UpstreamRegistryResolver _registries;
     private readonly CargoMetadataRepository _cargoMeta;
     private readonly IPublicUrlBuilder _urls;
@@ -105,7 +105,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
         PackageRepository packages,
         TokenRepository tokens,
         IMetadataStore db,
-        IBlobStore blobs,
+        TieredBlobStorage blobs,
         UpstreamRegistryResolver registries,
         CargoMetadataRepository cargoMeta,
         IPublicUrlBuilder urls,

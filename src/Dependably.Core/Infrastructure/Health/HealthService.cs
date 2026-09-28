@@ -41,6 +41,9 @@ public sealed class HealthService
             ["usage-rollup-daily"] = TimeSpan.FromHours(36),
             ["usage-storage-snapshot"] = TimeSpan.FromHours(36),
             ["usage-reconcile-weekly"] = TimeSpan.FromDays(9),
+            // Hourly job (CACHE_SIZE_ALERT_SCHEDULE default); 3h tolerates one missed occurrence,
+            // matching usage-rollup-hourly's own hourly-cadence threshold.
+            ["cache-size-alert"] = TimeSpan.FromHours(3),
         };
 
     // Default staleness threshold for any registry job not in JobStalenessThresholds.
@@ -76,6 +79,7 @@ public sealed class HealthService
             "usage-rollup-daily",
             "usage-storage-snapshot",
             "usage-reconcile-weekly",
+            "cache-size-alert",
         };
 
     private readonly ReadinessAggregator _readiness;
@@ -148,6 +152,43 @@ public sealed class HealthService
         bool stagingBelowThreshold = stagingTotal > 0
             && stagingAvailable < stagingTotal / 10; // < 10% free
 
+        // Never re-measured here: CacheSizeAlertService is the only writer of the cache-tier
+        // figure (a DB-derived sum — see its own doc comment for why that is not
+        // dependably.blob_store.size_bytes{tier="cache"}), and this rollup only reads the last
+        // bytes it persisted. cache_size_warn_bytes falls back to InstanceSettingDefaults when
+        // absent/unparseable, never to "disabled" — see ParseCacheSizeWarnBytes. Before the sweep's
+        // first tick, cache_size_last_bytes is absent: reported as not-above-threshold with no
+        // measured value, rather than a fabricated zero.
+        // Key names are repeated string literals rather than a shared constant, matching every
+        // other instance_settings key in this codebase (e.g. "max_active_tokens_per_tenant") — and
+        // the only alternative, referencing CacheSizeAlertService's constants directly, would make
+        // Dependably.Core (this file) depend on Dependably.Management, which the assembly split
+        // forbids.
+        long cacheSizeWarnBytes = InstanceSettingDefaults.ParseCacheSizeWarnBytes(
+            await _orgs.GetInstanceSettingAsync("cache_size_warn_bytes", ct));
+        string? cacheLastBytesRaw = await _orgs.GetInstanceSettingAsync("cache_size_last_bytes", ct);
+        long? cacheSizeLastBytes = cacheLastBytesRaw is not null && long.TryParse(cacheLastBytesRaw, out long lastBytes)
+            ? lastBytes
+            : null;
+        string? cacheLastMeasuredAtRaw = await _orgs.GetInstanceSettingAsync("cache_size_last_measured_at", ct);
+        DateTimeOffset? cacheSizeLastMeasuredAt =
+            cacheLastMeasuredAtRaw is not null && DateTimeOffset.TryParse(cacheLastMeasuredAtRaw, out var lastMeasuredAt)
+                ? lastMeasuredAt
+                : null;
+
+        // Deliberately NOT derived from instance_settings.cache_size_alert_crossed: that flag is
+        // CacheSizeAlertService's own "have I already alerted for this crossing" dedup marker, and
+        // only changes on a state *transition* — it goes stale the moment the operator disables the
+        // sweep, disables the whole job, or raises/zeroes the threshold, and nothing would ever
+        // clear it again. This rollup instead compares the live configured threshold against the
+        // most recently measured size, and reports not-above-threshold outright when the sweep that
+        // would keep the figure fresh is not running at all (mirroring the same comparison
+        // CacheSizeAlertService's own tick makes, including its >= operator).
+        bool cacheAboveThreshold = !_airGap.IsJobDisabled("cache-size-alert")
+            && cacheSizeWarnBytes > 0
+            && cacheSizeLastBytes is long cacheBytesForThreshold
+            && cacheBytesForThreshold >= cacheSizeWarnBytes;
+
         // ── Tenant snapshots ─────────────────────────────────────────────────
         // xtenant: system-admin cross-tenant operator view — counting stale snapshots across all tenants.
         int staleSnapshotCount = await CountStaleSnapshotsAsync(now, ct);
@@ -166,7 +207,8 @@ public sealed class HealthService
         // suspectAnchorCount is deliberately absent from this expression. A suspect trust anchor
         // is a latent audit finding an operator resolves by hand, not a live outage — the same
         // visible-but-non-degrading treatment Tenants.NeedAttention gets.
-        bool degraded = anySoftDepError || anyJobBad || stagingBelowThreshold || staleSnapshotCount > 0;
+        bool degraded = anySoftDepError || anyJobBad || stagingBelowThreshold || staleSnapshotCount > 0
+            || cacheAboveThreshold;
 
         string overall = anyRequiredDepError ? "down" : degraded ? "degraded" : "healthy";
 
@@ -178,7 +220,11 @@ public sealed class HealthService
                 BlobSizesByTier: blobSizes,
                 StagingAvailableBytes: stagingAvailable,
                 StagingUsedBytes: stagingUsed,
-                StagingBelowThreshold: stagingBelowThreshold),
+                StagingBelowThreshold: stagingBelowThreshold,
+                CacheSizeWarnBytes: cacheSizeWarnBytes,
+                CacheAboveThreshold: cacheAboveThreshold,
+                CacheSizeLastBytes: cacheSizeLastBytes,
+                CacheSizeLastMeasuredAt: cacheSizeLastMeasuredAt),
             Tenants: new TenantsSummary(
                 NeedAttention: await CountTenantsNeedingAttentionAsync(ct)),
             TrustAnchors: new TrustAnchorsSummary(SuspectCount: suspectAnchorCount),
@@ -384,7 +430,11 @@ public sealed record StorageStatus(
     IReadOnlyDictionary<string, long> BlobSizesByTier,
     long StagingAvailableBytes,
     long StagingUsedBytes,
-    bool StagingBelowThreshold);
+    bool StagingBelowThreshold,
+    long CacheSizeWarnBytes,
+    bool CacheAboveThreshold,
+    long? CacheSizeLastBytes,
+    DateTimeOffset? CacheSizeLastMeasuredAt);
 public sealed record TenantsSummary(int NeedAttention);
 
 /// <summary>

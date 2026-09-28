@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-28
+
+### Added
+
+- **An instance-wide proxy cache size alert.** An hourly check compares the shared proxy cache
+  against `CACHE_SIZE_WARN_BYTES` (default 500 GB; `0` turns it off, and a system admin can change
+  it from Settings → Instance). The first check over the threshold records a
+  `system.cache_size_threshold_exceeded` audit event and notifies the operator Slack channel; it
+  stays quiet while the cache remains over and re-arms once it drops back under. The last reading
+  also appears in `/api/v1/system/health` and the operator dashboard. `CACHE_SIZE_ALERT_SCHEDULE`
+  sets the check's cron schedule (default `0 * * * *`).
+
+### Changed
+
+- **Anonymous requests no longer spend a tenant's rate-limit budget.** `TENANT_RATE_LIMIT_PERMITS`
+  (and the throttled budget) now counts only traffic the organization serves: every request while
+  the org's anonymous pull is on, and otherwise only requests that carry one of the org's own
+  credentials, in any form its clients send (Bearer, Basic, the bare token Cargo and Hex send, or
+  `X-NuGet-ApiKey`). Before, anyone who could reach a tenant's host could use up its budget from
+  many addresses and leave the org's own clients with `429`. Requests that are not charged to the
+  tenant still count against the per-address limits.
+
+### Fixed
+
+- **Row-level security no longer turns on over a transaction-mode pooler.** When
+  `DB_ROW_LEVEL_SECURITY` is unset on multi-tenant Postgres and the connection goes through a
+  transaction-mode pooler such as PgBouncer `pool_mode=transaction`, startup now detects it and
+  boots with row-level security off, logging a warning naming the pooler, instead of enforcing it
+  over a pool that can run one tenant's statement on a backend bound to another. An explicit
+  `enforce` refuses to boot there. Startup detects the pooler by holding several tenant connections
+  open and checking that each keeps its database backend and its own tenant from one statement to
+  the next. The 0.13.0 advice to set `DB_ROW_LEVEL_SECURITY=off` behind such a pooler still holds;
+  it is no longer the only thing standing between the default and a wrong tenant.
+- **Postgres read-model views keep `security_invoker` on every boot.** On Postgres 15 and later,
+  `artifact_inventory`, `artifact_license`, `org_storage_bytes`, and `org_billable_storage_bytes`
+  are now always created `security_invoker`, whatever `DB_ROW_LEVEL_SECURITY` says. The views are
+  shared by every node on the database, so a node booting with row-level security off or fallen
+  back, or the `migrate-to-postgres` command, recreated them without the option, and nodes enforcing
+  row-level security then read them with owner rights, across tenants, until an enforcing node
+  next booted. The application's `org_id` filter was unaffected. A role other than the connecting
+  role that reads these views now needs `SELECT` on their base tables. During a blue-green cutover
+  from 0.13.0, a restarted 0.13.0 node still recreates the views without the option until it drains.
+- **The Postgres numeric-column upgrade no longer stalls other queries or dies at 30 seconds.**
+  Widening a database's numeric columns on the first boot after 0.12.x now waits at most 5 seconds
+  for each table's lock, retried with back-off for about three minutes per table, instead of
+  queueing every later query on that table behind it. The rewrite itself is no longer cut off by the
+  30-second command timeout, so a large table completes instead of failing startup. The
+  maintenance-window guidance for this upgrade still applies. SQLite is unaffected.
+- **Split storage tiers serve proxied artefacts from the cache tier.** With the cache and registry
+  tiers on different stores (`_CACHE` / `_REGISTRY` overrides), proxied artefacts were written to
+  the cache tier but several ecosystems (PyPI and Go among them) read, probed and measured them on
+  the registry tier. Those reads missed, so the artefact was fetched from upstream on every request
+  or failed, and its recorded size was 0. Every service now names the tier it reads, and a
+  compliance test keeps it that way. Single-store deployments, the default, were unaffected.
+- **apk index caching is per credential.** The cached `APKINDEX.tar.gz` and `DESCRIPTION` were
+  keyed by upstream URL and path only. When two organizations configured the same apk upstream
+  URL, one with credentials and one without, the second could be served the first one's cached
+  index, or join its in-flight authenticated fetch. The cache and the in-flight fetch now include a
+  hash of the credential.
+- **System audit rows record the source address.** Every request-scoped system-admin audit event
+  (instance settings, admin create, disable, password reset and delete, banners, observability,
+  and the system token events) now records `source_ip`, and token create and revoke record the
+  actor kind. A compliance test now covers system audit writes too.
+
 ## [0.13.0] - 2026-09-27
 
 ### Added

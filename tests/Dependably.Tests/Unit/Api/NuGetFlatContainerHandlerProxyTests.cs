@@ -149,7 +149,7 @@ public sealed class NuGetFlatContainerHandlerProxyTests : IAsyncLifetime
 
         return new NuGetFlatContainerHandler(
             _orgs, _packages, new PackageVersionFilesRepository(_db), cacheArtifact, tenantAccess, _tokens, _audit,
-            serveStoreOverride ?? tiered.Cache, upstreamClient, registries, allowlist, blocklist,
+            serveStoreOverride is null ? tiered : new TieredBlobStorage(serveStoreOverride, serveStoreOverride), upstreamClient, registries, allowlist, blocklist,
             blockGate, vulns, inventory, claimResolver, reserved, proxyFetch, provenance,
             TimeProvider.System, NullLogger<NuGetFlatContainerHandler>.Instance);
     }

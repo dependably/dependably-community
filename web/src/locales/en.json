@@ -2390,6 +2390,8 @@
         "viewJobsLink": "View all jobs →",
         "stagingLabel": "Staging disk",
         "stagingLowDetail": "{free} free of {total} — proxy fetches may fail",
+        "cacheSizeLabel": "Proxy cache size",
+        "cacheSizeAboveThresholdDetail": "{size} exceeds the configured {threshold} threshold — see Settings → Instance to adjust it",
         "ageRelative": {
           "justNow": "just now",
           "minutesAgo": "{n}m ago",
@@ -2583,6 +2585,7 @@
         "egress": "Artefact egress",
         "metadata": "Metadata egress",
         "storage": "Billable storage (avg)",
+        "cacheStorage": "Billable cache storage (avg)",
         "snapshot": "Latest snapshot",
         "requests": "Metered requests",
         "metadataRequests": "Metadata requests",
@@ -2594,6 +2597,7 @@
         "redirect": "Redirect-delivered",
         "metadata": "Metadata egress",
         "storage": "Billable storage (avg)",
+        "cacheStorage": "Billable cache storage (avg)",
         "requests": "Metered requests",
         "metadataRequests": "Metadata requests"
       },
@@ -2625,7 +2629,7 @@
         "billable": "Billable",
         "hosted": "Hosted",
         "oci": "OCI uploaded",
-        "cache": "Cache-attributed",
+        "cache": "Billable cache storage",
         "capturedAt": "Captured {date}",
         "none": "No storage snapshot captured yet."
       },
@@ -2804,7 +2808,8 @@
         "gcSchedule": "GC schedule (cron)",
         "siemMaxLookbackDays": "SIEM max lookback (days)",
         "defaultStorageQuotaBytes": "Default storage quota — new tenants",
-        "maxActiveTokensPerTenant": "Max active tokens per tenant"
+        "maxActiveTokensPerTenant": "Max active tokens per tenant",
+        "cacheSizeWarnBytes": "Cache size warning threshold"
       },
       "placeholders": {
         "string": "unset",
@@ -2824,7 +2829,8 @@
         "gcSchedule": "0 3 * * * (03:00 UTC daily)",
         "siemMaxLookbackDays": "90 days",
         "defaultStorageQuotaBytes": "unlimited (unset — no quota applied to new tenants)",
-        "maxActiveTokensPerTenant": "1000 tokens"
+        "maxActiveTokensPerTenant": "1000 tokens",
+        "cacheSizeWarnBytes": "500 GB — 0 disables the alert"
       },
       "save": "Save",
       "saving": "Saving…",

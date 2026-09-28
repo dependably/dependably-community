@@ -193,7 +193,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
             new NpmProvenanceVerifier(new NpmSignatureKeyStore(new StubPerOrgTrustAnchorStore())));
 
         return new NpmTarballHandler(
-            _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, serveStoreOverride ?? tiered.Cache,
+            _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, serveStoreOverride is null ? tiered : new TieredBlobStorage(serveStoreOverride, serveStoreOverride),
             upstreamClient, allowlist, blocklist, blockGate, claimResolver, reserved,
             proxyFetch, registries, firstFetch, TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
     }

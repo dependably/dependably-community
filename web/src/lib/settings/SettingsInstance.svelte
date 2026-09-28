@@ -17,6 +17,10 @@
   // shown in the placeholder + caption so an operator always sees what will be applied if
   // they leave the field empty. Matches InstanceSettingDefaults.cs after byte→MB conversion.
   const BYTES_PER_MB = 1024 * 1024
+  // Decimal, not binary — matches InstanceSettingDefaults.CacheSizeWarnBytes's own "500 GB
+  // decimal" default (500,000,000,000 bytes), so the field round-trips to exactly that number
+  // rather than drifting through a binary GiB conversion.
+  const BYTES_PER_GB_DECIMAL = 1_000_000_000
   const SETTING_KEYS = [
     { key: 'max_upload_bytes',       labelKey: 'system.settings.labels.maxUploadBytes',      kind: 'mb',     default: '500', defaultHumanKey: 'system.settings.defaults.maxUploadBytes' },
     { key: 'max_upload_bytes_pypi',  labelKey: 'system.settings.labels.maxUploadBytesPyPi',  kind: 'mb',     default: '100', defaultHumanKey: 'system.settings.defaults.maxUploadBytesPyPi' },
@@ -32,6 +36,9 @@
     { key: 'siem_max_lookback_days',            labelKey: 'system.settings.labels.siemMaxLookbackDays',           kind: 'number', default: '90',   defaultHumanKey: 'system.settings.defaults.siemMaxLookbackDays' },
     { key: 'default_storage_quota_bytes',       labelKey: 'system.settings.labels.defaultStorageQuotaBytes',      kind: 'mb',     default: '',     defaultHumanKey: 'system.settings.defaults.defaultStorageQuotaBytes' },
     { key: 'max_active_tokens_per_tenant',      labelKey: 'system.settings.labels.maxActiveTokensPerTenant',      kind: 'number', default: '1000', defaultHumanKey: 'system.settings.defaults.maxActiveTokensPerTenant' },
+    // 0 is a valid, meaningful value here (disables the alert) rather than "unset" — the field
+    // still shows the seeded default as a placeholder, but an operator can explicitly type 0.
+    { key: 'cache_size_warn_bytes',             labelKey: 'system.settings.labels.cacheSizeWarnBytes',            kind: 'gb',     default: '500',  defaultHumanKey: 'system.settings.defaults.cacheSizeWarnBytes' },
   ]
 
   let values = {}, loading = true, error = '', saving = false, savedAt = null
@@ -45,8 +52,10 @@
       for (const k of SETTING_KEYS) {
         const v = raw[k.key]
         if (v === undefined || v === '') { display[k.key] = ''; continue }
-        // Storage is in bytes; surface the value in MB so operators don't read raw byte counts.
-        display[k.key] = k.kind === 'mb' ? String(Number(v) / BYTES_PER_MB) : v
+        // Storage is in bytes; surface the value in MB/GB so operators don't read raw byte counts.
+        display[k.key] = k.kind === 'mb' ? String(Number(v) / BYTES_PER_MB)
+          : k.kind === 'gb' ? String(Number(v) / BYTES_PER_GB_DECIMAL)
+          : v
       }
       values = display
     } catch (e) { error = e.message }
@@ -62,8 +71,8 @@
       const payload = {}
       for (const k of SETTING_KEYS) {
         if (values[k.key] === undefined || values[k.key] === '') continue
-        payload[k.key] = k.kind === 'mb'
-          ? String(Math.round(Number(values[k.key]) * BYTES_PER_MB))
+        payload[k.key] = k.kind === 'mb' ? String(Math.round(Number(values[k.key]) * BYTES_PER_MB))
+          : k.kind === 'gb' ? String(Math.round(Number(values[k.key]) * BYTES_PER_GB_DECIMAL))
           : String(values[k.key])
       }
       await updateSettings(payload)
@@ -90,7 +99,7 @@
               bind:value={values[k.key]}
               placeholder={k.default}
             />
-            {#if k.kind === 'mb'}<span class="unit">MB</span>{/if}
+            {#if k.kind === 'mb'}<span class="unit">MB</span>{:else if k.kind === 'gb'}<span class="unit">GB</span>{/if}
           </div>
           <small class="hint">{$t('system.settings.defaultHint', { values: { value: $t(k.defaultHumanKey) } })}</small>
         </div>

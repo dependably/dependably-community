@@ -207,7 +207,6 @@ public sealed record OrgControllerServices(
     BlocklistRepository Blocklist,
     AuditRepository Audit,
     OrgAccessGuard Guard,
-    IBlobStore Blobs,
     TieredBlobStorage BlobStorage,
     OciOrphanBlobDeleter OrphanBlobs,
     IConfiguration Config,

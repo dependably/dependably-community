@@ -49,6 +49,13 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public Dependably.Infrastructure.Mail.SmtpMailSender? MailSenderOverride { get; init; }
 
+    /// <summary>
+    /// Extra host settings applied after the fixture's rate-limit defaults, so a test can pin an
+    /// instance-level knob (a tight rate-limit budget) and have its value win. Null (default)
+    /// applies nothing.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? Settings { get; init; }
+
     private readonly IntegrationDatabase _db = new();
 
     protected override IHost CreateHost(IHostBuilder _)
@@ -103,6 +110,19 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         builder.WebHost.UseSetting("LOGIN_RATE_LIMIT_PERMITS", "100000");
         builder.WebHost.UseSetting("ANON_RATE_LIMIT_PERMITS", "100000");
         builder.WebHost.UseSetting("MANAGEMENT_RATE_LIMIT_PERMITS", "100000");
+        // The apex usage-report policy partitions per caller; SystemUsageTests fires many usage GETs
+        // as the one system-admin principal against this shared fixture, so the default 30/min
+        // would self-throttle it. Tests that exercise the 429 behaviour set a tight limit through
+        // Settings on a dedicated factory instance.
+        builder.WebHost.UseSetting("USAGE_REPORT_RATE_LIMIT_PERMITS", "100000");
+
+        if (Settings is not null)
+        {
+            foreach (var (key, value) in Settings)
+            {
+                builder.WebHost.UseSetting(key, value);
+            }
+        }
 
         var app = builder.Build();
         Program.ConfigureApp(app);

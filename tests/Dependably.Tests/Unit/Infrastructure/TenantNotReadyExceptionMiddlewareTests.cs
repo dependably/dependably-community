@@ -3,6 +3,7 @@ using Dependably.Infrastructure;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -10,7 +11,9 @@ namespace Dependably.Tests.Unit.Infrastructure;
 public sealed class TenantNotReadyExceptionMiddlewareTests
 {
     private static TenantNotReadyExceptionMiddleware BuildThrowing(TenantNotReadyException ex) =>
-        new(_ => throw ex);
+        new(_ => throw ex, EmptyConfig());
+
+    private static IConfiguration EmptyConfig() => new ConfigurationBuilder().Build();
 
     private static DefaultHttpContext NewContext()
     {
@@ -174,7 +177,7 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
     public async Task NonTenantNotReadyException_DoesNotIntercept()
     {
         // Other exceptions must bubble — middleware is specific to TenantNotReadyException.
-        var mw = new TenantNotReadyExceptionMiddleware(_ => throw new InvalidOperationException("nope"));
+        var mw = new TenantNotReadyExceptionMiddleware(_ => throw new InvalidOperationException("nope"), EmptyConfig());
         var ctx = NewContext();
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => mw.InvokeAsync(ctx));
@@ -194,7 +197,7 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
         });
 
         var mw = new TenantNotReadyExceptionMiddleware(_ =>
-            throw new TenantNotReadyException("t", TenantNotReadyReason.NotFound, "after start"));
+            throw new TenantNotReadyException("t", TenantNotReadyReason.NotFound, "after start"), EmptyConfig());
 
         await Assert.ThrowsAsync<TenantNotReadyException>(() => mw.InvokeAsync(ctx));
         // The pre-existing 200 was not clobbered.
@@ -234,6 +237,62 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
         Assert.False(body.TryGetProperty("tenantId", out _));
     }
 
+    private const string UsageCapInfoUrl = "https://billing.example.com/usage";
+
+    private static IConfiguration ConfigWithInfoUrl() => new ConfigurationBuilder()
+        .AddInMemoryCollection(new Dictionary<string, string?> { ["USAGE_CAP_INFO_URL"] = UsageCapInfoUrl })
+        .Build();
+
+    [Fact]
+    public async Task UsageCapReached_CarriesConfiguredInfoUrl()
+    {
+        // A write-intent GetRegistryAsync (the management-plane import) throws UsageCapReached
+        // through this middleware; the refusal must point at the operator's usage page exactly
+        // like the protocol-plane refusal TenantStatusEnforcementMiddleware writes.
+        var mw = new TenantNotReadyExceptionMiddleware(_ => throw new TenantNotReadyException(
+            "t-capped", TenantNotReadyReason.UsageCapReached, "usage_posture='uploads_refused'"), ConfigWithInfoUrl());
+        var ctx = NewContext();
+
+        await mw.InvokeAsync(ctx);
+
+        Assert.Equal(StatusCodes.Status402PaymentRequired, ctx.Response.StatusCode);
+        Assert.Equal($"<{UsageCapInfoUrl}>; rel=\"help\"", ctx.Response.Headers.Link.ToString());
+        var body = await ReadBodyAsync(ctx);
+        Assert.Equal(UsageCapInfoUrl, body.GetProperty("type").GetString());
+        Assert.Equal("UsageCapReached", body.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task UsageCapReached_WithoutInfoUrl_TypeIsAboutBlank_NoLink()
+    {
+        var mw = BuildThrowing(new TenantNotReadyException(
+            "t-capped", TenantNotReadyReason.UsageCapReached, "usage_posture='uploads_refused'"));
+        var ctx = NewContext();
+
+        await mw.InvokeAsync(ctx);
+
+        Assert.Equal(StatusCodes.Status402PaymentRequired, ctx.Response.StatusCode);
+        Assert.False(ctx.Response.Headers.ContainsKey("Link"));
+        var body = await ReadBodyAsync(ctx);
+        Assert.Equal("about:blank", body.GetProperty("type").GetString());
+    }
+
+    [Fact]
+    public async Task ReadOnlyWrite_WithInfoUrlConfigured_DoesNotCarryIt()
+    {
+        // The info URL describes the usage cap only; a read-only refusal must not borrow it.
+        var mw = new TenantNotReadyExceptionMiddleware(_ => throw new TenantNotReadyException(
+            "t-ro", TenantNotReadyReason.ReadOnlyWrite, "status='read_only'"), ConfigWithInfoUrl());
+        var ctx = NewContext();
+
+        await mw.InvokeAsync(ctx);
+
+        Assert.Equal(StatusCodes.Status423Locked, ctx.Response.StatusCode);
+        Assert.False(ctx.Response.Headers.ContainsKey("Link"));
+        var body = await ReadBodyAsync(ctx);
+        Assert.Equal("about:blank", body.GetProperty("type").GetString());
+    }
+
     [Fact]
     public async Task HappyPath_DoesNotTouchResponse()
     {
@@ -242,7 +301,7 @@ public sealed class TenantNotReadyExceptionMiddlewareTests
         {
             ctx.Response.StatusCode = StatusCodes.Status204NoContent;
             return Task.CompletedTask;
-        });
+        }, EmptyConfig());
         var ctx = NewContext();
 
         await mw.InvokeAsync(ctx);

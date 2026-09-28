@@ -14,7 +14,9 @@ namespace Dependably.Infrastructure;
 /// SAML's <c>/saml/*</c>, so admins can still manage tokens/members and users can still log in),
 /// refusing only a state-changing request routed to a protocol controller (package publish/upload/delete/yank, OCI blob
 /// upload and manifest writes, and the equivalent per-ecosystem write routes). A proxy
-/// cache-fill is a GET, so it stays admitted — it is not billable hosted storage.
+/// cache-fill is a GET, so it stays admitted — it is billed separately as
+/// <c>cache_storage_bytes</c> (never as hosted <c>storage_bytes</c>), and, unlike an upload, is
+/// never refused by a tenant's status or usage posture.
 ///
 /// <para>
 /// An <c>active</c> tenant is also held to its usage caps. Under an <c>orgs.usage_posture</c> of
@@ -22,9 +24,13 @@ namespace Dependably.Infrastructure;
 /// computed hourly from <c>org_usage_caps</c>), a protocol-plane POST/PUT/PATCH is refused with
 /// <see cref="TenantNotReadyReason.UsageCapReached"/>: 402 problem+json linking to
 /// <c>USAGE_CAP_INFO_URL</c> when that is set. DELETE is admitted, because it only lowers usage,
-/// as is a POST that is a query rather than a write (npm's bulk advisory lookup), and reads and
-/// the management plane are untouched. Throttling downloads is the rate limiter's
-/// job, not this gate's. A non-active status is checked first and wins.
+/// as is a non-DELETE action marked <see cref="UsageCapAdmittedWriteAttribute"/> for the same
+/// reason (npm's unpublish prune PUT, the first step of <c>npm unpublish pkg@version</c>) —
+/// identified by endpoint metadata, not path, for the same reason the protocol plane is
+/// classified by endpoint — and a POST that is a query rather than a write (npm's bulk advisory
+/// lookup). Reads and the management plane are untouched. Throttling downloads is the rate
+/// limiter's job, not this gate's. A non-active status is checked first and wins, so a
+/// <c>read_only</c> org still refuses a marked action: that posture refuses deletes too.
 /// </para>
 ///
 /// <para>
@@ -152,18 +158,27 @@ public sealed class TenantStatusEnforcementMiddleware
 
     // The writes a usage cap refuses: a POST/PUT/PATCH routed to a protocol controller (classified
     // by endpoint, so SAML's /saml/acs sign-in POST is management plane), other than a
-    // read-only query POST (ReadOnlyProtocolPosts). DELETE is not among them — removing an
-    // artefact lowers usage, and refusing it would leave an org at its cap no way back under it
-    // short of an operator.
+    // read-only query POST (ReadOnlyProtocolPosts) or an action marked [UsageCapAdmittedWrite].
+    // DELETE is not among them — removing an artefact lowers usage, and refusing it would leave an
+    // org at its cap no way back under it short of an operator. A marked action is admitted for
+    // the same reason: it can only lower usage, but its client sends it with a non-DELETE method
+    // (npm's unpublish prune PUT, without which npm never reaches its tarball DELETE). The marker
+    // is read from the routed endpoint rather than matched on path, because a templated route
+    // such as /npm/{pkg}/-rev/{rev} is the action's identity, not a fixed string.
     private static bool IsProtocolPlaneWrite(HttpContext context) =>
         (HttpMethods.IsPut(context.Request.Method)
          || HttpMethods.IsPatch(context.Request.Method)
          || (HttpMethods.IsPost(context.Request.Method) && !MatchesExactly(context.Request.Path, ReadOnlyProtocolPosts)))
-        && RateLimitPartitions.IsProtocolControllerRequest(context);
+        && RateLimitPartitions.IsProtocolControllerRequest(context)
+        && !IsUsageCapAdmittedWrite(context);
+
+    private static bool IsUsageCapAdmittedWrite(HttpContext context) =>
+        context.GetEndpoint()?.Metadata.GetMetadata<UsageCapAdmittedWriteAttribute>() is not null;
 
     // A read-only org admits a request that either cannot change state (a safe HTTP method reads
-    // on every plane, protocol included — a proxy cache-fill triggered by a GET is not billable
-    // hosted storage) or that is not routed to a protocol controller (org settings, tokens,
+    // on every plane, protocol included — a proxy cache-fill triggered by a GET is billed as
+    // cache_storage_bytes, never as hosted storage_bytes, and read-only status never refuses it)
+    // or that is not routed to a protocol controller (org settings, tokens,
     // members, and login all keep working, including SAML's /saml/acs sign-in POST, which routes
     // outside /api/v1/). The protocol plane is classified by the routed endpoint
     // (RateLimitPartitions.IsProtocolControllerRequest), not by path prefix, for exactly that

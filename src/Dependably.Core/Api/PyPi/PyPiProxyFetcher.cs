@@ -19,7 +19,7 @@ namespace Dependably.Api.PyPiProtocol;
 /// </summary>
 public sealed class PyPiProxyFetcher(
     AuditRepository audit,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     UpstreamClient upstream,
     AllowlistService allowlist,
     BlocklistRepository blocklist,
@@ -275,10 +275,10 @@ public sealed class PyPiProxyFetcher(
             long size;
             await using (stream.ConfigureAwait(false))
             {
-                size = await blobs.GetStagedSizeAsync(stream, BlobKeys.StoreKey(blobKey), ct);
+                size = await blobs.Cache.GetStagedSizeAsync(stream, BlobKeys.StoreKey(blobKey), ct);
             }
             var blob = new BlobHandle(blobKey, knownSha256, size,
-                async openCt => await blobs.GetAsync(blobKey, openCt)
+                async openCt => await blobs.Cache.GetAsync(blobKey, openCt)
                     ?? throw new InvalidOperationException(
                         $"Blob {blobKey} vanished between PutAsync and GetAsync."));
             return new PyPiFetchOutcome(blob, isHit);
@@ -296,7 +296,7 @@ public sealed class PyPiProxyFetcher(
             upstreamUrl, checksumSpec: null, "pypi", orgId, authorizationHeader, ct);
 
         var coldBlob = new BlobHandle(fetched.BlobKey, fetched.Sha256Hex, fetched.SizeBytes,
-            async openCt => await blobs.GetAsync(fetched.BlobKey, openCt)
+            async openCt => await blobs.Cache.GetAsync(fetched.BlobKey, openCt)
                 ?? throw new InvalidOperationException(
                     $"Blob {fetched.BlobKey} vanished between PutAsync and GetAsync."));
         return new PyPiFetchOutcome(coldBlob, IsHit: false);

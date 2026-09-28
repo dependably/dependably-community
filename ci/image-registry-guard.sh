@@ -27,6 +27,8 @@
 # mirror build, so the exclusion is a decision, not an oversight.
 #
 # How a reference is judged, in order:
+#   0. precondition: the DEP_IMAGE_REGISTRY default in .gitlab-ci.yml equals the host pinned
+#      in this script (PINNED_MIRROR_HOST); any disagreement fails before a reference is read
 #   1. begins with the mirror host (prefix, never substring — `<host>.evil.com/x` is not the
 #      mirror), or mentions $DEP_IMAGE_REGISTRY  -> pass
 #   2. is a bare variable expansion -> pass only if that variable is itself declared with a
@@ -49,16 +51,30 @@ cd "$root"
 
 MIRROR_VAR='DEP_IMAGE_REGISTRY'
 
-# Files outside the pipeline (compose) cannot expand a CI variable, so they name the mirror
-# host literally. Read the canonical value out of .gitlab-ci.yml rather than hardcoding it,
-# so overriding the mirror in one place keeps this guard honest. Fail closed when it cannot
-# be read: without the host every literal reference would be judged against a pattern that
-# matches nothing, reddening the pipeline for no reason.
+# Files outside the pipeline (compose, ARG defaults) cannot expand a CI variable, so they name
+# the mirror host literally. The DEP_IMAGE_REGISTRY default is parsed out of .gitlab-ci.yml so
+# those literal references can be judged, and the parse fails closed when it reads nothing:
+# without the host every literal reference would be judged against a pattern that matches
+# nothing. That value comes from the file under audit, so it is cross-checked against the
+# host pinned below and the guard fails on any disagreement. This is the ONLY place the guard
+# examines what DEP_IMAGE_REGISTRY resolves to — rule 1 passes a `${DEP_IMAGE_REGISTRY}/...`
+# reference on the variable's name alone — so without the pin, one edited line in
+# .gitlab-ci.yml would move every image the pipeline pulls and this guard would trust it.
+# The limit: a change editing both files still validates itself. The check turns a one-line
+# drift into a two-file diff that touches this script, which is what a reviewer watches for.
 MIRROR_HOST="$(sed -n 's/^[[:space:]]*DEP_IMAGE_REGISTRY:[[:space:]]*//p' .gitlab-ci.yml 2>/dev/null \
     | head -1 | sed -e 's/[[:space:]].*$//' -e 's/^["'\'']//' -e 's/["'\'']$//')"
 if [ -z "$MIRROR_HOST" ]; then
     echo "image-registry-guard: FAILED — could not read the $MIRROR_VAR default from .gitlab-ci.yml." >&2
     echo "Literal mirror references cannot be recognised without it." >&2
+    exit 1
+fi
+PINNED_MIRROR_HOST='dependably.northwardlabs.ca'
+if [ "$MIRROR_HOST" != "$PINNED_MIRROR_HOST" ]; then
+    echo "image-registry-guard: FAILED — .gitlab-ci.yml's $MIRROR_VAR default ('$MIRROR_HOST')" >&2
+    echo "does not match the host pinned in this guard ('$PINNED_MIRROR_HOST')." >&2
+    echo "A deliberate mirror migration updates PINNED_MIRROR_HOST in ci/image-registry-guard.sh" >&2
+    echo "in the same change; anything else is the guard trusting the file it audits." >&2
     exit 1
 fi
 

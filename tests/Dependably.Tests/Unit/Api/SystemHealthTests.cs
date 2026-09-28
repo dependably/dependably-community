@@ -470,7 +470,7 @@ public sealed class SystemHealthTests
         // Build a real HealthService injecting the test store.
         var blobs = new Dependably.Storage.InMemoryBlobStore();
         var sp = new ServiceCollection().BuildServiceProvider();
-        var readiness = new Dependably.Infrastructure.Health.ReadinessAggregator(b.Db, blobs, sp);
+        var readiness = new Dependably.Infrastructure.Health.ReadinessAggregator(b.Db, new Dependably.Storage.TieredBlobStorage(blobs, blobs), sp);
         var airGap = Substitute.For<IAirGapMode>();
         airGap.IsJobDisabled(Arg.Any<string>()).Returns(false);
         var jobRuns = new BackgroundJobRunRepository(b.Db);
@@ -542,7 +542,7 @@ public sealed class SystemHealthTests
 
         var blobs = new Dependably.Storage.InMemoryBlobStore();
         var sp = new ServiceCollection().BuildServiceProvider();
-        var readiness = new Dependably.Infrastructure.Health.ReadinessAggregator(b.Db, blobs, sp);
+        var readiness = new Dependably.Infrastructure.Health.ReadinessAggregator(b.Db, new Dependably.Storage.TieredBlobStorage(blobs, blobs), sp);
         var airGap = Substitute.For<IAirGapMode>();
         airGap.IsJobDisabled(Arg.Any<string>()).Returns(false);
         var jobRuns = new BackgroundJobRunRepository(b.Db);

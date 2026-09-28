@@ -104,7 +104,7 @@ public sealed class PyPiProxyFetcherUnclassifiedExceptionTests : IAsyncLifetime
             new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
         return new PyPiProxyFetcher(
-            _audit, serveStore, upstreamClient, allowlist, blocklist,
+            _audit, new TieredBlobStorage(serveStore, serveStore), upstreamClient, allowlist, blocklist,
             cacheRecorder, proxyFetch, registries, provenance, NullLogger<PyPiProxyFetcher>.Instance);
     }
 

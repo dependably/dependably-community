@@ -136,7 +136,7 @@ public sealed class RetentionService : ScheduledBackgroundService
     /// </summary>
     public sealed record Dependencies(
         IMetadataStore Db,
-        IBlobStore Blobs,
+        TieredBlobStorage Blobs,
         JwtRevocationRepository JwtRevocations,
         InviteRepository Invites,
         SamlConfigRepository SamlConfig,
@@ -155,7 +155,7 @@ public sealed class RetentionService : ScheduledBackgroundService
         UsageRollupRepository UsageRollups);
 
     private readonly IMetadataStore _db;
-    private readonly IBlobStore _blobs;
+    private readonly TieredBlobStorage _blobs;
     private readonly JwtRevocationRepository _jwtRevocations;
     private readonly InviteRepository _invites;
     private readonly SamlConfigRepository _samlConfig;
@@ -606,7 +606,7 @@ public sealed class RetentionService : ScheduledBackgroundService
     {
         if (!string.Equals(ecosystem, "oci", StringComparison.Ordinal))
         {
-            await _blobs.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
+            await _blobs.Registry.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
             return;
         }
 
@@ -725,7 +725,7 @@ public sealed class RetentionService : ScheduledBackgroundService
                         // shutdown abort between two files of one version — dropping a version's .jar
                         // while its .pom survives. The extra work a cancelled pass takes on is bounded
                         // by one version's file count.
-                        await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
+                        await _blobs.Cache.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
                     }
 
                     // The catalogue row goes either way — for OCI it is metadata over a manifest
@@ -843,7 +843,7 @@ public sealed class RetentionService : ScheduledBackgroundService
 
             foreach (string key in blobKeys)
             {
-                await _blobs.DeleteAsync(BlobKeys.StoreKey(key), ct);
+                await _blobs.Registry.DeleteAsync(BlobKeys.StoreKey(key), ct);
             }
 
             _logger.LogDebug(
@@ -887,7 +887,7 @@ public sealed class RetentionService : ScheduledBackgroundService
 
         // CancellationToken.None for the same reason the shared-key delete below uses it: the
         // version boundary is the checkpoint, and aborting mid-version leaves a partial version.
-        await _blobs.DeleteAsync(BlobKeys.StoreKey(tenantBlobKey), CancellationToken.None);
+        await _blobs.Cache.DeleteAsync(BlobKeys.StoreKey(tenantBlobKey), CancellationToken.None);
     }
 
     // internal (not private) so RetentionServiceCacheExclusionTests can drive it directly — see
@@ -990,7 +990,7 @@ public sealed class RetentionService : ScheduledBackgroundService
                         // CancellationToken.None, unlike the uploaded arm above: the version boundary
                         // is the checkpoint, and honouring ct here would let a shutdown abort between
                         // two files of one version. Bounded by one version's file count.
-                        await _blobs.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
+                        await _blobs.Cache.DeleteAsync(BlobKeys.StoreKey(BlobKey), CancellationToken.None);
                     }
 
                     await conn.ExecuteAsync("DELETE FROM cache_artifact WHERE id = @id", new { id = CacheArtifactId });

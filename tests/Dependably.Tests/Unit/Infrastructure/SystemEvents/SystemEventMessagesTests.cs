@@ -80,6 +80,19 @@ public sealed class SystemEventMessagesTests
     }
 
     [Fact]
+    public void CacheSizeThresholdExceeded_NoTenantOrActor_RendersGenericSystemHealthPointer()
+    {
+        // Raised by CacheSizeAlertService — a capacity threshold crossing, not a tenant or
+        // operator action, so both TenantSlug and Actor are null.
+        string msg = SystemEventMessages.Build(
+            new SystemEventRecord("system.cache_size_threshold_exceeded", null, null, null), RealLocalizer());
+        Assert.Equal(
+            "Dependably [system]: the instance-wide proxy cache exceeded its configured size threshold — see System Health for details.",
+            msg);
+        Assert.DoesNotContain("unknown operator", msg);
+    }
+
+    [Fact]
     public void UnknownAction_FallsBackToGenericTemplate()
     {
         string msg = SystemEventMessages.Build(

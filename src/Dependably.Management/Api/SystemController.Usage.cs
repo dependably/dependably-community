@@ -1,6 +1,7 @@
 using System.Globalization;
 using Dependably.Infrastructure.Usage;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Dependably.Api;
 
@@ -37,14 +38,16 @@ public sealed partial class SystemController
     /// <summary>
     /// GET /api/v1/system/usage — one row per tenant over a date range: artifact egress bytes
     /// (with the redirect-delivered subset broken out), metadata egress bytes, metered request
-    /// counts, average billable storage over the range, the tenant's latest captured storage
-    /// snapshot (bytes, artefact and entry counts, database row count), plus fleet totals
-    /// and a fleet-wide per-ecosystem breakdown. Defaults to the current UTC month to date.
+    /// counts, average billable uploaded and proxy-cache storage over the range, the tenant's
+    /// latest captured storage snapshot (bytes, artefact and entry counts, database row count),
+    /// plus fleet totals and a fleet-wide per-ecosystem breakdown. Defaults to the current UTC
+    /// month to date.
     /// Sortable/paginated server-side; <c>sort</c> is resolved through a closed column allowlist
     /// in <see cref="UsageReportRepository"/>, so an unrecognised value falls back to the default
     /// rather than erroring.
     /// </summary>
     [HttpGet("usage")]
+    [EnableRateLimiting("usage-report")]
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Each parameter is an independently bound query value or [FromServices] repository; a bundling model would " +
             "change the documented OpenAPI parameter list for no gain in cohesion.")]
@@ -98,6 +101,7 @@ public sealed partial class SystemController
     /// across exports, with columns added only at the end.
     /// </summary>
     [HttpGet("usage.csv")]
+    [EnableRateLimiting("usage-report")]
     public async Task<IActionResult> GetFleetUsageCsv(
         [FromServices] UsageReportRepository reports,
         [FromQuery] string? from,
@@ -123,7 +127,7 @@ public sealed partial class SystemController
             "snapshot_oci_uploaded_bytes", "snapshot_cache_attributed_bytes", "snapshot_captured_at", "last_computed_at",
             "request_count", "metadata_request_count", "snapshot_artifact_count", "snapshot_hosted_version_count",
             "snapshot_oci_manifest_count", "snapshot_oci_blob_count", "snapshot_cache_entry_count",
-            "snapshot_db_row_count");
+            "snapshot_db_row_count", "cache_storage_bytes", "cache_mark_days");
         foreach (var row in items)
         {
             CsvWriter.WriteRow(sb,
@@ -145,7 +149,9 @@ public sealed partial class SystemController
                 row.SnapshotOciManifestCount?.ToString(CultureInfo.InvariantCulture),
                 row.SnapshotOciBlobCount?.ToString(CultureInfo.InvariantCulture),
                 row.SnapshotCacheEntryCount?.ToString(CultureInfo.InvariantCulture),
-                row.SnapshotDbRowCount?.ToString(CultureInfo.InvariantCulture));
+                row.SnapshotDbRowCount?.ToString(CultureInfo.InvariantCulture),
+                row.CacheStorageBytes.ToString(CultureInfo.InvariantCulture),
+                row.CacheMarkCount.ToString(CultureInfo.InvariantCulture));
         }
 
         byte[] bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
@@ -163,6 +169,7 @@ public sealed partial class SystemController
     /// resolve, so an operator can review a suspended-for-deletion tenant's usage history).
     /// </summary>
     [HttpGet("tenants/{slug}/usage")]
+    [EnableRateLimiting("usage-report")]
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Each parameter is an independently bound query value or [FromServices] repository; a bundling model would " +
             "change the documented OpenAPI parameter list for no gain in cohesion.")]
@@ -250,6 +257,7 @@ public sealed partial class SystemController
                 egressRedirectBytes = mtd.EgressRedirectBytes,
                 egressMetadataBytes = mtd.EgressMetadataBytes,
                 billableStorageBytes = mtd.BillableStorageBytes,
+                cacheStorageBytes = mtd.CacheStorageBytes,
                 requestCount = mtd.RequestCount,
                 metadataRequestCount = mtd.MetadataRequestCount,
             },
@@ -269,6 +277,8 @@ public sealed partial class SystemController
         metadataRequestCount = row.MetadataRequestCount,
         billableStorageBytes = row.BillableStorageBytes,
         storageMarkDays = row.StorageMarkCount,
+        cacheStorageBytes = row.CacheStorageBytes,
+        cacheMarkDays = row.CacheMarkCount,
         lastComputedAt = row.LastComputedAt,
         snapshot = row.SnapshotCapturedAt is null
             ? null
@@ -297,13 +307,14 @@ public sealed partial class SystemController
         requestCount = totals.RequestCount,
         metadataRequestCount = totals.MetadataRequestCount,
         billableStorageBytes = totals.BillableStorageBytes,
+        cacheStorageBytes = totals.CacheStorageBytes,
     };
 
     /// <summary>One pivoted bucket's accumulated meters. A record struct (not a plain value
     /// tuple) so the per-meter folds below can use <c>with</c>-expressions.</summary>
     private readonly record struct DailyBucketAccumulator(
         long EgressBytes, long EgressRedirectBytes, long EgressMetadataBytes, long RequestCount,
-        long MetadataRequestCount, long? StorageBytes, string? ComputedAt);
+        long MetadataRequestCount, long? StorageBytes, long? CacheStorageBytes, string? ComputedAt);
 
     private readonly record struct HourlyBucketAccumulator(
         long EgressBytes, long EgressRedirectBytes, long EgressMetadataBytes, long RequestCount,
@@ -322,6 +333,7 @@ public sealed partial class SystemController
                 UsageMeters.EgressBytes => acc with { EgressBytes = row.Quantity, EgressRedirectBytes = row.RedirectQuantity, RequestCount = row.RequestCount, ComputedAt = row.ComputedAt },
                 UsageMeters.EgressMetadataBytes => acc with { EgressMetadataBytes = row.Quantity, MetadataRequestCount = row.RequestCount, ComputedAt = row.ComputedAt },
                 UsageMeters.StorageBytes => acc with { StorageBytes = row.Quantity, ComputedAt = row.ComputedAt },
+                UsageMeters.CacheStorageBytes => acc with { CacheStorageBytes = row.Quantity, ComputedAt = row.ComputedAt },
                 _ => acc,
             };
             byBucket[row.Bucket] = acc;
@@ -336,6 +348,7 @@ public sealed partial class SystemController
             requestCount = kv.Value.RequestCount,
             metadataRequestCount = kv.Value.MetadataRequestCount,
             storageBytes = kv.Value.StorageBytes,
+            cacheStorageBytes = kv.Value.CacheStorageBytes,
             computedAt = kv.Value.ComputedAt,
         }).ToList();
     }
@@ -371,12 +384,12 @@ public sealed partial class SystemController
 
     private readonly record struct UsageSummary(
         long EgressBytes, long EgressRedirectBytes, long EgressMetadataBytes, long BillableStorageBytes,
-        long RequestCount, long MetadataRequestCount);
+        long CacheStorageBytes, long RequestCount, long MetadataRequestCount);
 
     private static UsageSummary SummarizeDaily(IReadOnlyList<UsageDailyRow> rows)
     {
-        long egress = 0, egressRedirect = 0, egressMeta = 0, storageSum = 0, requests = 0, metaRequests = 0;
-        int storageMarks = 0;
+        long egress = 0, egressRedirect = 0, egressMeta = 0, storageSum = 0, cacheSum = 0, requests = 0, metaRequests = 0;
+        int storageMarks = 0, cacheMarks = 0;
         foreach (var row in rows)
         {
             switch (row.Meter)
@@ -394,13 +407,20 @@ public sealed partial class SystemController
                     storageSum += row.Quantity;
                     storageMarks++;
                     break;
+                case UsageMeters.CacheStorageBytes:
+                    cacheSum += row.Quantity;
+                    cacheMarks++;
+                    break;
             }
         }
 
         long billableStorage = storageMarks == 0
             ? 0
             : (long)Math.Round(storageSum / (double)storageMarks, MidpointRounding.AwayFromZero);
-        return new UsageSummary(egress, egressRedirect, egressMeta, billableStorage, requests, metaRequests);
+        long cacheStorage = cacheMarks == 0
+            ? 0
+            : (long)Math.Round(cacheSum / (double)cacheMarks, MidpointRounding.AwayFromZero);
+        return new UsageSummary(egress, egressRedirect, egressMeta, billableStorage, cacheStorage, requests, metaRequests);
     }
 
     /// <summary>

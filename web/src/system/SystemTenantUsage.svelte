@@ -110,6 +110,7 @@
           <div class="stat"><div class="stat-value">{$formatBytes(data.monthToDate.egressBytes)}</div><div class="stat-label">{$t('system.usage.totals.egress')}</div></div>
           <div class="stat"><div class="stat-value">{$formatBytes(data.monthToDate.egressMetadataBytes)}</div><div class="stat-label">{$t('system.usage.totals.metadata')}</div></div>
           <div class="stat"><div class="stat-value">{$formatBytes(data.monthToDate.billableStorageBytes)}</div><div class="stat-label">{$t('system.usage.totals.storage')}</div></div>
+          <div class="stat"><div class="stat-value">{$formatBytes(data.monthToDate.cacheStorageBytes)}</div><div class="stat-label">{$t('system.usage.totals.cacheStorage')}</div></div>
         </div>
         <div class="stat-foot">{data.monthToDate.from} – {data.monthToDate.to}</div>
       </section>
@@ -164,6 +165,7 @@
               <th class="num">{$t('system.usage.columns.metadata')}</th>
               {#if granularity === 'day'}
                 <th class="num">{$t('system.usage.columns.storage')}</th>
+                <th class="num">{$t('system.usage.columns.cacheStorage')}</th>
               {/if}
               <th class="num signal">{$t('system.tenantUsage.series.requests')}</th>
               <th class="num signal">{$t('system.tenantUsage.series.metadataRequests')}</th>
@@ -178,6 +180,7 @@
                 <td class="num">{$formatBytes(b.egressMetadataBytes)}</td>
                 {#if granularity === 'day'}
                   <td class="num">{b.storageBytes !== null && b.storageBytes !== undefined ? $formatBytes(b.storageBytes) : '—'}</td>
+                  <td class="num">{b.cacheStorageBytes !== null && b.cacheStorageBytes !== undefined ? $formatBytes(b.cacheStorageBytes) : '—'}</td>
                 {/if}
                 <td class="num signal">{$formatNumber(b.requestCount)}</td>
                 <td class="num signal">{$formatNumber(b.metadataRequestCount)}</td>

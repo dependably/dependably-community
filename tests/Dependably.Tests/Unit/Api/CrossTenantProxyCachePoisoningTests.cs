@@ -328,7 +328,7 @@ public sealed class CrossTenantProxyCachePoisoningTests : IAsyncLifetime
             new SourcePinRepository(_db, new ConfigurationBuilder().Build()));
 
         return new NpmTarballHandler(
-            _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, tiered.Cache,
+            _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, tiered,
             upstreamClient,
             new AllowlistService(_db, _audit),
             new BlocklistRepository(_db, new MemoryCache(new MemoryCacheOptions()), TimeProvider.System),

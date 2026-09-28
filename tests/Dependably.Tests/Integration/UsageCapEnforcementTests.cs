@@ -17,7 +17,8 @@ namespace Dependably.Tests.Integration;
 /// default org). Each threshold is paired with its active twin one unit below it, so a gate that
 /// refuses nothing or everything fails: uploads are refused at 100 % of each capped meter and
 /// admitted below it; downloads are throttled at 110 % of a capped egress meter and not below it;
-/// an org with no caps is never enforced; DELETE and downloads stay admitted at the cap; and the
+/// an org with no caps is never enforced; DELETE, npm's unpublish prune PUT, and downloads stay
+/// admitted at the cap; and the
 /// hourly rollup, not only a direct recompute, trips the posture.
 /// </summary>
 [Trait("Category", "Integration")]
@@ -105,6 +106,34 @@ public sealed class UsageCapEnforcementTests : IAsyncLifetime
         return await client.PutAsync(
             $"/npm/{name}",
             new StringContent(NpmFixtures.BuildPublishBody(name, "1.0.0"), Encoding.UTF8, "application/json"));
+    }
+
+    private static ByteArrayContent FilePart(byte[] bytes)
+    {
+        var part = new ByteArrayContent(bytes);
+        part.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        return part;
+    }
+
+    private async Task<HttpResponseMessage> ImportNpmAsync(string name)
+    {
+        var (bytes, _, _) = NpmFixtures.BuildTarball(name, "1.0.0");
+        using var client = _factory.CreateClientWithBearer(await _factory.CreateAdminJwt());
+        using var content = new MultipartFormDataContent();
+        content.Add(FilePart(bytes), "files", $"{name}-1.0.0.tgz");
+        return await client.PostAsync("/api/v1/admin/upload", content);
+    }
+
+    private async Task<long> HostedVersionCountAsync(string orgId, string name)
+    {
+        await using var conn = await Db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM package_versions pv
+            JOIN packages p ON p.id = pv.package_id
+            WHERE p.org_id = @orgId AND p.name = @name
+            """,
+            new { orgId, name });
     }
 
     private static async Task AssertUsageCapRefusalAsync(HttpResponseMessage resp)
@@ -226,6 +255,62 @@ public sealed class UsageCapEnforcementTests : IAsyncLifetime
         Assert.Equal(InfoUrl, error.GetProperty("detail").GetProperty("infoUrl").GetString());
     }
 
+    // ── Management-plane import honours the cap ────────────────────────────────
+
+    [Fact]
+    public async Task Bulk_import_is_refused_at_the_cap_like_a_protocol_publish()
+    {
+        string orgId = await DefaultOrgIdAsync();
+        await SetSnapshotAsync(orgId, billable: 5000, hostedVersions: 0, ociManifests: 0);
+
+        Assert.Equal(UsagePostures.Normal, await CapAsync(orgId, UsageCapMeters.StorageBytes, 5001));
+        string belowName = $"cap-imp-{Guid.NewGuid():N}"[..20];
+        using (var below = await ImportNpmAsync(belowName))
+        {
+            Assert.Equal(HttpStatusCode.OK, below.StatusCode);
+            using var doc = JsonDocument.Parse(await below.Content.ReadAsStringAsync());
+            Assert.Equal(1, doc.RootElement.GetProperty("accepted").GetInt32());
+        }
+        Assert.Equal(1, await HostedVersionCountAsync(orgId, belowName));
+
+        Assert.Equal(UsagePostures.UploadsRefused, await CapAsync(orgId, UsageCapMeters.StorageBytes, 5000));
+        string atCapName = $"cap-imp-{Guid.NewGuid():N}"[..20];
+        using var atCap = await ImportNpmAsync(atCapName);
+        await AssertUsageCapRefusalAsync(atCap);
+        Assert.Equal(0, await HostedVersionCountAsync(orgId, atCapName));
+    }
+
+    [Fact]
+    public async Task Manifest_import_is_refused_at_the_cap()
+    {
+        string orgId = await DefaultOrgIdAsync();
+        await SetSnapshotAsync(orgId, billable: 5000, hostedVersions: 0, ociManifests: 0);
+        Assert.Equal(UsagePostures.UploadsRefused, await CapAsync(orgId, UsageCapMeters.StorageBytes, 5000));
+
+        string name = $"cap-mfst-{Guid.NewGuid():N}"[..20];
+        var (bytes, _, _) = NpmFixtures.BuildTarball(name, "1.0.0");
+        string lockfile = $$"""
+            {
+              "name": "test", "version": "1.0.0", "lockfileVersion": 3,
+              "packages": {
+                "": { "name": "test", "version": "1.0.0" },
+                "node_modules/{{name}}": { "version": "1.0.0" }
+              }
+            }
+            """;
+
+        using var client = _factory.CreateClientWithBearer(await _factory.CreateAdminJwt());
+        using var content = new MultipartFormDataContent();
+        var manifestPart = new ByteArrayContent(Encoding.UTF8.GetBytes(lockfile));
+        manifestPart.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        content.Add(manifestPart, "manifest", "package-lock.json");
+        content.Add(FilePart(bytes), "files", $"{name}-1.0.0.tgz");
+
+        using var resp = await client.PostAsync("/api/v1/admin/import/manifest", content);
+        await AssertUsageCapRefusalAsync(resp);
+        Assert.Equal(0, await HostedVersionCountAsync(orgId, name));
+    }
+
     // ── What the cap leaves alone ──────────────────────────────────────────────
 
     [Fact]
@@ -266,6 +351,65 @@ public sealed class UsageCapEnforcementTests : IAsyncLifetime
             "/npm/-/npm/v1/security/advisories/bulk",
             new StringContent("{}", Encoding.UTF8, "application/json"));
         Assert.Equal(HttpStatusCode.OK, audit.StatusCode);
+
+        using var publish = await PublishNpmAsync(token);
+        await AssertUsageCapRefusalAsync(publish);
+    }
+
+    [Fact]
+    public async Task An_npm_unpublish_prune_is_admitted_at_the_cap_while_a_publish_is_refused()
+    {
+        string orgId = await DefaultOrgIdAsync();
+        string token = await _factory.CreateToken("push");
+        string name = $"cap-unpub-{Guid.NewGuid():N}"[..24];
+        using var client = _factory.CreateClientWithBearer(token);
+        foreach (string version in new[] { "1.0.0", "1.1.0" })
+        {
+            using var published = await client.PutAsync(
+                $"/npm/{name}",
+                new StringContent(NpmFixtures.BuildPublishBody(name, version), Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.OK, published.StatusCode);
+        }
+
+        await SetEgressAsync(orgId, UsageCapMeters.EgressBytes, 1000);
+        Assert.Equal(UsagePostures.UploadsRefused, await CapAsync(orgId, UsageCapMeters.EgressBytes, 1000));
+
+        // npm unpublish name@1.0.0: read the packument's _rev, PUT the packument pruned to the
+        // versions to keep, then DELETE the removed version's tarball with the same rev.
+        string rev;
+        using (var packument = await client.GetAsync($"/npm/{name}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, packument.StatusCode);
+            using var doc = JsonDocument.Parse(await packument.Content.ReadAsStringAsync());
+            rev = doc.RootElement.GetProperty("_rev").GetString()!;
+        }
+
+        string keep = JsonSerializer.Serialize(new
+        {
+            name,
+            versions = new Dictionary<string, object> { ["1.1.0"] = new { name, version = "1.1.0" } },
+        });
+        using (var prune = await client.PutAsync(
+            $"/npm/{name}/-rev/{rev}", new StringContent(keep, Encoding.UTF8, "application/json")))
+        {
+            Assert.Equal(HttpStatusCode.OK, prune.StatusCode);
+            using var doc = JsonDocument.Parse(await prune.Content.ReadAsStringAsync());
+            Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+        }
+
+        using (var tarball = await client.DeleteAsync($"/npm/{name}/-/{name}-1.0.0.tgz/-rev/{rev}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, tarball.StatusCode);
+        }
+
+        using (var after = await client.GetAsync($"/npm/{name}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, after.StatusCode);
+            using var doc = JsonDocument.Parse(await after.Content.ReadAsStringAsync());
+            var versions = doc.RootElement.GetProperty("versions");
+            Assert.False(versions.TryGetProperty("1.0.0", out _), "1.0.0 must be unpublished");
+            Assert.True(versions.TryGetProperty("1.1.0", out _), "1.1.0 must be kept");
+        }
 
         using var publish = await PublishNpmAsync(token);
         await AssertUsageCapRefusalAsync(publish);
@@ -358,8 +502,14 @@ public sealed class UsageCapEnforcementTests : IAsyncLifetime
 
         Assert.Equal(UsagePostures.Normal, await CapAsync(orgId, UsageCapMeters.EgressBytes, null));
 
-        using var restored = await PublishNpmAsync(token);
-        Assert.Equal(HttpStatusCode.OK, restored.StatusCode);
+        using (var restored = await PublishNpmAsync(token))
+        {
+            Assert.Equal(HttpStatusCode.OK, restored.StatusCode);
+        }
+
+        // The storage-layer gate the import path meets releases with the posture too.
+        using var imported = await ImportNpmAsync($"cap-clr-{Guid.NewGuid():N}"[..20]);
+        Assert.Equal(HttpStatusCode.OK, imported.StatusCode);
     }
 
     // ── Download throttling at 110 %, with its active twin ─────────────────────
@@ -395,6 +545,7 @@ public sealed class UsageCapEnforcementTests : IAsyncLifetime
 
         Assert.Equal(0, await BurstOf429Async("/nuget/v3/index.json", 20));
     }
+
 
     // ── The hourly rollup trips the posture ────────────────────────────────────
 

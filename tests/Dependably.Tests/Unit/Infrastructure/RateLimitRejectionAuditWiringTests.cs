@@ -285,6 +285,41 @@ public sealed class RateLimitRejectionAuditWiringTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The <c>rescan</c> and <c>usage-report</c> closures (<c>AddRescanLimiter</c>,
+    /// <c>AddUsageReportLimiter</c>) key on <see cref="RateLimitPartitions.GetManagementPartitionKey"/>
+    /// whatever the request path, so the recorder must name that partition from the policy
+    /// itself. The <c>/api/v1/</c> rows are the routes the policies actually mount on; the
+    /// off-prefix rows are the discriminator — a policy that fell through to the GlobalLimiter
+    /// default arm would classify by path and record a <c>proto:</c> partition the policy never
+    /// bucketed on.
+    /// </summary>
+    [Theory]
+    [InlineData("usage-report", "/api/v1/system/usage.csv")]
+    [InlineData("usage-report", "/api/v1/system/tenants/acme/usage")]
+    [InlineData("usage-report", "/system/usage.csv")]
+    [InlineData("rescan", "/api/v1/packages/rescan")]
+    [InlineData("rescan", "/packages/rescan")]
+    public async Task ManagementKeyedPoliciesRecordTheManagementPartitionWhateverThePath(string policy, string path)
+    {
+        var (coalescer, flusher) = Build();
+        var user = AuthenticatedUser("operator-1");
+
+        var ctx = BuildContext(
+            coalescer, path, "203.0.113.40",
+            user: user, authorizationHeader: "Bearer fleet-report-token");
+        RateLimitDenialAuditRecorder.Record(ctx, policy, Ipv6Prefix, useRedis: false);
+
+        await flusher.FlushWindowAsync(CancellationToken.None);
+
+        var row = Assert.Single(await ReadRowsAsync());
+        string partition = Detail(row).GetProperty("partition").GetString()!;
+
+        Assert.Equal(RateLimitPartitions.GetManagementPartitionKey(ctx, Ipv6Prefix), partition);
+        Assert.StartsWith("token:", partition);
+        Assert.False(partition.StartsWith("proto:", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// The <c>metadata</c> and <c>anon</c> policies bucket on the bare source IP with NO
     /// <c>"ip:"</c> prefix (<c>AddMetadataLimiter</c>/<c>AddAnonymousProbeLimiter</c>) —
     /// authentication never changes their bucket. A dispatch that falls back to

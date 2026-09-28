@@ -35,7 +35,7 @@ public sealed class BackgroundJobRunRetentionTests : IAsyncLifetime
         var trusted = new TrustedDeviceService(_db, _clock, cfg);
         var blobs = new Dependably.Storage.InMemoryBlobStore();
         return new RetentionService(new RetentionService.Dependencies(
-            _db, blobs, jwt, invites, samlConfig, trusted, cfg, new AirGapMode(cfg),
+            _db, new Dependably.Storage.TieredBlobStorage(blobs, blobs), jwt, invites, samlConfig, trusted, cfg, new AirGapMode(cfg),
             NullLogger<RetentionService>.Instance, _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(

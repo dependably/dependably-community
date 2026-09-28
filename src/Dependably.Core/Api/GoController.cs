@@ -351,9 +351,9 @@ public sealed class GoController : OrgScopedControllerBase
         // is the only existence check the redirect makes. Go has no hosted publish path, so a
         // cached zip is always proxied bytes.
         var probe = ext == "zip" && _svc.Presign is { } presign
-            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, "go", ct)
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs.Cache, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, "go", ct)
             : null;
-        var cached = probe is null ? await _svc.Blobs.GetAsync(blobKey, ct) : null;
+        var cached = probe is null ? await _svc.Blobs.Cache.GetAsync(blobKey, ct) : null;
         if (cached is null && probe is not { Exists: true })
         {
             return null;
@@ -378,7 +378,7 @@ public sealed class GoController : OrgScopedControllerBase
         var redirect = probe is not null ? await TryRedirectZipAsync(orgId, module, version, probe, ct) : null;
         if (redirect is null)
         {
-            cached ??= await _svc.Blobs.GetAsync(blobKey, ct);
+            cached ??= await _svc.Blobs.Cache.GetAsync(blobKey, ct);
         }
 
         if (redirect is null && cached is null)
@@ -971,7 +971,7 @@ public sealed class GoController : OrgScopedControllerBase
         string orgId, string module, string version, string blobKey, string upstreamUrl,
         Stream staged, CancellationToken ct)
     {
-        long stagedLength = await _svc.Blobs.GetStagedSizeAsync(staged, BlobKeys.StoreKey(blobKey), ct);
+        long stagedLength = await _svc.Blobs.Cache.GetStagedSizeAsync(staged, BlobKeys.StoreKey(blobKey), ct);
         string? cacheArtifactId = await RecordZipCacheAccessAsync(orgId, module, version, blobKey, upstreamUrl, ct, stagedLength);
         if (cacheArtifactId is not null)
         {
@@ -981,7 +981,7 @@ public sealed class GoController : OrgScopedControllerBase
         // Release the caller's handle on the staged blob before deleting it — the response is
         // never written, and an open handle blocks the delete on stores that lock by handle.
         await staged.DisposeAsync();
-        await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
+        await _svc.Blobs.Cache.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
         throw new ProxyCatalogueUnavailableException("golang", module, version);
     }
 
@@ -998,7 +998,7 @@ public sealed class GoController : OrgScopedControllerBase
     {
         try
         {
-            var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(blobKey), ct);
+            var stream = await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(blobKey), ct);
             if (stream is null)
             {
                 return;
@@ -1162,7 +1162,7 @@ public sealed record GoControllerServices(
     TokenRepository Tokens,
     AuditRepository Audit,
     OrgRepository Orgs,
-    IBlobStore Blobs,
+    TieredBlobStorage Blobs,
     UpstreamClient Upstream,
     UpstreamRegistryResolver Registries,
     IHttpClientFactory HttpClientFactory,

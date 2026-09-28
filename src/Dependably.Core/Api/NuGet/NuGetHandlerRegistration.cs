@@ -31,7 +31,7 @@ internal static class NuGetHandlerRegistration
                 orgs: sp.GetRequiredService<OrgRepository>(),
                 packages: sp.GetRequiredService<PackageRepository>(),
                 tokens: sp.GetRequiredService<TokenRepository>(),
-                blobs: sp.GetRequiredService<IBlobStore>(),
+                blobs: sp.GetRequiredService<TieredBlobStorage>(),
                 db: sp.GetRequiredService<IMetadataStore>(),
                 publishGate: sp.GetRequiredService<PublishGate>(),
                 publish: sp.GetRequiredService<IPackagePublishService>(),

@@ -9,13 +9,14 @@ namespace Dependably.Tests.Compliance;
 /// discovering, row by row, which call sites bothered.
 ///
 /// <para>
-/// Covers <c>AuditRepository.LogAsync</c> and <c>LogActivityAsync</c> — the two members whose
-/// signature carries <c>actorKind</c> and <c>sourceIp</c> as first-class, request-driven optional
-/// parameters. <c>LogSystemAsync</c> is deliberately excluded by name (<see cref="MatchTarget"/>)
-/// even though it now also accepts an optional <c>actorKind</c>/<c>actorLabel</c> pair for the
-/// system-token actor case: most <c>scope='system'</c> rows are still written by a system_admin or
-/// by the platform itself, with no <see cref="Dependably.Infrastructure.ActorKinds"/> value to
-/// give, so requiring one at every call site would force a fabricated value on the common case.
+/// Covers <c>AuditRepository.LogAsync</c> and <c>LogActivityAsync</c> in full, and
+/// <c>LogSystemAsync</c> (both overloads) for <c>sourceIp</c> only. The <c>actorKind</c> pairing
+/// below is deliberately not applied to <c>LogSystemAsync</c>: most <c>scope='system'</c> rows are
+/// written by a system_admin JWT session, whose kind is NULL by <c>AuditRepository</c>'s contract
+/// (the system audit list joins <c>system_admins</c>, not <c>users</c>), or by the platform itself,
+/// so requiring an <see cref="Dependably.Infrastructure.ActorKinds"/> value there would force a
+/// fabricated one on the common case. A system-token actor's kind and label reach those rows
+/// through <c>SystemActor</c>, which a reviewer, not this gate, holds call sites to.
 /// </para>
 ///
 /// <para><b>The rule, deliberately asymmetric:</b></para>
@@ -26,7 +27,7 @@ namespace Dependably.Tests.Compliance;
 ///   path (a scheduled sweep, a startup migration) has none, and says so with the opt-out
 ///   marker below rather than silently omitting the argument.</item>
 ///   <item><c>actorKind</c> is required only when the call also supplies a real (non-null)
-///   <c>actorId</c>. A call with no actor at all (an anonymous login-failure or lockout row, an
+///   <c>actorId</c>, and never on <c>LogSystemAsync</c>. A call with no actor at all (an anonymous login-failure or lockout row, an
 ///   allowlist block on an unauthenticated pull) is not missing an attribution argument — NULL
 ///   actor_kind is the documented, correct value for "no actor", exactly as
 ///   <see cref="Dependably.Infrastructure.ActorKinds"/> spells out. Requiring a kind for those
@@ -74,14 +75,20 @@ public sealed class AuditAttributionComplianceTests
     // Positional slot indices, 0-based, matching AuditRepository's declared parameter order.
     // LogAsync(action, orgId, actorId, actorKind, ecosystem, purl, detail, sourceIp, actorLabel, ct)
     // LogActivityAsync(orgId, ecosystem, purl, eventType, actorId, actorKind, detail, sourceIp, actorLabel, ct)
-    // Both signatures append new optional parameters after sourceIp, deliberately: inserting one
+    // LogSystemAsync(action, actorId, orgId, detail, sourceIp, actorKind, actorLabel, ct)
+    // LogSystemAsync(conn, tx, action, …) — the same slots shifted by ConnectionOverloadShift.
+    // Each signature appends new optional parameters after sourceIp, deliberately: inserting one
     // mid-signature shifts sourceIp's index and silently blinds the positional fallback below.
-    private sealed record MethodShape(int ActorIdIndex, int ActorKindIndex, int SourceIpIndex);
+    private sealed record MethodShape(int ActorIdIndex, int ActorKindIndex, int SourceIpIndex, bool RequireKindWithActor = true);
+
+    private const string LogSystemMarker = ".LogSystemAsync(";
+    private const int ConnectionOverloadShift = 2;
 
     private static readonly Dictionary<string, MethodShape> Targets = new(StringComparer.Ordinal)
     {
         [".LogAsync("] = new MethodShape(ActorIdIndex: 2, ActorKindIndex: 3, SourceIpIndex: 7),
         [".LogActivityAsync("] = new MethodShape(ActorIdIndex: 4, ActorKindIndex: 5, SourceIpIndex: 7),
+        [LogSystemMarker] = new MethodShape(ActorIdIndex: 1, ActorKindIndex: 5, SourceIpIndex: 4, RequireKindWithActor: false),
     };
 
     [Fact]
@@ -100,34 +107,21 @@ public sealed class AuditAttributionComplianceTests
                     continue;
                 }
 
-                var shape = Targets[marker];
                 string call = ReadCallExpression(lines, i, marker);
-                var args = SplitTopLevelArgs(call, marker);
-
-                string? actorId = ResolveArg(args, "actorId", shape.ActorIdIndex);
-                string? actorKind = ResolveArg(args, "actorKind", shape.ActorKindIndex);
-                string? sourceIp = ResolveArg(args, "sourceIp", shape.SourceIpIndex);
-
-                bool hasActor = IsRealValue(actorId);
-                bool hasKind = IsRealValue(actorKind);
-                bool hasIp = IsRealValue(sourceIp);
-
-                bool ok = hasIp && (hasKind || !hasActor);
-                if (ok || HasOptOutAbove(lines, i))
+                string? reason = Evaluate(call, marker);
+                if (reason is null || HasOptOutAbove(lines, i))
                 {
                     continue;
                 }
 
                 string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
-                string reason = !hasIp
-                    ? "missing sourceIp"
-                    : "actorId is supplied but actorKind is not";
+                string remedy = Targets[marker].RequireKindWithActor
+                    ? "Pass sourceIp (HttpContext.GetNormalizedRemoteIp()) and, when an actorId is present, actorKind"
+                    : "Pass sourceIp (HttpContext.GetNormalizedRemoteIp())";
                 violations.Add(
                     $"{rel}:{i + 1}: {marker.TrimEnd('(')} call omits attribution ({reason}) — " +
-                    $"a SOC cannot resolve origin/actor-kind for this row. Pass sourceIp " +
-                    $"(HttpContext.GetNormalizedRemoteIp()) and, when an actorId is present, " +
-                    $"actorKind — or opt out with `// {OptOut} <reason>` for a genuine " +
-                    $"background/shared-fetch path.");
+                    $"a SOC cannot resolve origin/actor-kind for this row. {remedy} — or opt out " +
+                    $"with `// {OptOut} <reason>` for a genuine background/shared-fetch path.");
             }
         }
 
@@ -155,13 +149,71 @@ public sealed class AuditAttributionComplianceTests
         Assert.False(LineCarriesReasonedMarker($"// {OptOut}   "));
     }
 
-    private static string? MatchTarget(string line)
+    /// <summary>
+    /// The rule applied to snippets rather than the tree, so its shape is pinned independently of
+    /// whichever call sites happen to exist: <c>LogSystemAsync</c> is held to <c>sourceIp</c> on
+    /// both overloads without the <c>actorKind</c> pairing, which stays on the other two writers.
+    /// </summary>
+    [Theory]
+    [InlineData("await _audit.LogSystemAsync(action: \"x\", actorId: sub, detail: d, ct: ct);", "missing sourceIp")]
+    [InlineData("await _audit.LogSystemAsync(action: \"x\", actorId: sub, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);", null)]
+    [InlineData("await _audit.LogSystemAsync(\"x\", sub, null, d, ip, ct: ct);", null)]
+    [InlineData("await _audit.LogSystemAsync(\"x\", sub, null, d, null, ct: ct);", "missing sourceIp")]
+    [InlineData("await _audit.LogSystemAsync(conn, tx, \"x\", actorId, orgId, detail, ip, ct);", null)]
+    [InlineData("await _audit.LogSystemAsync(conn, tx, \"x\", actorId, orgId, detail, null, ct);", "missing sourceIp")]
+    [InlineData("await _audit.LogSystemAsync(conn, tx, action: \"x\", orgId: orgId, ct: ct);", "missing sourceIp")]
+    [InlineData("await _audit.LogAsync(\"x\", orgId, actorId: u.Id, sourceIp: ip, ct: ct);", "actorId is supplied but actorKind is not")]
+    [InlineData("await _audit.LogActivityAsync(orgId, eco, purl, \"x\", actorId: u.Id, sourceIp: ip, ct: ct);", "actorId is supplied but actorKind is not")]
+    [InlineData("await _audit.LogAsync(\"x\", orgId, actorId: u.Id, actorKind: k, sourceIp: ip, ct: ct);", null)]
+    public void RuleShape(string snippet, string? expectedReason)
     {
-        if (line.Contains(".LogSystemAsync(", StringComparison.Ordinal))
+        string? marker = MatchTarget(snippet);
+        Assert.NotNull(marker);
+        Assert.Equal(expectedReason, Evaluate(ReadCallExpression([snippet], 0, marker), marker));
+    }
+
+    /// <summary>
+    /// The violation reason for one call expression, or null when it carries its attribution.
+    /// </summary>
+    private static string? Evaluate(string call, string marker)
+    {
+        var shape = Targets[marker];
+        var args = SplitTopLevelArgs(call, marker);
+        int shift = marker == LogSystemMarker && IsConnectionOverload(args) ? ConnectionOverloadShift : 0;
+
+        string? actorId = ResolveArg(args, "actorId", shape.ActorIdIndex + shift);
+        string? actorKind = ResolveArg(args, "actorKind", shape.ActorKindIndex + shift);
+        string? sourceIp = ResolveArg(args, "sourceIp", shape.SourceIpIndex + shift);
+
+        if (!IsRealValue(sourceIp))
         {
-            return null;
+            return "missing sourceIp";
         }
 
+        bool kindSatisfied = !shape.RequireKindWithActor || IsRealValue(actorKind) || !IsRealValue(actorId);
+        return kindSatisfied ? null : "actorId is supplied but actorKind is not";
+    }
+
+    // `LogSystemAsync(conn, tx, action, …)` versus `LogSystemAsync(action, …)`: an action is a
+    // string literal, an AuditActions constant, a local named for it, or passed as `action:`; a
+    // connection is none of those. The same discrimination AuditActorIdComplianceTests applies.
+    private static bool IsConnectionOverload(List<(string? Name, string Value)> args)
+    {
+        if (args.Count < 3 || args[0].Name is not null)
+        {
+            return false;
+        }
+
+        string first = args[0].Value;
+        bool looksLikeAction = first.StartsWith('"') || first.StartsWith("$\"", StringComparison.Ordinal)
+            || first.StartsWith("@\"", StringComparison.Ordinal)
+            || first.Contains("AuditActions.", StringComparison.Ordinal)
+            || first.Contains("action", StringComparison.OrdinalIgnoreCase);
+        return !looksLikeAction;
+    }
+
+    private static string? MatchTarget(string line)
+    {
         foreach (string marker in Targets.Keys)
         {
             if (line.Contains(marker, StringComparison.Ordinal))

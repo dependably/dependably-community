@@ -175,10 +175,11 @@ public sealed partial class UpstreamClient
             TaskScheduler.Default);
     }
 
-    // Hex-encoded SHA-256 of the per-upstream Authorization header, used as a single-flight key
-    // component so joiners never share a fetch across differing credentials. Anonymous (no-header)
-    // requests all hash to the same fixed value, which still dedups correctly among themselves.
-    private static string AuthHeaderHash(string? authorizationHeader) =>
+    // Hex-encoded SHA-256 of the per-upstream Authorization header, used as a cache and
+    // single-flight key component by UpstreamClient and ApkIndexFetchCoordinator so joiners never
+    // share a fetch or a cached body across differing credentials. Anonymous (no-header) requests
+    // all hash to the same fixed value, which still dedups correctly among themselves.
+    internal static string AuthHeaderHash(string? authorizationHeader) =>
         Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(authorizationHeader ?? string.Empty)))
             .ToLowerInvariant();
 

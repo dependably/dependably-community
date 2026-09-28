@@ -410,7 +410,7 @@ public sealed record HexControllerServices(
     TokenRepository Tokens,
     OrgRepository Orgs,
     PackageRepository Packages,
-    IBlobStore Blobs,
+    TieredBlobStorage Blobs,
     UpstreamClient Upstream,
     UpstreamRegistryResolver Registries,
     CacheAccessRecorder CacheRecorder,

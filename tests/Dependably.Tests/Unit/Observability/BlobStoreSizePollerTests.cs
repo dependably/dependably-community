@@ -9,12 +9,14 @@ using NSubstitute.ExceptionExtensions;
 namespace Dependably.Tests.Unit.Observability;
 
 /// <summary>
-/// Branch coverage for <see cref="BlobStoreSizePoller"/>. The polled values are
-/// recorded against a global meter dictionary; tests use a unique tier key trick
-/// — feeding a split tier with mocked stores — so they don't race against the
-/// production "registry"/"cache" labels in the shared <see cref="DependablyMeter"/>.
+/// Branch coverage for <see cref="BlobStoreSizePoller"/>. The polled values are recorded against
+/// <see cref="DependablyMeter"/>'s process-wide static "registry"/"cache" tier dictionary — these
+/// tests assert on those exact production labels, so the class carries
+/// <c>[Collection("MeterSensitive")]</c> to avoid racing another test (e.g. HealthServiceTests,
+/// CacheSizeAlertServiceTests) that writes the same keys concurrently.
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("MeterSensitive")]
 public sealed class BlobStoreSizePollerTests
 {
     private static IConfiguration Config() =>

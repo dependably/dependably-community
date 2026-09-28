@@ -100,6 +100,13 @@ public sealed class InstanceController : ControllerBase
             }
         }
 
+        if (settings.TryGetValue("cache_size_warn_bytes", out string? cacheSizeWarnRaw)
+            && !string.IsNullOrEmpty(cacheSizeWarnRaw)
+            && (!long.TryParse(cacheSizeWarnRaw, out long cacheSizeWarnBytes) || cacheSizeWarnBytes < 0))
+        {
+            return BadRequest(new { error = "cache_size_warn_bytes must be a non-negative integer" });
+        }
+
         foreach (var (key, value) in settings)
         {
             await _orgs.SetInstanceSettingAsync(key, value, ct);
@@ -115,6 +122,7 @@ public sealed class InstanceController : ControllerBase
                 keys = settings.Keys.ToArray(),
                 values = settings,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();
@@ -231,6 +239,7 @@ public sealed class InstanceController : ControllerBase
                 enabled = req.Enabled,
                 allowedIps = req.AllowedIps,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(new { warnings });
@@ -350,6 +359,7 @@ public sealed class InstanceController : ControllerBase
                 passwordRotated = !string.IsNullOrEmpty(req.Password),
                 cleartextCredentials,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(Dependably.Infrastructure.Mail.EmailConfigEditing.BuildView(resolved, envelope.IsConfigured));
@@ -604,6 +614,7 @@ public sealed class InstanceController : ControllerBase
                 hasToken = !string.IsNullOrEmpty(resolved.Connection.Token),
                 configured = resolved.Configured,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(Dependably.Infrastructure.VulnTracker.VulnTrackerConfigEditing.BuildView(
@@ -669,6 +680,7 @@ public sealed class InstanceController : ControllerBase
                     latencyMs = probe.LatencyMs,
                     handshakeSent,
                 }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(),
                 ct: ct);
         }
 

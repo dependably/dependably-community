@@ -33,7 +33,7 @@ public sealed class NuGetFlatContainerHandler(
     TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
     AuditRepository audit,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     UpstreamClient upstream,
     UpstreamRegistryResolver registries,
     AllowlistService allowlist,
@@ -385,7 +385,7 @@ public sealed class NuGetFlatContainerHandler(
         }
 
         string uploadedBlobKey = BlobKeys.StoreKey(pkgVersion.BlobKey);
-        if (!await blobs.ExistsAsync(uploadedBlobKey, ct))
+        if (!await blobs.Registry.ExistsAsync(uploadedBlobKey, ct))
         {
             return new NotFoundResult();
         }
@@ -445,7 +445,7 @@ public sealed class NuGetFlatContainerHandler(
 
         // blobkey-ok: proxy blob key from cache_artifact; no filename suffix needed for HEAD.
         string blobKey = BlobKeys.StoreKey(caFacts.BlobKey);
-        if (!await blobs.ExistsAsync(blobKey, ct))
+        if (!await blobs.Cache.ExistsAsync(blobKey, ct))
         {
             return new NotFoundResult();
         }
@@ -525,11 +525,11 @@ public sealed class NuGetFlatContainerHandler(
         var redirect = presign is null
             ? null
             : await presign.TryRedirectAsync(
-                httpContext, blobs, storeKey, serveSize, BlobOrigins.FromColumn(pkgVersion.Origin), "nuget", ct);
+                httpContext, blobs.Registry, storeKey, serveSize, BlobOrigins.FromColumn(pkgVersion.Origin), "nuget", ct);
         Stream? stream = null;
         if (redirect is null)
         {
-            stream = await blobs.GetAsync(storeKey, ct);
+            stream = await blobs.Registry.GetAsync(storeKey, ct);
             if (stream is null)
             {
                 return new NotFoundResult();
@@ -559,15 +559,15 @@ public sealed class NuGetFlatContainerHandler(
         HttpContext httpContext, CacheArtifactServeFacts caFacts, string file, string orgId,
         TokenRecord? token, string? sourceIp, CancellationToken ct)
     {
-        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
+        // blobkey-ok: proxy blob key from cache_artifact; proxied bytes live in the cache tier.
         string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
         var redirect = presign is null
             ? null
-            : await presign.TryRedirectAsync(httpContext, blobs, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "nuget", ct);
+            : await presign.TryRedirectAsync(httpContext, blobs.Cache, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "nuget", ct);
         Stream? stream = null;
         if (redirect is null)
         {
-            stream = await blobs.GetAsync(storeKey, ct);
+            stream = await blobs.Cache.GetAsync(storeKey, ct);
             if (stream is null)
             {
                 return null;
@@ -632,7 +632,7 @@ public sealed class NuGetFlatContainerHandler(
             // Resolve canonical-case ID for the PURL from the cached blob. The blob was
             // already written by the streaming MISS path so a single blob-store open is enough.
             string canonicalId = await NuGetNupkgProxyHelper.ResolveCanonicalNuGetIdFromBlobAsync(
-                blobs, file, proxyKey, normalizedId, ct);
+                blobs.Cache, file, proxyKey, normalizedId, ct);
             string purl = PurlNormalizer.NuGet(canonicalId, normalizedVersion);
 
             var meta = await NuGetNupkgProxyHelper.TryFetchNuGetFirstFetchMetadataAsync(
@@ -642,7 +642,7 @@ public sealed class NuGetFlatContainerHandler(
             // no large byte[] allocation needed. BlobHandle wraps the result so ProxyFetchService
             // can open a fresh blob-store stream for licence extraction or checksum re-verification.
             var blob = new BlobHandle(proxyKey, sha, sizeBytes,
-                async openCt => await blobs.GetAsync(proxyKey, openCt)
+                async openCt => await blobs.Cache.GetAsync(proxyKey, openCt)
                     ?? Stream.Null);
 
             // Verify the .nupkg signature against org-pinned trust anchors when the tenant
@@ -666,7 +666,7 @@ public sealed class NuGetFlatContainerHandler(
 
             // Stream the cached blob back to the client (response memory is one read
             // buffer, not the whole artefact).
-            var blobStream = await blobs.GetAsync(result.BlobKey, ct);
+            var blobStream = await blobs.Cache.GetAsync(result.BlobKey, ct);
             return blobStream is null
                 ? new NotFoundResult()
                 : new FileStreamResult(blobStream, "application/octet-stream") { FileDownloadName = file };

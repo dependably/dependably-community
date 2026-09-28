@@ -384,7 +384,10 @@ public sealed class PackagePublishService : IPackagePublishService
         // protocol-plane publish before it reaches here; this is the storage-layer backstop that
         // also covers the management-plane bulk-import path (ImportController), which the
         // middleware's plane-level allowance for /api/v1/ writes does not — importing still writes
-        // real hosted artefact bytes, which is exactly what a read-only org must not grow.
+        // real hosted artefact bytes, which is exactly what a read-only org must not grow. The same
+        // resolver gate refuses a write while orgs.usage_posture is at a usage cap
+        // (TenantNotReadyReason.UsageCapReached), so the import path honours the cap the
+        // middleware enforces only for protocol-plane publishes.
         var registry = await _storage.GetRegistryAsync(request.OrgId, forWrite: true, ct);
         try
         {

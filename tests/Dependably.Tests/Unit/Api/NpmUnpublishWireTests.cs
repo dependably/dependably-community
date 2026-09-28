@@ -288,7 +288,7 @@ public sealed class NpmUnpublishWireTests : IAsyncLifetime
         var publish = Substitute.For<Dependably.Infrastructure.Publish.IPackagePublishService>();
 
         return new NpmPublishHandler(
-            orgs, packages, tokens, audit, _blobs, publish, claims, licenses, uploadLimits,
+            orgs, packages, tokens, audit, new TieredBlobStorage(_blobs, _blobs), publish, claims, licenses, uploadLimits,
             distTags, invalidation, TestEdgeMode.DisabledPublishGuard(), config["PROXY_STAGING_PATH"]!);
     }
 }

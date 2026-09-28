@@ -44,7 +44,7 @@ internal static partial class InfrastructureStartupExtensions
                 sp.GetRequiredService<TokenRepository>(),
                 sp.GetRequiredService<AuditRepository>(),
                 sp.GetRequiredService<PackageRepository>(),
-                sp.GetRequiredService<IBlobStore>(),
+                sp.GetRequiredService<TieredBlobStorage>(),
                 sp.GetRequiredService<Dependably.Protocol.UpstreamClient>(),
                 sp.GetRequiredService<Dependably.Protocol.UpstreamRegistryResolver>(),
                 sp.GetRequiredService<IMetadataStore>(),

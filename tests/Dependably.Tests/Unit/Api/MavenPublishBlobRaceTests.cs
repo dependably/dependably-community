@@ -237,7 +237,7 @@ public sealed class MavenPublishBlobRaceTests : IAsyncLifetime
             Tokens: _tokens,
             Audit: new AuditRepository(_db),
             Orgs: new OrgRepository(_db),
-            Blobs: blobs,
+            Blobs: new TieredBlobStorage(blobs, blobs),
             Db: _db,
             Upstream: null!,
             Config: null!,

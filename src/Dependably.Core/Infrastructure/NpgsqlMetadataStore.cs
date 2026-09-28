@@ -14,8 +14,9 @@ namespace Dependably.Infrastructure;
 public sealed class NpgsqlMetadataStore : IMetadataStore
 {
     // set_config rather than SET ROLE so both values bind as parameters. 'none' is SET ROLE NONE:
-    // back to the connecting (owner) role.
-    private const string BindSessionSql =
+    // back to the connecting (owner) role. Test seam (InternalsVisibleTo Dependably.Tests): a
+    // pooler simulation runs this exact bind on its shared backend.
+    internal const string BindSessionSql =
         "SELECT set_config('role', @role, false), " +
         "set_config('dependably.org_id', CASE WHEN @orgId = '' THEN '' ELSE pg_backend_pid()::text || ':' || @orgId END, false)";
 

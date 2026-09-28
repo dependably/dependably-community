@@ -164,6 +164,61 @@ public sealed class CacheArtifactRepository
     }
 
     /// <summary>
+    /// Total bytes held by proxy-cached OCI <b>layers</b> — the part of the cache tier
+    /// <see cref="GetTotalSizeBytesAsync"/> cannot see, because a proxied OCI layer is recorded only
+    /// in <c>oci_blobs</c>, never in <c>cache_artifact</c> (see <c>CacheEvictionService.EvictOciAsync</c>).
+    /// A proxied OCI <b>manifest</b> is different: pulling a tag both writes an <c>oci_blobs</c> row
+    /// (<c>OciUpstreamResolver.Cache.cs</c>) <i>and</i> catalogues it onto <c>cache_artifact</c>
+    /// (<c>ecosystem = 'oci'</c>, <c>version</c> = the manifest digest — see
+    /// <c>OciUpstreamResolver.RecordCatalogVersionAsync</c>), so it already counts toward
+    /// <see cref="GetTotalSizeBytesAsync"/>; this method excludes any digest that also has a
+    /// <c>cache_artifact</c> row so a proxied manifest is never counted twice.
+    /// Used by <c>CacheSizeAlertService</c> so its threshold check reads the same evictable-cache
+    /// figure <c>CACHE_MAX_SIZE_BYTES</c> is compared against, plus this OCI-layer share, rather than
+    /// a gauge that is silent whenever the cache and registry tiers share one backing store (the
+    /// default deployment).
+    ///
+    /// <para>
+    /// <c>oci_blobs</c> is keyed <c>(digest, org_id)</c> — the same content pulled by two orgs is two
+    /// rows sharing one physical, content-addressed blob — so this sums once per distinct digest
+    /// rather than once per row, or a shared layer pulled by five tenants would count five times.
+    /// A digest that carries an <c>origin = 'uploaded'</c> row for ANY org is excluded even where it
+    /// also carries a <c>'proxy'</c> row for another org: that digest is a hosted/pushed artefact
+    /// somewhere in the instance, not evictable cache content, and <c>CacheEvictionService</c>'s own
+    /// OCI eviction path never touches an uploaded digest either. This is not exhaustive: a digest
+    /// first pulled by proxy and later re-tagged and pushed keeps <c>origin = 'proxy'</c> on its
+    /// <c>oci_blobs</c> row forever, because neither write path rewrites an existing row's origin
+    /// (<c>PackageRepository.GoOci.cs</c>'s claim-release doc comment), so such a digest is still
+    /// counted here even though a hosted <c>package_versions</c> row now also depends on it —
+    /// acceptable slack for a warning threshold, not a hard eviction cap.
+    /// </para>
+    /// </summary>
+    public async Task<long> GetOciProxyOnlyDistinctDigestBytesAsync(CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: the cache tier is one shared, content-addressed plane across every org — sizing
+        // it means summing every org's oci_blobs rows, exactly like GetTotalSizeBytesAsync above.
+        return await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COALESCE(SUM(d.size_bytes), 0)
+            FROM (
+                SELECT ob.digest AS digest, MAX(ob.size_bytes) AS size_bytes
+                FROM oci_blobs ob
+                WHERE ob.origin = 'proxy'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM oci_blobs up
+                      WHERE up.digest = ob.digest AND up.origin = 'uploaded'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cache_artifact ca
+                      WHERE ca.ecosystem = 'oci' AND ca.version = ob.digest
+                  )
+                GROUP BY ob.digest
+            ) d
+            """);
+    }
+
+    /// <summary>
     /// The shared <c>cache_artifact.blob_key</c> for <paramref name="id"/>, or null when the row is
     /// gone. Distinct from the value the serve projections return, which resolve the calling
     /// tenant's own content binding first — a delete path that has to reclaim BOTH the tenant's

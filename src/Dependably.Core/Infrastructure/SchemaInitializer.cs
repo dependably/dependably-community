@@ -24,6 +24,9 @@ public sealed partial class SchemaInitializer
     private readonly IConfiguration? _config;
     private readonly TimeProvider _time;
 
+    // Postgres server_version_num, read at the start of each Postgres boot; null on SQLite.
+    private int? _postgresServerVersionNum;
+
     // [ModuleInitializer], not a static constructor: Dapper caches its compiled "add parameters"
     // emitter per (SQL text, parameter CLR type) the first time that pair is ever executed, and
     // that cached emitter is what decides whether a raw DateTimeOffset parameter goes through
@@ -104,9 +107,9 @@ public sealed partial class SchemaInitializer
         bool locked = await TryAcquireMigrationLockAsync(conn, ct);
         try
         {
-            // Before the schema: the views are declared security_invoker under enforcement, which
-            // Postgres older than 15 rejects, so an unsupported server must be ruled out first.
-            await RuleOutUnsupportedServerAsync(conn, ct);
+            // Before the schema: the view DDL declares security_invoker wherever the server supports
+            // it, whatever this node's row-level-security mode, so the server version is read first.
+            await ProbePostgresServerVersionAsync(conn, ct);
             await ApplySchemaAsync(conn, sql, ct, afterBaseSchema);
             await ApplyRowLevelSecurityAsync(conn, ct);
         }
@@ -119,18 +122,22 @@ public sealed partial class SchemaInitializer
         }
     }
 
-    // A defaulted enforce on Postgres older than 15 cannot declare its views security_invoker; fall
-    // back before the view DDL runs. An explicit enforce continues, and boot verification refuses it.
-    private async Task RuleOutUnsupportedServerAsync(DbConnection conn, CancellationToken ct)
+    // Reads the server version on every Postgres boot, because the view DDL keys security_invoker on
+    // it. A defaulted enforce on Postgres older than 15 falls back to owner sessions here, before the
+    // view DDL runs. An explicit enforce continues with plain views, and boot verification refuses
+    // it, naming both the server version and the views that are not security_invoker.
+    private async Task ProbePostgresServerVersionAsync(DbConnection conn, CancellationToken ct)
     {
-        if (EnforcedRowLevelSecurity is not { Explicit: false })
+        if (_db.Provider != DbProvider.Postgres)
         {
             return;
         }
 
         int version = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
             "SELECT current_setting('server_version_num')::int", cancellationToken: ct));
-        if (version < PostgresRowLevelSecurityInstaller.MinimumServerVersionNum)
+        _postgresServerVersionNum = version;
+        if (EnforcedRowLevelSecurity is { Explicit: false }
+            && version < PostgresRowLevelSecurityInstaller.MinimumServerVersionNum)
         {
             FallBackToOwnerSessions(
                 $"Postgres server_version_num {version} is below {PostgresRowLevelSecurityInstaller.MinimumServerVersionNum}.");
@@ -614,6 +621,14 @@ public sealed partial class SchemaInitializer
         // window. See SchemaInitializer.UpstreamCredentialHistory.cs.
         await RunOnceAsync(
             conn, "backfill_upstream_credential_history_from_audit", BackfillUpstreamCredentialHistoryFromAuditAsync);
+
+        // Widen usage_daily.meter's CHECK to admit 'cache_storage_bytes', the day's high-water
+        // mark of billed (but not cappable) proxy-cache storage. Fresh installs get the wider set
+        // from the CREATE TABLE block; this brings existing databases in line. Same shape as
+        // every other Expand*CheckAsync migration above.
+        await RunOnceAsync(
+            conn, "expand_usage_daily_meter_check_cache_storage", ExpandUsageDailyMeterCheckAsync,
+            transactional: false);
     }
 
     // Phase 3 — the views (which need every table and column to exist) and the convergence sweeps
@@ -1802,6 +1817,61 @@ public sealed partial class SchemaInitializer
         // design for every one of them.
         await VerifyCheckAdmitsAsync(
             conn, "project_documents", "signature_status", "unanchored", allowMissingCheck: true);
+    }
+
+    // Widen usage_daily.meter's CHECK to admit 'cache_storage_bytes', the day's high-water mark of
+    // billable proxy-cache storage (captured from storage_snapshot.cache_attributed_bytes, at each
+    // tenant's full attributed size, the same way 'storage_bytes' is captured from billable_bytes).
+    // Fresh installs get the wider set from the CREATE TABLE blocks; this brings existing databases
+    // in line. Same shape and reasoning as the alert.type widenings above.
+    //
+    // Postgres: drop + re-add the auto-named CHECK constraint. IF EXISTS covers an install that
+    // never carried one.
+    //
+    // SQLite: rewrite the stored CREATE TABLE text in place via the writable_schema pattern. The
+    // literal REPLACE is exact because the stored text is verbatim what Schema.sql emitted, and it
+    // is a no-op on any database whose usage_daily table does not carry the narrower clause.
+    private Task ExpandUsageDailyMeterCheckAsync(DbConnection conn)
+    {
+        return _db.Provider == DbProvider.Postgres
+            ? conn.ExecuteAsync("""
+                ALTER TABLE usage_daily DROP CONSTRAINT IF EXISTS usage_daily_meter_check;
+                ALTER TABLE usage_daily ADD  CONSTRAINT usage_daily_meter_check
+                    CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes', 'cache_storage_bytes'));
+                """)
+            : ExpandUsageDailyMeterCheckSqliteAsync(conn);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatted SQL queries should be reviewed",
+        Justification = "PRAGMA schema_version cannot be parameter-bound — SQLite's PRAGMA grammar does not " +
+                        "accept ? / @name placeholders for the right-hand side. The interpolated value is a " +
+                        "long we just read from PRAGMA schema_version itself; it never touches user input.")]
+    private static async Task ExpandUsageDailyMeterCheckSqliteAsync(DbConnection conn)
+    {
+        const string oldCheck = "CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes'))";
+        const string newCheck =
+            "CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes', 'cache_storage_bytes'))";
+
+        // Bumping schema_version forces SQLite to reload the schema on the next read so existing
+        // connections stop enforcing the old CHECK; writable_schema = RESET both disables write
+        // mode and forces the reload. See ExpandRoleCheckSqliteAsync for the full rationale.
+        await conn.ExecuteAsync("PRAGMA writable_schema = ON");
+        try
+        {
+            await conn.ExecuteAsync("""
+                UPDATE sqlite_schema
+                SET sql = REPLACE(sql, @old, @new)
+                WHERE type = 'table' AND name = 'usage_daily'
+                """, new { old = oldCheck, @new = newCheck });
+            long version = await conn.ExecuteScalarAsync<long>("PRAGMA schema_version");
+            await conn.ExecuteAsync(
+                "PRAGMA schema_version = " + (version + 1).ToString(CultureInfo.InvariantCulture));
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA writable_schema = RESET");
+        }
+        await VerifyCheckAdmitsAsync(conn, "usage_daily", "meter", "cache_storage_bytes");
     }
 
     // Rewrite legacy 'block' policy rows to 'block_all'. The old single 'block' value denied

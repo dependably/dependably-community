@@ -50,7 +50,7 @@ public sealed class ReadinessAggregatorTests : IAsyncLifetime
         ReadinessOptions options,
         TimeProvider time,
         IMetadataStore? db = null)
-        => new(db ?? _db, blobs, EmptyServices(), logger: null, time: time, options: options);
+        => new(db ?? _db, new TieredBlobStorage(blobs, blobs), EmptyServices(), logger: null, time: time, options: options);
 
     private static ReadinessOptions FullPlaneDefaults() => ReadinessOptions.Resolve(Config());
 

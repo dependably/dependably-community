@@ -290,12 +290,15 @@ public sealed partial class CargoController
         // the content-addressed BlobKeys.Cargo key. Prefer the stored row key so both shapes
         // resolve, falling back to the reconstructed Cargo key for any row that predates the
         // hosted-publish path. A yanked version is still downloadable — yank hides a version
-        // from resolution, it does not delete the artefact.
-        string blobKey = await ResolveLocalBlobKeyAsync(orgId, name, version, ct)
-            ?? BlobKeys.Cargo(orgId, name, version);
+        // from resolution, it does not delete the artefact. A hosted crate's bytes are in the
+        // registry tier and a proxied crate's in the cache tier; the reconstructed Cargo key is
+        // a proxy key, so it probes the cache tier.
+        var local = await ResolveLocalBlobKeyAsync(orgId, name, version, ct);
+        string blobKey = local?.BlobKey ?? BlobKeys.Cargo(orgId, name, version);
+        var tier = local?.Tier ?? _blobs.Cache;
         string storeKey = BlobKeys.StoreKey(blobKey);
 
-        if (await TryServeCachedCrateAsync(orgId, name, version, storeKey, token, settings, ct) is { } hit)
+        if (await TryServeCachedCrateAsync(orgId, name, version, tier, storeKey, token, settings, ct) is { } hit)
         {
             return hit;
         }
@@ -340,19 +343,19 @@ public sealed partial class CargoController
     }
 
     /// <summary>
-    /// Serves a crate already in the store — by presigned redirect when one is allowed, else by
-    /// stream — after the claim recheck and block gate, or returns null on a miss so the caller
-    /// proxies it from upstream.
+    /// Serves a crate already in <paramref name="tier"/> — by presigned redirect when one is
+    /// allowed, else by stream — after the claim recheck and block gate, or returns null on a miss
+    /// so the caller proxies it from upstream.
     /// </summary>
     private async Task<IActionResult?> TryServeCachedCrateAsync(
-        string orgId, string name, string version, string storeKey,
+        string orgId, string name, string version, IBlobStore tier, string storeKey,
         TokenRecord? token, OrgSettings settings, CancellationToken ct)
     {
         // A read that may be redirected asks through the presign probe, whose answer is both the
         // hit-or-miss decision and the redirect's existence check, so a redirected hit asks the
         // store once. Any other read asks the store directly.
-        var probe = _presign is null ? null : await _presign.ProbeAsync(HttpContext, _blobs, storeKey, "cargo", ct);
-        if (!(probe?.Exists ?? await _blobs.ExistsAsync(storeKey, ct)))
+        var probe = _presign is null ? null : await _presign.ProbeAsync(HttpContext, tier, storeKey, "cargo", ct);
+        if (!(probe?.Exists ?? await tier.ExistsAsync(storeKey, ct)))
         {
             return null;
         }
@@ -374,7 +377,7 @@ public sealed partial class CargoController
         }
 
         var redirect = probe is null ? null : await TryRedirectCrateAsync(orgId, name, version, probe, ct);
-        var cachedStream = redirect is null ? await _blobs.GetAsync(storeKey, ct) : null;
+        var cachedStream = redirect is null ? await tier.GetAsync(storeKey, ct) : null;
         if (redirect is null && cachedStream is null)
         {
             return null;
@@ -533,7 +536,7 @@ public sealed partial class CargoController
 
             // Serve straight from the just-staged blob so the crate is streamed to the response
             // rather than held in memory. StoreKey(blobKey) is the Cargo key unchanged.
-            var crateStream = await _blobs.GetAsync(BlobKeys.StoreKey(blobKey), ct);
+            var crateStream = await _blobs.Cache.GetAsync(BlobKeys.StoreKey(blobKey), ct);
             return crateStream is null
                 ? NotFound()
                 : File(crateStream, "application/octet-stream", $"{name}-{version}.crate");
@@ -573,7 +576,7 @@ public sealed partial class CargoController
             return cacheArtifactId;
         }
 
-        await _blobs.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
+        await _blobs.Cache.DeleteAsync(BlobKeys.StoreKey(blobKey), ct);
         throw new ProxyCatalogueUnavailableException("cargo", name, version);
     }
 
@@ -590,7 +593,7 @@ public sealed partial class CargoController
     {
         try
         {
-            var stream = await _blobs.GetAsync(BlobKeys.StoreKey(blobKey), ct);
+            var stream = await _blobs.Cache.GetAsync(BlobKeys.StoreKey(blobKey), ct);
             if (stream is null)
             {
                 return;
@@ -625,13 +628,15 @@ public sealed partial class CargoController
     }
 
     /// <summary>
-    /// Returns the stored <c>blob_key</c> for a local crate version (proxy or hosted), or null
-    /// when no local row exists. Checks the hosted/legacy-proxy <c>package_versions</c> path
+    /// Returns the stored <c>blob_key</c> for a local crate version (proxy or hosted) with the
+    /// tier holding its bytes, or null when no local row exists. A <c>package_versions</c> row is
+    /// a hosted crate in the registry tier; a <c>cache_artifact</c> row is a proxied crate in
+    /// the cache tier. Checks the hosted/legacy-proxy <c>package_versions</c> path
     /// first; falls back to the global plane (<c>cache_artifact</c>) for proxy crates recorded
     /// after the P3b flip. Tenant-scoped via the JOIN on <c>packages.org_id</c> (PV path) and
     /// via <c>tenant_artifact_access</c> (global-plane path).
     /// </summary>
-    private async Task<string?> ResolveLocalBlobKeyAsync(
+    private async Task<(string BlobKey, IBlobStore Tier)?> ResolveLocalBlobKeyAsync(
         string orgId, string name, string version, CancellationToken ct)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -651,14 +656,14 @@ public sealed partial class CargoController
 
         if (pvKey is not null)
         {
-            return pvKey;
+            return (pvKey, _blobs.Registry);
         }
 
         // Global-plane lookup for proxy crates recorded after the P3b flip.
         string filename = $"{name}-{version}.crate";
         var ca = await _cacheArtifacts.GetServeFactsByCoordinateAsync(
             orgId, "cargo", name, version, filename, ct);
-        return ca?.BlobKey;
+        return ca is null ? null : (ca.BlobKey, _blobs.Cache);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

@@ -30,7 +30,7 @@ internal static class NpmHandlerRegistration
                 packages: sp.GetRequiredService<PackageRepository>(),
                 tokens: sp.GetRequiredService<TokenRepository>(),
                 audit: sp.GetRequiredService<AuditRepository>(),
-                blobs: sp.GetRequiredService<IBlobStore>(),
+                blobs: sp.GetRequiredService<TieredBlobStorage>(),
                 publish: sp.GetRequiredService<IPackagePublishService>(),
                 claimResolver: sp.GetRequiredService<ClaimResolver>(),
                 licenses: sp.GetRequiredService<LicenseRepository>(),

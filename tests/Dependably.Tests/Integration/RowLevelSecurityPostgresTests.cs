@@ -30,6 +30,14 @@ public sealed class RowLevelSecurityPostgresTests
     public async Task Boot_CoversEveryTenantTable_AndLeavesNoProblem()
     {
         await using var db = await RlsDatabase.CreateInitializedAsync();
+        // A defaulted enforce falls back instead of failing, so a probe that mistook this direct
+        // connection for a pooler would show here as a fallback reason.
+        var booted = new NpgsqlMetadataStore(
+            db.OwnerConnectionString, db.Options with { Explicit = false }, new FixedAmbient(AmbientTenantKind.None, null));
+        await new SchemaInitializer(booted).InitializeAsync();
+
+        Assert.True(booted.RowLevelSecurity.Enforced);
+        Assert.Null(booted.RowLevelSecurityFallbackReason);
 
         await using var owner = await db.Store().OpenCrossTenantAsync("test: catalogue inspection");
         Assert.Empty(await PostgresRowLevelSecurityInstaller.FindProblemsAsync(owner, db.Options));
@@ -375,6 +383,64 @@ public sealed class RowLevelSecurityPostgresTests
         Assert.Contains(problems, p => p.Contains("'org_storage_bytes'", StringComparison.Ordinal));
     }
 
+    // The views are shared by every replica, so a replica booting with the backstop off (or the
+    // migrate command) must not strip security_invoker out from under the enforced replicas.
+    [Fact]
+    public async Task OffModeBoot_OverAnEnforcedDatabase_LeavesViewsSecurityInvoker()
+    {
+        await using var db = await RlsDatabase.CreateInitializedAsync();
+
+        await new SchemaInitializer(new NpgsqlMetadataStore(db.OwnerConnectionString)).InitializeAsync();
+
+        await using (var owner = await db.Store().OpenCrossTenantAsync("test: catalogue inspection"))
+        {
+            Assert.Empty(await PostgresRowLevelSecurityInstaller.FindProblemsAsync(owner, db.Options));
+        }
+
+        await db.SeedTwoTenantsAsync();
+        await SeedOciBlobsForBothTenantsAsync(db);
+
+        Assert.Equal(new[] { OrgA }, await TenantOrgsInStorageViewAsync(db, OrgA));
+    }
+
+    // Its twin: the same probes must catch a view that really is stripped, or the test above would
+    // pass whether or not the off-mode boot kept the option.
+    [Fact]
+    public async Task OffModeBoot_ThenStrippedView_IsReported_AndReadsEveryTenant()
+    {
+        await using var db = await RlsDatabase.CreateInitializedAsync();
+        await new SchemaInitializer(new NpgsqlMetadataStore(db.OwnerConnectionString)).InitializeAsync();
+        await db.SeedTwoTenantsAsync();
+        await SeedOciBlobsForBothTenantsAsync(db);
+
+        await using (var owner = await db.Store().OpenCrossTenantAsync("test: simulate a stripped view"))
+        {
+            await owner.ExecuteAsync("ALTER VIEW org_storage_bytes RESET (security_invoker)");
+            var problems = await PostgresRowLevelSecurityInstaller.FindProblemsAsync(owner, db.Options);
+            Assert.Contains(problems, p => p.Contains("'org_storage_bytes'", StringComparison.Ordinal));
+        }
+
+        Assert.Equal(new[] { OrgA, OrgB }, await TenantOrgsInStorageViewAsync(db, OrgA));
+    }
+
+    private static async Task SeedOciBlobsForBothTenantsAsync(RlsDatabase db)
+    {
+        await using var owner = await db.Store().OpenCrossTenantAsync("test: seed");
+        await owner.ExecuteAsync(
+            """
+            INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key)
+            VALUES ('sha256:a', @a, 'application/octet-stream', 10, 'k-a'),
+                   ('sha256:b', @b, 'application/octet-stream', 20, 'k-b')
+            """,
+            new { a = OrgA, b = OrgB });
+    }
+
+    private static async Task<string[]> TenantOrgsInStorageViewAsync(RlsDatabase db, string orgId)
+    {
+        await using var conn = await db.Store().OpenForTenantAsync(TenantDbScope.ForOrgIteration(orgId));
+        return (await conn.QueryAsync<string>("SELECT DISTINCT org_id FROM org_storage_bytes ORDER BY org_id")).ToArray();
+    }
+
     // A shared-blob reference count run from a tenant request must still see every tenant's
     // references. Under a tenant binding it would count only the caller's (already removed) row,
     // report the blob unreferenced, and delete bytes another tenant still serves.
@@ -458,9 +524,105 @@ public sealed class RowLevelSecurityPostgresTests
         await Assert.ThrowsAnyAsync<Exception>(() => new SchemaInitializer(db.Store()).InitializeAsync());
     }
 
+    // A transaction-mode pool at idle hands every client the same backend, so each bind overwrites
+    // the last and the earlier connections read back the final tenant — on the backend that wrote
+    // it, so the pid in the setting matches and DR002 stays silent. Only the boot probe sees it.
+    [Fact]
+    public async Task Probe_BehindATransactionModePool_ReportsInstability()
+    {
+        await using var db = await RlsDatabase.CreateInitializedAsync();
+        await using var pooler = new TransactionPoolerStore(db);
+
+        var problems = await PostgresRowLevelSecurityInstaller.ProbeTenantSessionAsync(pooler, db.Options);
+
+        Assert.NotEmpty(problems);
+        Assert.Contains(problems, p => p.Contains("pool_mode=transaction", StringComparison.Ordinal));
+        Assert.Equal("rls-probe-3", await pooler.Backend.ExecuteScalarAsync<string>("SELECT dependably_current_org()"));
+    }
+
+    // Its twin: a direct, session-scoped connection keeps its backend and tenant, so the probe
+    // raises nothing and enforcement stays on.
+    [Fact]
+    public async Task Probe_OnADirectConnection_ReportsNothing()
+    {
+        await using var db = await RlsDatabase.CreateInitializedAsync();
+
+        Assert.Empty(await PostgresRowLevelSecurityInstaller.ProbeTenantSessionAsync(db.Store(), db.Options));
+    }
+
     private sealed class FixedAmbient(AmbientTenantKind kind, string? orgId) : IAmbientTenantScope
     {
         public AmbientTenant Current { get; } = new(kind, orgId);
+    }
+
+    /// <summary>
+    /// An in-process model of PgBouncer <c>pool_mode=transaction</c> with no concurrent load: one
+    /// real backend handed to every client, with no reset between them. Each tenant open runs the
+    /// production bind on that shared backend.
+    /// </summary>
+    private sealed class TransactionPoolerStore(RlsDatabase db) : IMetadataStore, IAsyncDisposable
+    {
+        public NpgsqlConnection Backend { get; } = new(
+            new NpgsqlConnectionStringBuilder(db.OwnerConnectionString) { Pooling = false }.ConnectionString);
+
+        public DbProvider Provider => DbProvider.Postgres;
+
+        public Task<DbConnection> OpenAsync(CancellationToken ct = default) =>
+            throw new NotSupportedException("The pooler simulation opens tenant connections only.");
+
+        public async Task<DbConnection> OpenForTenantAsync(TenantDbScope scope, CancellationToken ct = default)
+        {
+            if (Backend.State != System.Data.ConnectionState.Open)
+            {
+                await Backend.OpenAsync(ct);
+            }
+
+            await Backend.ExecuteAsync(
+                NpgsqlMetadataStore.BindSessionSql, new { role = db.Options.RoleName, orgId = scope.OrgId });
+            return new SharedBackendConnection(Backend);
+        }
+
+        public ValueTask DisposeAsync() => Backend.DisposeAsync();
+    }
+
+    /// <summary>A client's handle on the pooler's shared backend; closing it leaves the backend open.</summary>
+    private sealed class SharedBackendConnection(NpgsqlConnection backend) : DbConnection
+    {
+        [System.Diagnostics.CodeAnalysis.AllowNull]
+        public override string ConnectionString
+        {
+            get => backend.ConnectionString;
+            set => throw new NotSupportedException();
+        }
+
+        public override string Database => backend.Database;
+
+        public override string DataSource => backend.DataSource;
+
+        public override string ServerVersion => backend.ServerVersion;
+
+        public override System.Data.ConnectionState State => backend.State;
+
+        public override void ChangeDatabase(string databaseName) => backend.ChangeDatabase(databaseName);
+
+        public override void Close()
+        {
+        }
+
+        public override void Open() => backend.Open();
+
+        public override Task OpenAsync(CancellationToken cancellationToken) => backend.OpenAsync(cancellationToken);
+
+        protected override DbTransaction BeginDbTransaction(System.Data.IsolationLevel isolationLevel) =>
+            backend.BeginTransaction(isolationLevel);
+
+        protected override DbCommand CreateDbCommand() => backend.CreateCommand();
+
+        protected override void Dispose(bool disposing)
+        {
+        }
+
+        public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     /// <summary>

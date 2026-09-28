@@ -101,6 +101,7 @@
     { key: 'egressBytes',         label: $t('system.usage.columns.egress'),         sortable: true, align: 'right', defaultDir: 'desc' },
     { key: 'egressMetadataBytes', label: $t('system.usage.columns.metadata'),       sortable: true, align: 'right', defaultDir: 'desc' },
     { key: 'billableStorageBytes', label: $t('system.usage.columns.storage'),       sortable: true, align: 'right', defaultDir: 'desc' },
+    { key: 'cacheStorageBytes',   label: $t('system.usage.columns.cacheStorage'),   sortable: true, align: 'right', defaultDir: 'desc' },
     { key: 'snapshot',            label: $t('system.usage.columns.snapshot'),       sortable: false, align: 'right' },
     { key: 'requestCount',        label: $t('system.usage.columns.requests'),       sortable: true, align: 'right', defaultDir: 'desc' },
     { key: 'metadataRequestCount', label: $t('system.usage.columns.metadataRequests'), sortable: true, align: 'right', defaultDir: 'desc' },
@@ -156,6 +157,10 @@
       <div class="totals-item">
         <span class="totals-label">{$t('system.usage.totals.storage')}</span>
         <span class="totals-value">{$formatBytes(totals.billableStorageBytes)}</span>
+      </div>
+      <div class="totals-item">
+        <span class="totals-label">{$t('system.usage.totals.cacheStorage')}</span>
+        <span class="totals-value">{$formatBytes(totals.cacheStorageBytes)}</span>
       </div>
     </div>
     <section class="signals-strip" aria-labelledby="usage-signals-title">
@@ -225,6 +230,7 @@
       <td class="num">{$formatBytes(r.egressBytes)}</td>
       <td class="num">{$formatBytes(r.egressMetadataBytes)}</td>
       <td class="num">{$formatBytes(r.billableStorageBytes)}</td>
+      <td class="num">{$formatBytes(r.cacheStorageBytes)}</td>
       <td class="num">
         {#if r.snapshot}
           {$formatBytes(r.snapshot.billableBytes)}

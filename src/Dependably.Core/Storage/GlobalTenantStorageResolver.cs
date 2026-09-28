@@ -1,14 +1,15 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Usage;
 
 namespace Dependably.Storage;
 
 /// <summary>
 /// Community pool-mode <see cref="ITenantStorageResolver"/>. Returns the singleton
 /// registry and cache stores from <see cref="TieredBlobStorage"/> regardless of
-/// <c>tenantId</c>, but still applies the lifecycle and provisioning-state gates
-/// defensively — a hand-modified <c>orgs.status</c> row or a future enterprise import
-/// path can't slip through.
+/// <c>tenantId</c>, but still applies the lifecycle, usage-posture and provisioning-state
+/// gates defensively — a hand-modified <c>orgs.status</c> row, or a management-plane import
+/// into an org at its usage cap, can't slip through.
 ///
 /// Enterprise's resolver lives out of tree and consults <c>tenant_storage</c> to
 /// return per-tenant <see cref="S3BlobStore"/> instances. It applies the same gates,
@@ -33,10 +34,12 @@ public sealed class GlobalTenantStorageResolver : ITenantStorageResolver
 
         // Gate 1: tenant lifecycle status. The CHECK constraint on orgs.status keeps this
         // bounded to active|suspended|archived|deleting|read_only. The query returns null when
-        // the org row is missing — that's also a refusal.
-        string status = await conn.QuerySingleOrDefaultAsync<string?>(
-            "SELECT status FROM orgs WHERE id = @tenantId",
+        // the org row is missing — that's also a refusal. usage_posture rides the same row read
+        // for Gate 1b below.
+        var row = await conn.QuerySingleOrDefaultAsync<OrgGateRow>(
+            "SELECT status AS Status, usage_posture AS UsagePosture FROM orgs WHERE id = @tenantId",
             new { tenantId }) ?? throw new TenantNotReadyException(tenantId, TenantNotReadyReason.NotFound, "tenant not found");
+        string status = row.Status;
         if (status == "read_only")
         {
             // Narrower than the other non-active values: a read intent is admitted (the org's
@@ -51,6 +54,18 @@ public sealed class GlobalTenantStorageResolver : ITenantStorageResolver
         else if (status != "active")
         {
             throw new TenantNotReadyException(tenantId, TenantNotReadyReason.StatusInactive, $"status='{status}'");
+        }
+
+        // Gate 1b: usage posture. The same refusal TenantStatusEnforcementMiddleware applies to a
+        // protocol-plane write, applied here to a write intent on any surface — the
+        // management-plane bulk import (ImportController) never crosses that middleware's
+        // protocol-plane check but still writes hosted artefact bytes, which is exactly what an
+        // org at its usage cap must not grow. A read intent is never gated by posture: downloads
+        // keep working at the cap.
+        if (forWrite && UsagePostures.RefusesUploads(row.UsagePosture))
+        {
+            throw new TenantNotReadyException(tenantId, TenantNotReadyReason.UsageCapReached,
+                $"usage_posture='{row.UsagePosture}'");
         }
 
         // Gate 2: async provisioning state for the registry bucket. Absent row counts as
@@ -76,5 +91,11 @@ public sealed class GlobalTenantStorageResolver : ITenantStorageResolver
         // Community pool: all tenants share the singleton registry. Enterprise overrides
         // this to consult tenant_storage and return the tenant's silo bucket store.
         return _tiered.Registry;
+    }
+
+    private sealed class OrgGateRow
+    {
+        public string Status { get; init; } = "";
+        public string? UsagePosture { get; init; }
     }
 }

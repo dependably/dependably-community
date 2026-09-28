@@ -37,9 +37,10 @@ public sealed record StoredByteReport(
 /// <para><b>Planes</b> are the top-level key families in <see cref="BlobKeys.PlanePrefixes"/>. The
 /// store side streams <see cref="IBlobStore.ListAsync"/> for each prefix and keeps only running
 /// sums, never a key list. It walks both tiers when <see cref="TieredBlobStorage.IsSplit"/> and the
-/// one store once when the tiers are the same instance, because several ecosystems read proxied
-/// bytes from the registry tier and a tier-only sum would report drift that is not there. On a
-/// split deployment an OCI digest that arrived by push in one org and by proxy pull in another is
+/// one store once when the tiers are the same instance, because it counts every stored byte
+/// wherever it sits and a plane is not confined to one tier: <c>oci/</c> holds pushed layers in
+/// the registry tier and pulled layers in the cache tier, and <c>hex/</c> holds published docs in
+/// the registry tier and proxied docs in the cache tier. On a split deployment an OCI digest that arrived by push in one org and by proxy pull in another is
 /// held in both tiers, and the store side counts both copies, since both are stored.</para>
 ///
 /// <para><b>The metadata side</b> streams <see cref="StoredBytesRepository.StreamRecordedBlobsAsync"/>,

@@ -441,6 +441,10 @@
     <value>Quota must be a positive number of bytes, or null to clear.</value>
     <comment>422 detail for the tenant storage quota.</comment>
   </data>
+  <data name="error.system.cacheSizeWarnInvalid" xml:space="preserve">
+    <value>Cache size warning threshold must be a non-negative number of bytes.</value>
+    <comment>422 detail for instance_settings.cache_size_warn_bytes. Zero is valid — it disables the alert.</comment>
+  </data>
   <data name="error.system.usageCapInvalid" xml:space="preserve">
     <value>A usage cap must be a positive quantity, or null to clear it.</value>
     <comment>422 detail for a per-meter usage cap on PATCH /api/v1/system/tenants/{slug}/usage-limits.</comment>
@@ -709,6 +713,10 @@
   <data name="system.slack.adminDeleted" xml:space="preserve">
     <value>Dependably [system]: operator account deleted by {0}</value>
     <comment>Operator-Slack message template for system_admin.admin_deleted. {0} = actor email.</comment>
+  </data>
+  <data name="system.slack.cacheSizeThresholdExceeded" xml:space="preserve">
+    <value>Dependably [system]: the instance-wide proxy cache exceeded its configured size threshold — see System Health for details.</value>
+    <comment>Operator-Slack message template for system.cache_size_threshold_exceeded. No placeholders — the byte counts are in the audit-log detail, not the Slack line.</comment>
   </data>
   <data name="system.slack.genericEvent" xml:space="preserve">
     <value>Dependably [system]: {0}</value>

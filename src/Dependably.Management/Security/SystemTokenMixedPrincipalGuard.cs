@@ -8,10 +8,13 @@ namespace Dependably.Security;
 /// scheme and the <see cref="SystemTokenDefaults.Scheme"/> scheme at once — the shape a session
 /// cookie plus a <c>dpsys_…</c> Bearer header produces on one of the six <c>SystemController</c>
 /// actions whose <c>[Authorize]</c> lists both schemes. The two credentials can only ever arrive
-/// together this way: a JWT session is read from the cookie
+/// together this way: a JWT session is read from the <c>dependably_session</c> cookie
 /// (<see cref="Dependably.Infrastructure.Startup.AuthStartupExtensions"/>'s
-/// <c>OnJwtMessageReceivedAsync</c>), never from the <c>Authorization</c> header on these routes,
-/// so a plain Bearer header can carry only one credential at a time.
+/// <c>OnJwtMessageReceivedAsync</c> sets <c>ctx.Token</c> from it), and only when that cookie is
+/// absent does <c>JwtBearerHandler</c> fall back to its default of parsing
+/// <c>Authorization: Bearer</c> itself. A single Bearer header therefore carries one credential —
+/// a JWT or a <c>dpsys_…</c> token, never both — so the merged shape needs the cookie on one side
+/// and the header on the other.
 ///
 /// <para>
 /// When both schemes individually succeed, ASP.NET Core's policy evaluator merges them into one

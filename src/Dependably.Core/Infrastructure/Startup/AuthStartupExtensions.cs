@@ -178,6 +178,10 @@ internal static class AuthStartupExtensions
             // other in-process limiter.
             AddRescanLimiter(builder.Configuration, o, ipv6Prefix);
 
+            // Apex fleet-usage reports are per-caller with their own budget: the CSV export and
+            // the long-range per-tenant series are the most expensive reads on the management plane.
+            AddUsageReportLimiter(builder.Configuration, o, ipv6Prefix);
+
             // Global default covers authenticated management endpoints (/api/v1/*) that
             // carry no endpoint-specific policy. The SPA and CI tooling hit /api/v1 at
             // human-interactive rates; 300 requests/min per principal handles normal bursts
@@ -339,6 +343,32 @@ internal static class AuthStartupExtensions
                 _ => new SlidingWindowRateLimiterOptions
                 {
                     PermitLimit = rescanLimit,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = RateLimitWindowSegments,
+                    QueueLimit = 0,
+                });
+        });
+    }
+
+    // Apex fleet-usage reads (GET /api/v1/system/usage, /api/v1/system/usage.csv and
+    // /api/v1/system/tenants/{slug}/usage). Partitioned per caller like rescan (token hash →
+    // user sub → IP), because every route requires an authenticated system_admin. The CSV export
+    // materializes up to 50,000 rows per request and the per-tenant series query spans up to
+    // 400 days, so this bounds how often a caller can trigger that work, not the cost of one
+    // request. Default 30 requests/min per caller. It stacks under the 300/min management
+    // default — ClassifyGlobalScope always returns ManagementApi under /api/v1/ — so both budgets
+    // apply. In-process in both modes, like rescan: RedisRateLimitPolicy covers only the
+    // login, invite and token-create policies.
+    private static void AddUsageReportLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
+    {
+        int limit = int.TryParse(cfg["USAGE_REPORT_RATE_LIMIT_PERMITS"], out int up) ? up : 30;
+        o.AddPolicy("usage-report", httpContext =>
+        {
+            string key = RateLimitPartitions.GetManagementPartitionKey(httpContext, ipv6Prefix);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = limit,
                     Window = TimeSpan.FromMinutes(1),
                     SegmentsPerWindow = RateLimitWindowSegments,
                     QueueLimit = 0,
@@ -545,9 +575,9 @@ internal static class RateLimitDenialAuditRecorder
             "download" or "push" or "import" or "sbom-upload" =>
                 RateLimitPartitions.GetPartitionKey(ctx, ipv6Prefix),
 
-            // AddRescanLimiter deliberately keys like the management GlobalLimiter — token hash,
-            // then user sub, then IP.
-            "rescan" => RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix),
+            // AddRescanLimiter and AddUsageReportLimiter deliberately key like the management
+            // GlobalLimiter — token hash, then user sub, then IP — whatever the request path.
+            "rescan" or "usage-report" => RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix),
 
             // AddMetadataLimiter and AddAnonymousProbeLimiter are always in-process, keyed on the
             // bare source IP with no "ip:" prefix — authentication never changes their bucket.

@@ -139,6 +139,9 @@ public sealed class SystemUsageLimitsTests : IClassFixture<DependablyMultiFactor
     [InlineData("""{"egress_bytes":0}""")]
     [InlineData("""{"storage_bytes":-1}""")]
     [InlineData("""{"requests":10}""")]
+    // cache_storage_bytes is billed (usage_daily) but deliberately not a cap meter: proxy-cache
+    // growth is bounded by storage_quota_bytes (413), never by a usage cap.
+    [InlineData("""{"cache_storage_bytes":1000}""")]
     public async Task A_non_positive_cap_or_unknown_meter_is_422_and_changes_nothing(string capsJson)
     {
         using var sys = await _factory.CreateSystemAdminClient();

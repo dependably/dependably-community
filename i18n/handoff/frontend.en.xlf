@@ -11443,6 +11443,18 @@ dotnet/</target>
         <target>il y a {n}m</target>
       </segment>
     </unit>
+    <unit id="system.dashboard.health.cacheSizeAboveThresholdDetail">
+      <segment state="translated">
+        <source>{size} exceeds the configured {threshold} threshold — see Settings → Instance to adjust it</source>
+        <target>{size} dépasse le seuil configuré de {threshold} — voir Paramètres → Instance pour l&apos;ajuster</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.health.cacheSizeLabel">
+      <segment state="translated">
+        <source>Proxy cache size</source>
+        <target>Taille du cache proxy</target>
+      </segment>
+    </unit>
     <unit id="system.dashboard.health.depBlobStore">
       <segment state="translated">
         <source>Blob store</source>
@@ -12235,6 +12247,12 @@ dotnet/</target>
         <target>Défaut : {value}</target>
       </segment>
     </unit>
+    <unit id="system.settings.defaults.cacheSizeWarnBytes">
+      <segment state="translated">
+        <source>500 GB — 0 disables the alert</source>
+        <target>500 Go — 0 désactive l&apos;alerte</target>
+      </segment>
+    </unit>
     <unit id="system.settings.defaults.defaultStorageQuotaBytes">
       <segment state="translated">
         <source>unlimited (unset — no quota applied to new tenants)</source>
@@ -12311,6 +12329,12 @@ dotnet/</target>
       <segment state="translated">
         <source>90 days</source>
         <target>90 jours</target>
+      </segment>
+    </unit>
+    <unit id="system.settings.labels.cacheSizeWarnBytes">
+      <segment state="translated">
+        <source>Cache size warning threshold</source>
+        <target>Seuil d&apos;alerte de taille du cache</target>
       </segment>
     </unit>
     <unit id="system.settings.labels.defaultStorageQuotaBytes">
@@ -13353,8 +13377,8 @@ dotnet/</target>
     </unit>
     <unit id="system.tenantUsage.snapshot.cache">
       <segment state="translated">
-        <source>Cache-attributed</source>
-        <target>Attribué au cache</target>
+        <source>Billable cache storage</source>
+        <target>Stockage cache facturable</target>
       </segment>
     </unit>
     <unit id="system.tenantUsage.snapshot.capturedAt">
@@ -13397,6 +13421,12 @@ dotnet/</target>
       <segment state="translated">
         <source>Artefacts</source>
         <target>Artefacts</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.columns.cacheStorage">
+      <segment state="translated">
+        <source>Billable cache storage (avg)</source>
+        <target>Stockage cache facturable (moy.)</target>
       </segment>
     </unit>
     <unit id="system.usage.columns.dbRows">
@@ -13559,6 +13589,12 @@ dotnet/</target>
       <segment state="translated">
         <source>To</source>
         <target>Au</target>
+      </segment>
+    </unit>
+    <unit id="system.usage.totals.cacheStorage">
+      <segment state="translated">
+        <source>Billable cache storage (avg)</source>
+        <target>Stockage cache facturable (moy.)</target>
       </segment>
     </unit>
     <unit id="system.usage.totals.egress">

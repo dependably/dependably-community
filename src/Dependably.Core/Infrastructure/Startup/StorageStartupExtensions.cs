@@ -5,7 +5,7 @@ namespace Dependably.Infrastructure.Startup;
 
 /// <summary>
 /// Registers the metadata store (<see cref="IMetadataStore"/>) and the two-tier blob
-/// store (<see cref="TieredBlobStorage"/> / <see cref="IBlobStore"/>).
+/// store (<see cref="TieredBlobStorage"/>).
 /// </summary>
 internal static class StorageStartupExtensions
 {
@@ -57,19 +57,15 @@ internal static class StorageStartupExtensions
         $"Data Source={dbPath};Mode=ReadWriteCreate;Pooling=True";
 
     /// <summary>
-    /// Registers <see cref="TieredBlobStorage"/> and the default <see cref="IBlobStore"/>
-    /// (Registry tier). Per-tier overrides use the <c>_CACHE</c> / <c>_REGISTRY</c> env-var
-    /// suffix convention; unsuffixed values apply to both tiers.
+    /// Registers <see cref="TieredBlobStorage"/>. Per-tier overrides use the <c>_CACHE</c> /
+    /// <c>_REGISTRY</c> env-var suffix convention; unsuffixed values apply to both tiers. No
+    /// tier-agnostic <see cref="IBlobStore"/> is registered: every consumer takes
+    /// <see cref="TieredBlobStorage"/> and names the tier its bytes live in.
     /// </summary>
     // Blob storage. STORAGE_BACKEND selects the default backend for both tiers; per-tier
     // overrides (STORAGE_BACKEND_CACHE / STORAGE_BACKEND_REGISTRY plus the corresponding
     // backend-specific vars suffixed _CACHE / _REGISTRY) opt one or both tiers into a
     // different backing store for split-tier deployments.
-    //
-    // The default IBlobStore registration resolves to the REGISTRY tier so legacy callers
-    // that don't know about the split land on durable storage (the safer default — losing
-    // a registry write loses a published artefact, while losing a cache write just causes
-    // a re-fetch from upstream).
     internal static void AddDependablyBlobStore(this WebApplicationBuilder builder)
     {
         builder.Services.AddSingleton<TieredBlobStorage>(sp =>
@@ -89,8 +85,6 @@ internal static class StorageStartupExtensions
                 : defaultStore;
             return new TieredBlobStorage(cache, registry);
         });
-        builder.Services.AddSingleton<IBlobStore>(sp =>
-            sp.GetRequiredService<TieredBlobStorage>().Registry);
         // Presigned-read policy. Bound once at startup and default-off: with it off, no serve
         // path ever asks a store to sign a URL, so the registry stays the only way artefact
         // bytes leave. Registered unconditionally (including on edge nodes) so the serve paths

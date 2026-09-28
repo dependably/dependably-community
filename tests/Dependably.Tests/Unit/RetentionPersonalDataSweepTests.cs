@@ -42,7 +42,7 @@ public sealed class RetentionPersonalDataSweepTests : IAsyncLifetime
         var samlConfig = new SamlConfigRepository(_db, _clock);
         var trusted = new TrustedDeviceService(_db, _clock, cfg);
         return new RetentionService(new RetentionService.Dependencies(
-            _db, _blobs, jwt, invites, samlConfig, trusted, cfg, new AirGapMode(cfg),
+            _db, new TieredBlobStorage(_blobs, _blobs), jwt, invites, samlConfig, trusted, cfg, new AirGapMode(cfg),
             NullLogger<RetentionService>.Instance, _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(

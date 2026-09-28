@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Dependably.Infrastructure;
+using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -122,6 +123,7 @@ public sealed class SystemObservabilityController : ControllerBase
                 enabled = req.Enabled,
                 allowedIps = req.AllowedIps,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(new { warnings });

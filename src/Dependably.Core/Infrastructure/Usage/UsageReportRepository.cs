@@ -32,6 +32,8 @@ public sealed class UsageReportRepository
                COALESCE(u.MetadataRequestCount, 0) AS MetadataRequestCount,
                COALESCE(u.StorageMarkSum, 0) AS StorageMarkSum,
                COALESCE(u.StorageMarkCount, 0) AS StorageMarkCount,
+               COALESCE(u.CacheMarkSum, 0) AS CacheMarkSum,
+               COALESCE(u.CacheMarkCount, 0) AS CacheMarkCount,
                u.LastComputedAt AS LastComputedAt,
                s.hosted_bytes AS SnapshotHostedBytes,
                s.oci_uploaded_bytes AS SnapshotOciUploadedBytes,
@@ -54,6 +56,8 @@ public sealed class UsageReportRepository
                    SUM(CASE WHEN meter = 'egress_metadata_bytes' THEN request_count ELSE 0 END) AS MetadataRequestCount,
                    SUM(CASE WHEN meter = 'storage_bytes' THEN quantity ELSE 0 END) AS StorageMarkSum,
                    SUM(CASE WHEN meter = 'storage_bytes' THEN 1 ELSE 0 END) AS StorageMarkCount,
+                   SUM(CASE WHEN meter = 'cache_storage_bytes' THEN quantity ELSE 0 END) AS CacheMarkSum,
+                   SUM(CASE WHEN meter = 'cache_storage_bytes' THEN 1 ELSE 0 END) AS CacheMarkCount,
                    MAX(computed_at) AS LastComputedAt
             FROM usage_daily
             WHERE bucket >= @fromDay AND bucket < @toDayExclusive
@@ -71,7 +75,8 @@ public sealed class UsageReportRepository
         SELECT ids.org_id AS OrgId, NULL AS Slug, NULL AS Status, NULL AS DeletedAt,
                COALESCE(u.EgressBytes, 0), COALESCE(u.EgressRedirectBytes, 0), COALESCE(u.EgressMetadataBytes, 0),
                COALESCE(u.RequestCount, 0), COALESCE(u.MetadataRequestCount, 0),
-               COALESCE(u.StorageMarkSum, 0), COALESCE(u.StorageMarkCount, 0), u.LastComputedAt,
+               COALESCE(u.StorageMarkSum, 0), COALESCE(u.StorageMarkCount, 0),
+               COALESCE(u.CacheMarkSum, 0), COALESCE(u.CacheMarkCount, 0), u.LastComputedAt,
                s.hosted_bytes, s.oci_uploaded_bytes, s.cache_attributed_bytes, s.billable_bytes,
                s.hosted_version_count, s.oci_manifest_count, s.oci_blob_count, s.cache_entry_count, s.db_row_count,
                s.captured_at, s.day_utc
@@ -89,6 +94,8 @@ public sealed class UsageReportRepository
                    SUM(CASE WHEN meter = 'egress_metadata_bytes' THEN request_count ELSE 0 END) AS MetadataRequestCount,
                    SUM(CASE WHEN meter = 'storage_bytes' THEN quantity ELSE 0 END) AS StorageMarkSum,
                    SUM(CASE WHEN meter = 'storage_bytes' THEN 1 ELSE 0 END) AS StorageMarkCount,
+                   SUM(CASE WHEN meter = 'cache_storage_bytes' THEN quantity ELSE 0 END) AS CacheMarkSum,
+                   SUM(CASE WHEN meter = 'cache_storage_bytes' THEN 1 ELSE 0 END) AS CacheMarkCount,
                    MAX(computed_at) AS LastComputedAt
             FROM usage_daily
             WHERE bucket >= @fromDay AND bucket < @toDayExclusive
@@ -116,6 +123,8 @@ public sealed class UsageReportRepository
             ["redirectBytes"] = ("x.EgressRedirectBytes", "DESC"),
             ["billableStorageBytes"] =
                 ("(CASE WHEN x.StorageMarkCount = 0 THEN 0.0 ELSE x.StorageMarkSum * 1.0 / x.StorageMarkCount END)", "DESC"),
+            ["cacheStorageBytes"] =
+                ("(CASE WHEN x.CacheMarkCount = 0 THEN 0.0 ELSE x.CacheMarkSum * 1.0 / x.CacheMarkCount END)", "DESC"),
             ["requestCount"] = ("x.RequestCount", "DESC"),
             ["metadataRequestCount"] = ("x.MetadataRequestCount", "DESC"),
             // StorageSnapshotRow.CountArtifacts, in SQL.
@@ -206,6 +215,20 @@ public sealed class UsageReportRepository
             """,
             args) ?? 0;
 
+        // xtenant: fleet-wide billable proxy-cache-storage total — sum of each tenant's own
+        // monthly average of daily cache_storage_bytes marks in the range, across every tenant.
+        double cacheAvgTotal = await conn.ExecuteScalarAsync<double?>(
+            """
+            SELECT COALESCE(SUM(avg_bytes), 0)
+            FROM (
+                SELECT org_id, SUM(quantity) * 1.0 / COUNT(*) AS avg_bytes
+                FROM usage_daily
+                WHERE meter = 'cache_storage_bytes' AND bucket >= @fromDay AND bucket < @toDayExclusive
+                GROUP BY org_id
+            ) t
+            """,
+            args) ?? 0;
+
         return new FleetUsageTotals
         {
             EgressBytes = egress.EgressBytes ?? 0,
@@ -214,6 +237,7 @@ public sealed class UsageReportRepository
             RequestCount = egress.RequestCount ?? 0,
             MetadataRequestCount = egress.MetadataRequestCount ?? 0,
             BillableStorageBytes = (long)Math.Round(storageAvgTotal, MidpointRounding.AwayFromZero),
+            CacheStorageBytes = (long)Math.Round(cacheAvgTotal, MidpointRounding.AwayFromZero),
         };
     }
 
@@ -294,6 +318,8 @@ public sealed class FleetUsageRow
 
     public long StorageMarkSum { get; init; }
     public int StorageMarkCount { get; init; }
+    public long CacheMarkSum { get; init; }
+    public int CacheMarkCount { get; init; }
     public string? LastComputedAt { get; init; }
     public long? SnapshotHostedBytes { get; init; }
     public long? SnapshotOciUploadedBytes { get; init; }
@@ -320,6 +346,11 @@ public sealed class FleetUsageRow
     /// one — 0 when the org captured none in the range.</summary>
     public long BillableStorageBytes =>
         StorageMarkCount == 0 ? 0 : (long)Math.Round(StorageMarkSum / (double)StorageMarkCount, MidpointRounding.AwayFromZero);
+
+    /// <summary>The average of the day's <c>cache_storage_bytes</c> marks over days in range that
+    /// have one — 0 when the org captured none in the range.</summary>
+    public long CacheStorageBytes =>
+        CacheMarkCount == 0 ? 0 : (long)Math.Round(CacheMarkSum / (double)CacheMarkCount, MidpointRounding.AwayFromZero);
 }
 
 /// <summary>Fleet-wide totals over the same range a <see cref="FleetUsageRow"/> listing covers.</summary>
@@ -331,6 +362,7 @@ public sealed class FleetUsageTotals
     public long RequestCount { get; init; }
     public long MetadataRequestCount { get; init; }
     public long BillableStorageBytes { get; init; }
+    public long CacheStorageBytes { get; init; }
 }
 
 /// <summary>One (ecosystem, meter) bucket of the fleet-wide egress breakdown.</summary>

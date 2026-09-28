@@ -1,5 +1,6 @@
 using System.Data.Common;
 using Dapper;
+using Dependably.Infrastructure.RowLevelSecurity;
 
 namespace Dependably.Infrastructure;
 
@@ -226,10 +227,14 @@ public sealed partial class SchemaInitializer
         """;
 
     /// <summary>
-    /// The bytes an org pays to store: what it uploaded, and nothing the proxy cache holds on its
-    /// behalf. It is deliberately NOT <see cref="OrgStorageBytesView"/>, which is the quota read
-    /// and charges every tenant for the cache entries it reaches; a cached public artifact counts
-    /// against quota but is never billed as storage.
+    /// The bytes an org pays to store as <c>storage_bytes</c>: what it uploaded, and nothing the
+    /// proxy cache holds on its behalf. It is deliberately NOT <see cref="OrgStorageBytesView"/>,
+    /// which is the quota read and charges every tenant, undivided, for the cache entries it
+    /// reaches; a cached public artifact counts against quota but is never billed as
+    /// <c>storage_bytes</c> here. The proxy-cache plane is billed separately, as
+    /// <c>cache_storage_bytes</c> from <c>storage_snapshot.cache_attributed_bytes</c> — measured
+    /// and billed, but not a cap meter — which is why this view excludes it rather than the plane
+    /// going unbilled.
     ///
     /// The hosted arm is <see cref="OrgStorageBytesView"/>'s hosted arm verbatim, so the two
     /// views agree on every uploaded non-OCI byte. OCI is summed from <c>oci_blobs</c> for the same
@@ -242,8 +247,8 @@ public sealed partial class SchemaInitializer
     /// </summary>
     // xtenant: view DDL. The view groups by org_id and projects it as its own column so that every
     // consumer can filter on it; the definition itself necessarily spans all tenants.
-    // plane-ok: billable storage is the uploaded plane by definition; the proxy plane is excluded on
-    // purpose because cached public artifacts are not billed as storage.
+    // plane-ok: storage_bytes' uploaded plane by definition; the proxy plane is excluded on
+    // purpose because it is billed separately as cache_storage_bytes, from storage_snapshot.
     private const string OrgBillableStorageBytesView =
         """
         CREATE VIEW org_billable_storage_bytes AS
@@ -266,7 +271,7 @@ public sealed partial class SchemaInitializer
 
     // Name paired with the statement that declares it. The statement text is also the comparison key
     // on SQLite, so it is stored verbatim rather than rebuilt per provider.
-    private static readonly (string Name, string Sql)[] ViewDefinitions =
+    internal static readonly (string Name, string Sql)[] ViewDefinitions =
     [
         ("artifact_inventory", ArtifactInventoryView),
         ("artifact_license", ArtifactLicenseView),
@@ -290,7 +295,7 @@ public sealed partial class SchemaInitializer
         _viewsDropped = true;
         foreach ((string view, _) in ViewDefinitions)
         {
-            // rawsql: the name comes from ViewDefinitions, a private compile-time constant array.
+            // rawsql: the name comes from ViewDefinitions, a compile-time constant array.
             await conn.ExecuteAsync($"DROP VIEW IF EXISTS {view}");
         }
     }
@@ -303,7 +308,7 @@ public sealed partial class SchemaInitializer
         {
             if (_db.Provider == DbProvider.Postgres)
             {
-                await EnsurePostgresViewAsync(conn, name, WithSecurityInvokerWhenEnforced(name, sql));
+                await EnsurePostgresViewAsync(conn, name, WithSecurityInvokerWhenSupported(name, sql));
             }
             else
             {
@@ -313,20 +318,33 @@ public sealed partial class SchemaInitializer
     }
 
     // Under row-level security a view must evaluate its base tables' policies as the reader, not
-    // the owner, or it reads every tenant. The option is part of the CREATE statement itself:
-    // CREATE OR REPLACE VIEW without it clears security_invoker, so setting it afterwards would open
-    // a window on every boot in which a concurrent replica reads through an owner-rights view.
-    private string WithSecurityInvokerWhenEnforced(string name, string sql)
+    // the owner, or it reads every tenant. The views are shared database objects read by every
+    // replica, and CREATE OR REPLACE VIEW replaces the view's options along with its body, so a boot
+    // that omits security_invoker strips it for every enforced replica until an enforced node next
+    // boots. The option is therefore keyed on server support (Postgres 15 and later), never on the
+    // booting node's own row-level-security mode; it is harmless to the owner role, which is exempt
+    // from row-level security by role and holds every base-table privilege. It is part of the CREATE
+    // statement itself: setting it afterwards would open a window on every boot in which a
+    // concurrent replica reads through an owner-rights view.
+    private string WithSecurityInvokerWhenSupported(string name, string sql) =>
+        _postgresServerVersionNum is { } version
+            ? WithSecurityInvoker(name, sql, version)
+            : throw new InvalidOperationException(
+                $"View '{name}' is being declared before the Postgres server version was read.");
+
+    // Pure rewrite of a view's CREATE statement: declares security_invoker when the server supports
+    // it, and returns the statement unchanged on Postgres older than 15, which rejects the option.
+    internal static string WithSecurityInvoker(string name, string sql, int serverVersionNum)
     {
-        if (EnforcedRowLevelSecurity is null)
+        if (serverVersionNum < PostgresRowLevelSecurityInstaller.MinimumServerVersionNum)
         {
             return sql;
         }
 
-        // rawsql: `name` comes from ViewDefinitions, a private compile-time constant array.
+        // rawsql: `name` comes from ViewDefinitions, a compile-time constant array.
         string declaration = $"CREATE VIEW {name} AS";
         return sql.Contains(declaration, StringComparison.Ordinal)
-            // rawsql: `name` comes from ViewDefinitions, a private compile-time constant array.
+            // rawsql: `name` comes from ViewDefinitions, a compile-time constant array.
             ? sql.Replace(declaration, $"CREATE VIEW {name} WITH (security_invoker = true) AS", StringComparison.Ordinal)
             : throw new InvalidOperationException($"View '{name}' does not open with '{declaration}'.");
     }
@@ -351,7 +369,7 @@ public sealed partial class SchemaInitializer
             // Output column list changed. Fall through to the guarded drop+create below.
         }
 
-        // rawsql: the name comes from ViewDefinitions, a private compile-time constant array.
+        // rawsql: the name comes from ViewDefinitions, a compile-time constant array.
         await conn.ExecuteAsync($"DROP VIEW IF EXISTS {name}");
         await conn.ExecuteAsync(sql);
     }
@@ -373,7 +391,7 @@ public sealed partial class SchemaInitializer
                 return;
             }
 
-            // rawsql: the name comes from ViewDefinitions, a private compile-time constant array.
+            // rawsql: the name comes from ViewDefinitions, a compile-time constant array.
             await conn.ExecuteAsync($"DROP VIEW IF EXISTS {name}");
         }
 

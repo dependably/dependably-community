@@ -102,6 +102,7 @@ public sealed partial class SystemController
                 hasToken = !string.IsNullOrEmpty(resolved.Connection.Token),
                 configured = resolved.Configured,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(VulnTrackerConfigEditing.BuildView(resolved, _envelope.IsConfigured));
@@ -159,6 +160,7 @@ public sealed partial class SystemController
                     latencyMs = probe.LatencyMs,
                     handshakeSent,
                 }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+                sourceIp: HttpContext.GetNormalizedRemoteIp(),
                 ct: ct);
         }
 

@@ -343,6 +343,7 @@ public sealed class TenantHardDeleteService : BackgroundService
             // then rolled back would be worse than no row at all, and a row lost while the erasure
             // committed leaves the operator audit list silent about a permanent deletion.
             // No actor: this is a background sweep, not an operator action.
+            // audit-attribution-ok: background hard-delete sweep — no request context
             await _audit.LogSystemAsync(
                 conn, tx,
                 action: "tenant.hard_deleted",

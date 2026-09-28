@@ -49,6 +49,13 @@ public sealed partial class RateLimitPolicyComplianceTests
     private const int MarkerWindow = 5;
 
     private static readonly Assembly CoreAssembly = typeof(Dependably.Api.PyPiController).Assembly;
+    private static readonly Assembly ManagementAssembly = typeof(EdgeSurfaceRegistry).Assembly;
+
+    /// <summary>
+    /// The apex fleet-usage report actions on <see cref="Dependably.Api.SystemController"/>, named
+    /// individually so a rename fails the inventory pin instead of dropping out of the gate.
+    /// </summary>
+    private static readonly string[] ApexUsageReportActions = ["GetFleetUsage", "GetFleetUsageCsv", "GetTenantUsage"];
 
     // ── The invariant ────────────────────────────────────────────────────────────────────────
 
@@ -86,6 +93,45 @@ public sealed partial class RateLimitPolicyComplianceTests
         }
 
         Report(violations, "protocol action(s) carry no explicit rate-limit decision");
+    }
+
+    /// <summary>
+    /// The apex fleet-usage report routes (<c>GET /api/v1/system/usage</c>, <c>/usage.csv</c>,
+    /// <c>/tenants/{slug}/usage</c>) each carry an explicit rate-limit decision. They are the most
+    /// expensive reads on the management plane — the CSV export materializes up to 50,000 rows and
+    /// the per-tenant series spans up to 400 days — so the 300/min management default is not the
+    /// budget they should rely on.
+    ///
+    /// <para>
+    /// Scope, stated honestly: this is a narrow pin over these three named actions only. The
+    /// protocol inventory above enumerates the Core assembly, so every other
+    /// <c>EdgeSurface.Management</c> action can still ship with no rate-limit decision; that
+    /// Management-wide blind spot is not closed here. Each name is asserted to resolve to exactly
+    /// one routed action, so renaming or removing one fails loudly rather than leaving this fact
+    /// green over nothing.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ApexUsageReportActionsCarryAnExplicitRateLimitDecision()
+    {
+        var controller = typeof(Dependably.Api.SystemController);
+        Assert.Same(ManagementAssembly, controller.Assembly);
+
+        var actions = RoutedActionsOf(controller).ToList();
+        string[] source = SourceLinesFor(controller);
+
+        var violations = new List<string>();
+        foreach (string name in ApexUsageReportActions)
+        {
+            var action = Assert.Single(actions, a => a.Name == name);
+            string? violation = ViolationFor(controller, action, source);
+            if (violation is not null)
+            {
+                violations.Add(violation);
+            }
+        }
+
+        Report(violations, "apex usage-report action(s) carry no explicit rate-limit decision");
     }
 
     // ── Self-tests ───────────────────────────────────────────────────────────────────────────
@@ -258,10 +304,10 @@ public sealed partial class RateLimitPolicyComplianceTests
     private static partial Regex ClassDeclarationRegex();
 
     // ── Fixtures ─────────────────────────────────────────────────────────────────────────────
-    // Deliberately-shaped controllers the self-tests drive the gate with. Nested private types in
-    // the test assembly, so they never enter the real protocol inventory (which enumerates the Core
-    // assembly) — they exist only to prove the gate fails on a known-bad input and passes on a
-    // known-good one.
+    // Deliberately-shaped controllers the self-tests drive the gate with. The real inventories
+    // enumerate the Core assembly's protocol controllers and the named SystemController actions;
+    // these are private nested types in the test assembly, so they never match either — they exist
+    // only to prove the gate fails on a known-bad input and passes on a known-good one.
 
     private sealed class FixtureActionLimited : ControllerBase
     {

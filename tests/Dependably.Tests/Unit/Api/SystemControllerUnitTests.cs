@@ -1,11 +1,18 @@
 using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Identity;
+using Dependably.Infrastructure.Mail;
+using Dependably.Security;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Localization;
+using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 
 namespace Dependably.Tests.Unit.Api;
 
@@ -391,6 +398,38 @@ public sealed class SystemControllerUnitTests
         var b = await s.BuildAsync();
 
         var payload = new Dictionary<string, string> { ["max_upload_bytes"] = "52428800" };
+        var result = await b.SystemController.UpdateSettings(payload, CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("not-a-number")]
+    [InlineData("1.5")]
+    public async Task UpdateSettings_CacheSizeWarnBytesInvalid_Returns422(string badValue)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var payload = new Dictionary<string, string> { ["cache_size_warn_bytes"] = badValue };
+        var result = await b.SystemController.UpdateSettings(payload, CancellationToken.None);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("0")]        // explicit disable — a valid, meaningful value
+    [InlineData("500000000000")]
+    public async Task UpdateSettings_CacheSizeWarnBytesValid_Returns204(string goodValue)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var payload = new Dictionary<string, string> { ["cache_size_warn_bytes"] = goodValue };
         var result = await b.SystemController.UpdateSettings(payload, CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
     }
@@ -1346,5 +1385,207 @@ public sealed class SystemControllerUnitTests
         var record = Assert.Single(notifier.Records);
         Assert.Equal("system_admin.admin_deleted", record.Action);
         Assert.Null(record.TenantSlug);
+    }
+
+    // ── Audit attribution on system-scope rows ──────────────────────────────
+    // Every request-scoped system audit row records where the request came from, as the full
+    // address (never the rate-limit partition's /64). A system_admin JWT actor's kind stays NULL
+    // by AuditRepository's contract; only a system-token actor carries 'service' and its label.
+
+    private const string AdminIp = "198.51.100.7";
+
+    private static void SetRemoteIp(ControllerScenarioResult b, string ip) =>
+        b.SystemController.HttpContext.Connection.RemoteIpAddress = System.Net.IPAddress.Parse(ip);
+
+    private static async Task<(string? Ip, string? Kind, string? Label)> AuditAttributionAsync(
+        ControllerScenarioResult b, string action)
+    {
+        await using var conn = await b.Db.OpenAsync();
+        return await conn.QuerySingleAsync<(string? Ip, string? Kind, string? Label)>(
+            "SELECT source_ip AS Ip, actor_kind AS Kind, actor_label AS Label FROM audit_log WHERE action = @a",
+            new { a = action });
+    }
+
+    [Theory]
+    [InlineData("198.51.100.7", "198.51.100.7")]
+    [InlineData("::ffff:198.51.100.7", "198.51.100.7")]
+    [InlineData("2001:db8:0:1:2:3:4:5", "2001:db8:0:1:2:3:4:5")]
+    public async Task ChangeMyPassword_AuditsTheFullNormalizedSourceAddress(string remote, string expected)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, "rotate-me@example.test", password: "OldPassword123");
+        var b = await s.BuildAsync();
+        SetSystemActor(b, adminId);
+        SetRemoteIp(b, remote);
+        await new OrgRepository(b.Db).SetInstanceSettingAsync("jwt_secret", new string('k', 64));
+        b.SystemController.HttpContext.RequestServices = new ServiceCollection()
+            .AddSingleton(new SystemAdminTokenVersionStore(b.Db))
+            .BuildServiceProvider();
+
+        var result = await b.SystemController.ChangeMyPassword(
+            new ChangePasswordRequest("OldPassword123", "BrandNewPassword456!"),
+            new TrustedDeviceService(b.Db, s.Clock, new ConfigurationBuilder().Build()),
+            BuildLoginService(b, s.Clock),
+            new RequestPublicUrlBuilder(new ConfigurationBuilder().Build()),
+            NoopMailer(s.Clock),
+            CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        var (ip, kind, label) = await AuditAttributionAsync(b, "system_admin.password_changed");
+        Assert.Equal(expected, ip);
+        Assert.Null(kind);
+        Assert.Null(label);
+    }
+
+    [Fact]
+    public async Task CreateAdmin_AuditsSourceIp_WithNoFabricatedActorKind()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        var b = await s.BuildAsync();
+        SetSystemActor(b, Guid.NewGuid().ToString("N"));
+        SetRemoteIp(b, AdminIp);
+
+        var result = await b.SystemController.CreateAdmin(
+            new CreateAdminRequest("attributed-ops@example.test"), CancellationToken.None);
+
+        Assert.IsType<CreatedAtActionResult>(result);
+        var (ip, kind, label) = await AuditAttributionAsync(b, "system_admin.admin_created");
+        Assert.Equal(AdminIp, ip);
+        Assert.Null(kind);
+        Assert.Null(label);
+    }
+
+    [Fact]
+    public async Task ResetAdminPassword_AuditsSourceIp_WithNoFabricatedActorKind()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        string targetId = await SystemAdminSeeder.InsertAsync(s.Store, "reset-attributed@example.test", password: "OldPassword123");
+        var b = await s.BuildAsync();
+        SetSystemActor(b, Guid.NewGuid().ToString("N"));
+        SetRemoteIp(b, AdminIp);
+
+        var result = await b.SystemController.ResetAdminPassword(targetId, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        var (ip, kind, label) = await AuditAttributionAsync(b, "system_admin.admin_password_reset");
+        Assert.Equal(AdminIp, ip);
+        Assert.Null(kind);
+        Assert.Null(label);
+    }
+
+    [Fact]
+    public async Task CreateSystemToken_UnderAnAdminSession_AuditsSourceIp_AndNoActorKind()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, "minter@example.test");
+        var b = await s.BuildAsync();
+        SetSystemActor(b, adminId);
+        SetRemoteIp(b, AdminIp);
+
+        var result = await b.SystemController.CreateSystemToken(
+            new CreateSystemTokenRequest("ci-deployer", s.Clock.GetUtcNow().AddDays(30)), CancellationToken.None);
+
+        Assert.IsNotType<UnauthorizedResult>(result);
+        var (ip, kind, label) = await AuditAttributionAsync(b, "system_admin.token_created");
+        Assert.Equal(AdminIp, ip);
+        Assert.Null(kind);
+        Assert.Null(label);
+    }
+
+    [Fact]
+    public async Task DeleteSystemToken_UnderAnAdminSession_AuditsSourceIp_AndNoActorKind()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, "revoker@example.test");
+        var b = await s.BuildAsync();
+        var (_, record) = await new SystemTokenRepository(b.Db, s.Clock).CreateAsync(
+            adminId, "to-revoke", s.Clock.GetUtcNow().AddDays(30), callerTokenVersion: 1);
+        SetSystemActor(b, adminId);
+        SetRemoteIp(b, AdminIp);
+
+        var result = await b.SystemController.DeleteSystemToken(record.Id, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        var (ip, kind, label) = await AuditAttributionAsync(b, "system_admin.token_revoked");
+        Assert.Equal(AdminIp, ip);
+        Assert.Null(kind);
+        Assert.Null(label);
+    }
+
+    /// <summary>
+    /// The call site threads the resolved actor's kind and label, not just its id: a system-token
+    /// principal reaching the revoke action (possible only if its accepted schemes widen) is
+    /// recorded as the service actor it is, under the token's name.
+    /// </summary>
+    [Fact]
+    public async Task DeleteSystemToken_UnderASystemTokenPrincipal_RecordsServiceKindAndTokenName()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        string adminId = await SystemAdminSeeder.InsertAsync(s.Store, "owner@example.test");
+        var b = await s.BuildAsync();
+        var repo = new SystemTokenRepository(b.Db, s.Clock);
+        var (_, acting) = await repo.CreateAsync(adminId, "release-bot", s.Clock.GetUtcNow().AddDays(30), callerTokenVersion: 1);
+        var (_, target) = await repo.CreateAsync(adminId, "to-revoke", s.Clock.GetUtcNow().AddDays(30), callerTokenVersion: 1);
+        b.SystemController.HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
+            new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("sub", acting.Id),
+                    new System.Security.Claims.Claim("stok_name", "release-bot"),
+                    new System.Security.Claims.Claim("stok_owner", adminId),
+                    new System.Security.Claims.Claim("scope", "system"),
+                ],
+                authenticationType: SystemTokenDefaults.Scheme));
+        SetRemoteIp(b, AdminIp);
+
+        var result = await b.SystemController.DeleteSystemToken(target.Id, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        var (ip, kind, label) = await AuditAttributionAsync(b, "system_admin.token_revoked");
+        Assert.Equal(AdminIp, ip);
+        Assert.Equal(ActorKinds.Service, kind);
+        Assert.Equal("release-bot", label);
+    }
+
+    private static LoginService BuildLoginService(ControllerScenarioResult b, TimeProvider clock) =>
+        new(new LoginService.Dependencies(
+            Db: b.Db,
+            Orgs: new OrgRepository(b.Db),
+            SystemAdmins: new SystemAdminRepository(b.Db),
+            Lockout: Substitute.For<ILockoutStore>(),
+            Audit: new AuditRepository(b.Db),
+            ExternalIdentities: new ExternalIdentityRepository(b.Db, clock),
+            AuditEmitter: Substitute.For<Dependably.Infrastructure.Audit.IAuditEmitter>(),
+            Time: clock,
+            Mfa: Substitute.For<IMfaEnrollmentService>(),
+            SystemMfa: Substitute.For<ISystemMfaEnrollmentService>()));
+
+    // A mailer whose queue never delivers: these tests assert on the audit row, not on mail.
+    private static TransactionalEmailService NoopMailer(TimeProvider clock)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddLocalization(o => o.ResourcesPath = "Resources");
+        var localizer = services.BuildServiceProvider().GetRequiredService<IStringLocalizer<SharedResource>>();
+        return new TransactionalEmailService(
+            new EmailDeliveryQueue(new NoopSender(), clock, NullLogger<EmailDeliveryQueue>.Instance),
+            new InstanceSmtpConfig((_, _) => Task.FromResult<string?>(null), clock),
+            new ConfigurationBuilder().Build(),
+            localizer,
+            NullLogger<TransactionalEmailService>.Instance);
+    }
+
+    private sealed class NoopSender : SmtpMailSender
+    {
+        public NoopSender() : base(new SsrfConnectCallback(_ => false)) { }
+
+        public override Task SendAsync(
+            SmtpTransportSettings transport, IReadOnlyList<string> to, string subject, string body,
+            CancellationToken ct = default) => Task.CompletedTask;
     }
 }

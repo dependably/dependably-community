@@ -70,6 +70,135 @@ public class CacheArtifactRepositoryTests : IAsyncLifetime
         Assert.Equal(200, total);
     }
 
+    // ── GetOciProxyOnlyDistinctDigestBytesAsync ──────────────────────────────────
+
+    private async Task InsertOciBlobAsync(string digest, string orgId, long sizeBytes, string origin)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin)
+            VALUES (@digest, @orgId, 'application/vnd.oci.image.layer.v1.tar+gzip', @sizeBytes, @blobKey, @origin)
+            """,
+            new { digest, orgId, sizeBytes, blobKey = $"oci/{digest}", origin });
+    }
+
+    [Fact]
+    public async Task GetOciProxyOnlyDistinctDigestBytes_SumsProxyOnlyDigests()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        await InsertOciBlobAsync("sha256:layer1", "o1", 1000, "proxy");
+
+        Assert.Equal(1000, await repo.GetOciProxyOnlyDistinctDigestBytesAsync());
+    }
+
+    [Fact]
+    public async Task GetOciProxyOnlyDistinctDigestBytes_ExcludesUploadedDigests()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        await InsertOciBlobAsync("sha256:layer1", "o1", 1000, "uploaded");
+
+        Assert.Equal(0, await repo.GetOciProxyOnlyDistinctDigestBytesAsync());
+    }
+
+    [Fact]
+    public async Task GetOciProxyOnlyDistinctDigestBytes_SharedDigestAcrossOrgsCountsOnce()
+    {
+        // Two different orgs each holding a 'proxy' row for the same digest — the PK is
+        // (digest, org_id), so the same physical, content-addressed layer legitimately has one
+        // row per org that pulled it, and must be counted once, not once per row.
+        var repo = new CacheArtifactRepository(_db);
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o2', 'acme-2')");
+        }
+        await InsertOciBlobAsync("sha256:shared-layer", "o1", 5000, "proxy");
+        await InsertOciBlobAsync("sha256:shared-layer", "o2", 5000, "proxy");
+
+        Assert.Equal(5000, await repo.GetOciProxyOnlyDistinctDigestBytesAsync());
+    }
+
+    [Fact]
+    public async Task GetOciProxyOnlyDistinctDigestBytes_UploadedRowForOneOrg_ExcludesDigestForEveryOrg()
+    {
+        // o1 pushed this digest (uploaded); o2 separately pulled the identical content via proxy.
+        // The digest is a hosted artefact somewhere in the instance, so it is excluded entirely —
+        // even for o2's row, which taken alone looks like ordinary evictable cache content.
+        var repo = new CacheArtifactRepository(_db);
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o2', 'acme-2')");
+        }
+        await InsertOciBlobAsync("sha256:mixed-layer", "o1", 7000, "uploaded");
+        await InsertOciBlobAsync("sha256:mixed-layer", "o2", 7000, "proxy");
+
+        Assert.Equal(0, await repo.GetOciProxyOnlyDistinctDigestBytesAsync());
+    }
+
+    [Fact]
+    public async Task GetOciProxyOnlyDistinctDigestBytes_NoRows_ReturnsZero()
+    {
+        var repo = new CacheArtifactRepository(_db);
+        Assert.Equal(0, await repo.GetOciProxyOnlyDistinctDigestBytesAsync());
+    }
+
+    [Fact]
+    public async Task GetOciProxyOnlyDistinctDigestBytes_ProxiedManifest_ExcludedAsAlreadyCountedByCacheArtifact()
+    {
+        // A proxied OCI *manifest* pull writes BOTH an oci_blobs row (origin='proxy') and a
+        // cache_artifact row (ecosystem='oci', version=digest) — see
+        // OciUpstreamResolver.RecordCatalogVersionAsync. GetTotalSizeBytesAsync already counts the
+        // cache_artifact row, so this method must exclude the oci_blobs row for the same digest or
+        // the manifest's bytes are counted twice.
+        var repo = new CacheArtifactRepository(_db);
+        const string manifestDigest = "sha256:manifest1";
+        await InsertOciBlobAsync(manifestDigest, "o1", 5000, "proxy");
+        await repo.InsertAsync(new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Ecosystem = "oci",
+            Name = "library/nginx",
+            Version = manifestDigest,
+            Filename = "manifest.json",
+            BlobKey = $"oci/{manifestDigest}",
+            ContentHash = "sha256:manifest1",
+            SizeBytes = 5000,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        });
+
+        Assert.Equal(0, await repo.GetOciProxyOnlyDistinctDigestBytesAsync());
+        // The manifest's bytes are still counted exactly once, via GetTotalSizeBytesAsync.
+        Assert.Equal(5000, await repo.GetTotalSizeBytesAsync());
+    }
+
+    [Fact]
+    public async Task GetOciProxyOnlyDistinctDigestBytes_LayerAlongsideCatalogedManifest_LayerStillCounted()
+    {
+        // A pulled image's manifest is catalogued onto cache_artifact (excluded, see above test),
+        // but its layers are not — only oci_blobs sees them. The layer must still be counted.
+        var repo = new CacheArtifactRepository(_db);
+        const string manifestDigest = "sha256:manifest2";
+        const string layerDigest = "sha256:layer2";
+        await InsertOciBlobAsync(manifestDigest, "o1", 5000, "proxy");
+        await InsertOciBlobAsync(layerDigest, "o1", 800_000, "proxy");
+        await repo.InsertAsync(new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Ecosystem = "oci",
+            Name = "library/nginx",
+            Version = manifestDigest,
+            Filename = "manifest.json",
+            BlobKey = $"oci/{manifestDigest}",
+            ContentHash = "sha256:manifest2",
+            SizeBytes = 5000,
+            FirstCachedAt = TestTime.KnownNow,
+            LastAccessedAt = TestTime.KnownNow,
+        });
+
+        Assert.Equal(800_000, await repo.GetOciProxyOnlyDistinctDigestBytesAsync());
+    }
+
     [Fact]
     public async Task TouchAccess_UpdatesLastAccessedAt()
     {

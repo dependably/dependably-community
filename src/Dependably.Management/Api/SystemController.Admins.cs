@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Dependably.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -83,6 +84,7 @@ public sealed partial class SystemController
             action: "system_admin.admin_created",
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = req.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
         _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
             "system_admin.admin_created", null, null, actor));
@@ -143,6 +145,7 @@ public sealed partial class SystemController
             action: "system_admin.admin_account_status_changed",
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(new { id, accountStatus = req.AccountStatus }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();
@@ -190,6 +193,7 @@ public sealed partial class SystemController
             action: "system_admin.admin_password_reset",
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = target.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Ok(new
@@ -240,6 +244,7 @@ public sealed partial class SystemController
             action: "system_admin.admin_deleted",
             actorId: actor,
             detail: System.Text.Json.JsonSerializer.Serialize(new { id, email = target.Email }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
         _systemEvents?.Notify(new Dependably.Infrastructure.SystemEvents.SystemEventRecord(
             "system_admin.admin_deleted", null, null, actor));

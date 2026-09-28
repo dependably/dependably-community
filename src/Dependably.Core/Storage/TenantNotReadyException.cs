@@ -40,7 +40,8 @@ public enum TenantNotReadyReason
     ReadOnlyWrite,
     /// <summary>
     /// <c>orgs.usage_posture</c> is <c>uploads_refused</c> or <c>downloads_throttled</c> and the
-    /// request is a protocol-plane POST/PUT/PATCH. 402 Payment Required as problem JSON, whose
+    /// request is a protocol-plane POST/PUT/PATCH, or a write-intent
+    /// <see cref="ITenantStorageResolver.GetRegistryAsync"/> on any surface. 402 Payment Required as problem JSON, whose
     /// <c>type</c> is <c>USAGE_CAP_INFO_URL</c> when that is set; 403 with OCI code <c>DENIED</c>
     /// on <c>/v2/</c>, like the other write refusals there.
     /// </summary>

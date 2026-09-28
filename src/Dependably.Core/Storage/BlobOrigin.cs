@@ -12,8 +12,8 @@ namespace Dependably.Storage;
 /// <c>package_versions.origin</c>, <c>oci_blobs.origin</c>, <c>maven_version_files.origin</c>, or
 /// the fact that the row is a <c>cache_artifact</c> — and never from the storage tier or the key
 /// prefix. Content addressing puts an uploaded OCI layer under the same key as a proxied layer
-/// with the same digest, and several ecosystems read proxied bytes from the registry tier, so
-/// neither the key nor the tier says who the bytes belong to.
+/// with the same digest, and a tier is where bytes are physically placed rather than a record of
+/// who supplied them, so neither the key nor the tier says who the bytes belong to.
 /// </para>
 /// </summary>
 public enum BlobOrigin

@@ -22,8 +22,16 @@ namespace Dependably.Infrastructure;
 public sealed class TenantNotReadyExceptionMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly string? _usageCapInfoUrl;
 
-    public TenantNotReadyExceptionMiddleware(RequestDelegate next) => _next = next;
+    public TenantNotReadyExceptionMiddleware(RequestDelegate next, IConfiguration config)
+    {
+        _next = next;
+        // Same source and validation as TenantStatusEnforcementMiddleware, so a usage-cap refusal
+        // thrown by a write-intent GetRegistryAsync (the management-plane import) carries the same
+        // problem type and Link header as the protocol-plane refusal.
+        _usageCapInfoUrl = TenantNotReadyResponseWriter.ParseUsageCapInfoUrl(config["USAGE_CAP_INFO_URL"]);
+    }
 
     public async Task InvokeAsync(HttpContext context)
     {
@@ -38,7 +46,7 @@ public sealed class TenantNotReadyExceptionMiddleware
                 throw;
             }
 
-            await TenantNotReadyResponseWriter.WriteAsync(context, ex.Reason);
+            await TenantNotReadyResponseWriter.WriteAsync(context, ex.Reason, _usageCapInfoUrl);
         }
     }
 }

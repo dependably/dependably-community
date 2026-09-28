@@ -23,7 +23,7 @@ public sealed class NpmTarballHandler(
     TenantArtifactAccessRepository tenantAccess,
     TokenRepository tokens,
     AuditRepository audit,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     UpstreamClient upstream,
     AllowlistService allowlist,
     BlocklistRepository blocklist,
@@ -135,7 +135,7 @@ public sealed class NpmTarballHandler(
         }
 
         string uploadedBlobKey = BlobKeys.StoreKey(pkgVersion.BlobKey);
-        if (!await blobs.ExistsAsync(uploadedBlobKey, ct))
+        if (!await blobs.Registry.ExistsAsync(uploadedBlobKey, ct))
         {
             return new NotFoundResult();
         }
@@ -201,7 +201,7 @@ public sealed class NpmTarballHandler(
 
         // blobkey-ok: proxy blob key from cache_artifact; no filename suffix needed for HEAD.
         string blobKey = BlobKeys.StoreKey(caFacts.BlobKey);
-        if (!await blobs.ExistsAsync(blobKey, ct))
+        if (!await blobs.Cache.ExistsAsync(blobKey, ct))
         {
             return new NotFoundResult();
         }
@@ -358,15 +358,15 @@ public sealed class NpmTarballHandler(
             }
         }
 
-        // blobkey-ok: proxy blob key from cache_artifact; BlobKeys.StoreKey maps to the cache tier.
+        // blobkey-ok: proxy blob key from cache_artifact; proxied bytes live in the cache tier.
         string storeKey = BlobKeys.StoreKey(caFacts.BlobKey);
         var redirect = presign is null
             ? null
-            : await presign.TryRedirectAsync(httpContext, blobs, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "npm", ct);
+            : await presign.TryRedirectAsync(httpContext, blobs.Cache, storeKey, caFacts.SizeBytes, BlobOrigin.Proxied, "npm", ct);
         Stream? stream = null;
         if (redirect is null)
         {
-            stream = await blobs.GetAsync(storeKey, ct);
+            stream = await blobs.Cache.GetAsync(storeKey, ct);
             if (stream is null)
             {
                 return null;
@@ -468,11 +468,11 @@ public sealed class NpmTarballHandler(
         var redirect = presign is null
             ? null
             : await presign.TryRedirectAsync(
-                httpContext, blobs, storeKey, pkgVersion.SizeBytes, BlobOrigins.FromColumn(pkgVersion.Origin), "npm", ct);
+                httpContext, blobs.Registry, storeKey, pkgVersion.SizeBytes, BlobOrigins.FromColumn(pkgVersion.Origin), "npm", ct);
         Stream? stream = null;
         if (redirect is null)
         {
-            stream = await blobs.GetAsync(storeKey, ct);
+            stream = await blobs.Registry.GetAsync(storeKey, ct);
             if (stream is null)
             {
                 return new NotFoundResult();
@@ -543,7 +543,7 @@ public sealed class NpmTarballHandler(
             string sha = fetchResult.Sha256Hex;
             long sizeBytes = fetchResult.SizeBytes;
             var blob = new BlobHandle(proxyKey, sha, sizeBytes,
-                async openCt => await blobs.GetAsync(proxyKey, openCt)
+                async openCt => await blobs.Cache.GetAsync(proxyKey, openCt)
                     ?? Stream.Null);
 
             // ProxyFetchService stores under BlobKeys.Proxy(sha256),
@@ -559,7 +559,7 @@ public sealed class NpmTarballHandler(
 
             // Stream the cached blob back to the client (response memory is one read
             // buffer, not the whole artefact).
-            var blobStream = await blobs.GetAsync(result.BlobKey, ct);
+            var blobStream = await blobs.Cache.GetAsync(result.BlobKey, ct);
             return blobStream is null
                 ? new NotFoundResult()
                 : new FileStreamResult(blobStream, "application/octet-stream") { FileDownloadName = key.File };

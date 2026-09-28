@@ -390,6 +390,7 @@ public sealed class BlobPresignService
 /// </summary>
 public sealed class RedirectProbe
 {
+    // blobtier-ok: a value carrying the tier its caller probed, not a service choosing one.
     internal RedirectProbe(IBlobStore store, string storeKey, BlobOrigin? origin, string ecosystem, bool exists)
     {
         Store = store;

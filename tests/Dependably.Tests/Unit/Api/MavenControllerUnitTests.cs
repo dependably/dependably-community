@@ -119,7 +119,7 @@ public sealed class MavenControllerUnitTests : IAsyncLifetime
             Tokens: _tokens,
             Audit: _audit,
             Orgs: _orgs,
-            Blobs: _blobs,
+            Blobs: new TieredBlobStorage(_blobs, _blobs),
             Db: _db,
             Upstream: null!,  // not exercised by unit tests — proxy fallback requires network
             Config: null!,

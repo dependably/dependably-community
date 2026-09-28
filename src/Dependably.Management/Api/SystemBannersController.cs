@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Dependably.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -66,6 +67,7 @@ public sealed class SystemBannersController : ControllerBase
             "banner.created",
             actorId: actorId,
             detail: $"{{\"bannerId\":\"{banner.Id}\",\"severity\":\"{req.Severity}\"}}",
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return Created($"/api/v1/system/banners/{banner.Id}", banner);
@@ -93,6 +95,7 @@ public sealed class SystemBannersController : ControllerBase
             "banner.updated",
             actorId: GetActorId(),
             detail: $"{{\"bannerId\":\"{id}\"}}",
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();
@@ -112,6 +115,7 @@ public sealed class SystemBannersController : ControllerBase
             "banner.deleted",
             actorId: GetActorId(),
             detail: $"{{\"bannerId\":\"{id}\"}}",
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
             ct: ct);
 
         return NoContent();

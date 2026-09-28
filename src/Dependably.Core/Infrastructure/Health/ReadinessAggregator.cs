@@ -22,7 +22,7 @@ namespace Dependably.Infrastructure.Health;
 public sealed class ReadinessAggregator
 {
     private readonly IMetadataStore _db;
-    private readonly IBlobStore _blobs;
+    private readonly TieredBlobStorage _blobs;
     private readonly IRedisHealthProbe? _redis;
     private readonly ILogger<ReadinessAggregator> _logger;
     private readonly TimeProvider _time;
@@ -30,7 +30,7 @@ public sealed class ReadinessAggregator
 
     public ReadinessAggregator(
         IMetadataStore db,
-        IBlobStore blobs,
+        TieredBlobStorage blobs,
         IServiceProvider sp,
         ILogger<ReadinessAggregator>? logger = null,
         TimeProvider? time = null,
@@ -104,8 +104,9 @@ public sealed class ReadinessAggregator
         {
             // The cheapest call the abstraction offers: local backends stat a path and the
             // object-store backends issue a HEAD-equivalent metadata request, never an object read.
+            // The probe targets the registry tier, the durable store published artefacts live in.
             // blobkey-ok: fixed liveness sentinel, not a namespaced artifact key.
-            await _blobs.ExistsAsync("__ready_probe__", ct);
+            await _blobs.Registry.ExistsAsync("__ready_probe__", ct);
             error = null;
         }
         catch (Exception ex)

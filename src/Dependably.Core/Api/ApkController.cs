@@ -186,9 +186,9 @@ public sealed class ApkController : OrgScopedControllerBase
         // the only existence check the redirect makes. Only a parsed filename can redirect: its
         // size lives on the coordinate row, and an unparsable one has no row to read it from.
         var probe = parsed is not null && _svc.Presign is { } presign
-            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, "apk", ct)
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs.Cache, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, "apk", ct)
             : null;
-        var cached = probe is null ? await _svc.Blobs.GetAsync(blobKey, ct) : null;
+        var cached = probe is null ? await _svc.Blobs.Cache.GetAsync(blobKey, ct) : null;
         if (cached is null && probe is not { Exists: true })
         {
             return null;
@@ -209,7 +209,7 @@ public sealed class ApkController : OrgScopedControllerBase
             : null;
         if (redirect is null)
         {
-            cached ??= await _svc.Blobs.GetAsync(blobKey, ct);
+            cached ??= await _svc.Blobs.Cache.GetAsync(blobKey, ct);
         }
 
         if (redirect is null && cached is null)
@@ -288,7 +288,7 @@ public sealed class ApkController : OrgScopedControllerBase
                 sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
             Response.Headers["X-Cache"] = "MISS";
-            var stream = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(fetchResult.BlobKey), ct);
+            var stream = await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(fetchResult.BlobKey), ct);
             return stream is null ? NotFound() : File(stream, "application/octet-stream", file);
         }
 
@@ -458,7 +458,7 @@ public sealed class ApkController : OrgScopedControllerBase
                 CacheAccessOrigin.FirstFetch), ct);
         if (cacheArtifactId is null)
         {
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetchResult.BlobKey), ct);
+            await _svc.Blobs.Cache.DeleteAsync(BlobKeys.StoreKey(fetchResult.BlobKey), ct);
             throw new ProxyCatalogueUnavailableException("apk", p.PkgName, version);
         }
 
@@ -572,7 +572,7 @@ public sealed record ApkControllerServices(
     TokenRepository Tokens,
     AuditRepository Audit,
     PackageRepository Packages,
-    IBlobStore Blobs,
+    TieredBlobStorage Blobs,
     UpstreamClient Upstream,
     UpstreamRegistryResolver Registries,
     IMetadataStore Db,
@@ -619,10 +619,12 @@ public sealed class ApkIndexSignatureVerificationFailedException : Exception
 /// at least one configured anchor. Setting the override <c>true</c> with no per-org anchor
 /// fails every resolution closed. Verification runs on every request that reaches this method
 /// (cache hit or miss) using the caller's own org anchors, not once at fetch time — the byte
-/// cache is shared across orgs (keyed by upstream base + filename only), so a per-request
-/// re-check keeps one org's anchor configuration from vouching for bytes served to another. A
-/// failed check throws <see cref="ApkIndexSignatureVerificationFailedException"/> before the
-/// bytes are cached (on a fresh fetch) or re-served (on a cache hit); the controller's existing
+/// cache is shared across orgs presenting the same (or no) upstream credential, keyed by upstream
+/// base + filename + credential hash, and trust anchors are per org even when the credential is
+/// shared, so a per-request re-check keeps one org's anchor configuration from vouching for bytes
+/// served to another. A failed check throws
+/// <see cref="ApkIndexSignatureVerificationFailedException"/> before the bytes are cached (on a
+/// fresh fetch) or re-served (on a cache hit); the controller's existing
 /// catch-all maps this — like every other upstream failure — to a 502. Every other
 /// index-adjacent file (raw <c>.SIGN.RSA.*</c> blobs, checksums, etc.) passes through
 /// unverified; apk clients re-verify the embedded index signature against <c>/etc/apk/keys</c>
@@ -692,7 +694,12 @@ public sealed class ApkIndexFetchCoordinator
             throw new AirGappedException($"apk:index:{release}/{repo}/{arch}/{filename}");
         }
 
-        string cacheKey = $"apk:index:{upstreamBase}:{release}/{repo}/{arch}/{filename}";
+        // The byte cache and the single-flight map are one shared singleton across every org, so
+        // the key carries the per-upstream credential hash: otherwise one tenant's credentialed
+        // private-mirror body (or in-flight fetch) would satisfy another tenant's request for the
+        // same URL under different or no credentials. Anonymous requests share one entry;
+        // credentialed upstreams are isolated per credential.
+        string cacheKey = $"apk:index:{upstreamBase}:{release}/{repo}/{arch}/{filename}\nauth:{UpstreamClient.AuthHeaderHash(authorizationHeader)}";
         bool isIndex = filename.Equals(IndexFilename, StringComparison.OrdinalIgnoreCase);
 
         if (_cache.TryGetValue(cacheKey, out CachedIndexFile? cached) && cached is not null)

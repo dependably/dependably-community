@@ -1936,13 +1936,13 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
 CREATE INDEX IF NOT EXISTS idx_usage_hourly_bucket ON usage_hourly (bucket);
 
 -- Daily totals per (org, meter): the table a billing system reads. The egress meters are sums of
--- usage_hourly; storage_bytes is the day's high-water mark of billable storage, and a write to it
--- only ever raises the stored value, so a recompute or a second capture in the same day cannot
--- lower the mark. request_count is the sum of the hourly request_count for the egress meters and
--- 0 for storage_bytes.
+-- usage_hourly; storage_bytes and cache_storage_bytes are the day's high-water marks of billable
+-- uploaded and proxy-cache storage respectively, and a write to either only ever raises the stored
+-- value, so a recompute or a second capture in the same day cannot lower the mark. request_count
+-- is the sum of the hourly request_count for the egress meters and 0 for the two storage meters.
 CREATE TABLE IF NOT EXISTS usage_daily (
     org_id            TEXT NOT NULL,
-    meter             TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes')),
+    meter             TEXT NOT NULL CHECK (meter IN ('egress_bytes', 'egress_metadata_bytes', 'storage_bytes', 'cache_storage_bytes')),
     bucket            TEXT COLLATE "C" NOT NULL
         CHECK (bucket ~ '^\d{4}-\d{2}-\d{2}$'),
     quantity          BIGINT NOT NULL DEFAULT 0 CHECK (quantity >= 0),
@@ -1955,9 +1955,10 @@ CREATE TABLE IF NOT EXISTS usage_daily (
 CREATE INDEX IF NOT EXISTS idx_usage_daily_bucket ON usage_daily (bucket);
 
 -- One storage capture per org per UTC day; the last capture of the day wins. billable_bytes is
--- what a customer pays to store: uploaded artifacts only, from org_billable_storage_bytes.
--- cache_attributed_bytes is the proxy-cache share of org_storage_bytes, recorded for analysis and
--- never billed.
+-- what a customer pays to store for uploads: uploaded artifacts only, from
+-- org_billable_storage_bytes. cache_attributed_bytes is the org's full attributed share of
+-- proxy-cache storage (also counted, undivided, toward org_storage_bytes quota) and is billed
+-- separately as cache_storage_bytes, never split across tenants that share a cached artifact.
 -- The count columns are operator capacity and abuse signals, never billed meters:
 --   hosted_version_count  uploaded non-OCI package versions;
 --   oci_manifest_count    uploaded OCI manifests and indexes (oci_blobs rows of a manifest media type);
@@ -1991,7 +1992,9 @@ CREATE INDEX IF NOT EXISTS idx_storage_snapshot_day ON storage_snapshot (day_utc
 -- storage_bytes, uploaded artefacts for artifact_count. No row for a meter means that meter is not
 -- capped, and an org with no rows is metered but never enforced. The hourly usage rollup compares
 -- each cap with the org's month-to-date usage and writes the result to orgs.usage_posture.
--- Configuration, not metering, so the rows go with their org on hard delete.
+-- Configuration, not metering, so the rows go with their org on hard delete. cache_storage_bytes is
+-- deliberately not a cap meter: proxy-cache growth is bounded by storage_quota_bytes (the org's
+-- 413 guard), never by a usage cap.
 CREATE TABLE IF NOT EXISTS org_usage_caps (
     org_id       TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     meter        TEXT NOT NULL

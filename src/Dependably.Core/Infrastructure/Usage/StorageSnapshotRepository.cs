@@ -1,16 +1,24 @@
+using System.Data.Common;
 using Dapper;
 
 namespace Dependably.Infrastructure.Usage;
 
 /// <summary>
-/// Captures each org's storage into <c>storage_snapshot</c> and carries the billable figure into
-/// <c>usage_daily</c> as the day's <c>storage_bytes</c> high-water mark. The same capture records the
-/// org's operator signals: its artefact, OCI blob and proxy-cache entry counts and its database
-/// footprint. None of them is billed, and none is recomputed on a page load.
+/// Captures each org's storage into <c>storage_snapshot</c> and carries two billable figures into
+/// <c>usage_daily</c> as that day's high-water marks: <c>storage_bytes</c> from
+/// <c>billable_bytes</c>, and <c>cache_storage_bytes</c> from <c>cache_attributed_bytes</c> — the
+/// org's full attributed proxy-cache size, never split across the tenants that share a cached
+/// artifact. The same capture records the org's operator signals: its artefact, OCI blob and
+/// proxy-cache entry counts and its database footprint. The counts are never billed, and none of
+/// this is recomputed on a page load.
 ///
-/// The snapshot row is last-capture-wins for its day; the <c>usage_daily</c> row only ever rises.
+/// A capture computes every org's figures in one read-only aggregate, then writes them in a short
+/// transaction: the aggregate scans every org-scoped growth table, and running it before the write
+/// transaction opens keeps SQLite's single write lock free while it does.
+///
+/// The snapshot row is last-capture-wins for its day; both <c>usage_daily</c> rows only ever rise.
 /// Capturing twice in one day therefore records the latest composition while keeping the highest
-/// billable figure seen, and a recompute can never lower a mark already written.
+/// billable figures seen, and a recompute can never lower a mark already written.
 /// </summary>
 public sealed class StorageSnapshotRepository
 {
@@ -18,7 +26,7 @@ public sealed class StorageSnapshotRepository
     /// The org-scoped growth tables whose rows make up <c>db_row_count</c>. A fixed list rather
     /// than a catalogue walk, because a walk needs interpolated table names. Every table here
     /// declares <c>org_id</c>, which a unit test checks against <c>Schema.sql</c>, and the same
-    /// test checks that <see cref="CaptureSql"/> counts exactly these tables. Tables with no
+    /// test checks that <see cref="AggregateSql"/> counts exactly these tables. Tables with no
     /// <c>org_id</c> are excluded because none of their rows can be attributed to one org:
     /// instance-wide tables (<c>background_job_runs</c>, <c>spdx_license</c>, the vulnerability
     /// feeds), the shared proxy catalogue (<c>cache_artifact</c>, which each org reaches through
@@ -52,26 +60,22 @@ public sealed class StorageSnapshotRepository
     // accepts as a manifest; a unit test pins the two together.
     // xtenant: the capture sweeps every org in one statement. org_id comes from orgs.id and is
     // joined to each per-org view and count on org_id, so a row carries only its own org's figures.
-    internal const string CaptureSql =
+    internal const string AggregateSql =
         """
-        INSERT INTO storage_snapshot
-            (org_id, day_utc, hosted_bytes, oci_uploaded_bytes, cache_attributed_bytes, billable_bytes,
-             hosted_version_count, oci_manifest_count, oci_blob_count, cache_entry_count, db_row_count,
-             captured_at)
-        SELECT o.id,
-               @day,
-               COALESCE(b.hosted_bytes, 0),
-               COALESCE(b.oci_uploaded_bytes, 0),
+        SELECT o.id AS OrgId,
+               @day AS DayUtc,
+               COALESCE(b.hosted_bytes, 0) AS HostedBytes,
+               COALESCE(b.oci_uploaded_bytes, 0) AS OciUploadedBytes,
                CASE WHEN COALESCE(t.total_bytes, 0) > COALESCE(b.billable_bytes, 0)
                     THEN COALESCE(t.total_bytes, 0) - COALESCE(b.billable_bytes, 0)
-                    ELSE 0 END,
-               COALESCE(b.billable_bytes, 0),
-               COALESCE(hv.n, 0),
-               COALESCE(oc.manifests, 0),
-               COALESCE(oc.blobs, 0),
-               COALESCE(ce.n, 0),
-               COALESCE(dr.n, 0),
-               @capturedAt
+                    ELSE 0 END AS CacheAttributedBytes,
+               COALESCE(b.billable_bytes, 0) AS BillableBytes,
+               COALESCE(hv.n, 0) AS HostedVersionCount,
+               COALESCE(oc.manifests, 0) AS OciManifestCount,
+               COALESCE(oc.blobs, 0) AS OciBlobCount,
+               COALESCE(ce.n, 0) AS CacheEntryCount,
+               COALESCE(dr.n, 0) AS DbRowCount,
+               @capturedAt AS CapturedAt
         FROM orgs o
         LEFT JOIN org_billable_storage_bytes b ON b.org_id = o.id
         LEFT JOIN org_storage_bytes t ON t.org_id = o.id
@@ -146,7 +150,20 @@ public sealed class StorageSnapshotRepository
             ) r
             GROUP BY r.org_id
         ) dr ON dr.org_id = o.id
-        WHERE 1 = 1
+        """;
+
+    // xtenant: writes one org's computed snapshot per execution; org_id comes from the aggregate's
+    // row for that org and lands in the INSERT column list unchanged.
+    private const string UpsertSql =
+        """
+        INSERT INTO storage_snapshot
+            (org_id, day_utc, hosted_bytes, oci_uploaded_bytes, cache_attributed_bytes, billable_bytes,
+             hosted_version_count, oci_manifest_count, oci_blob_count, cache_entry_count, db_row_count,
+             captured_at)
+        VALUES
+            (@OrgId, @DayUtc, @HostedBytes, @OciUploadedBytes, @CacheAttributedBytes, @BillableBytes,
+             @HostedVersionCount, @OciManifestCount, @OciBlobCount, @CacheEntryCount, @DbRowCount,
+             @CapturedAt)
         ON CONFLICT (org_id, day_utc) DO UPDATE SET
             hosted_bytes = excluded.hosted_bytes,
             oci_uploaded_bytes = excluded.oci_uploaded_bytes,
@@ -174,11 +191,39 @@ public sealed class StorageSnapshotRepository
         """;
 
     // xtenant: carries every org's snapshot for one day into usage_daily; org_id flows from the
+    // snapshot row into the INSERT column list unchanged. Same high-water semantics as
+    // HighWaterSqlite, over the org's full attributed cache size rather than billable_bytes.
+    private const string HighWaterCacheSqlite =
+        """
+        INSERT INTO usage_daily (org_id, meter, bucket, quantity, redirect_quantity, computed_at)
+        SELECT org_id, 'cache_storage_bytes', day_utc, cache_attributed_bytes, 0, @capturedAt
+        FROM storage_snapshot
+        WHERE day_utc = @day
+        ON CONFLICT (org_id, meter, bucket) DO UPDATE SET
+            quantity = MAX(usage_daily.quantity, excluded.quantity),
+            computed_at = excluded.computed_at
+        """;
+
+    // xtenant: carries every org's snapshot for one day into usage_daily; org_id flows from the
     // snapshot row into the INSERT column list unchanged.
     private const string HighWaterPostgres =
         """
         INSERT INTO usage_daily (org_id, meter, bucket, quantity, redirect_quantity, computed_at)
         SELECT org_id, 'storage_bytes', day_utc, billable_bytes, 0, @capturedAt
+        FROM storage_snapshot
+        WHERE day_utc = @day
+        ON CONFLICT (org_id, meter, bucket) DO UPDATE SET
+            quantity = GREATEST(usage_daily.quantity, excluded.quantity),
+            computed_at = excluded.computed_at
+        """;
+
+    // xtenant: carries every org's snapshot for one day into usage_daily; org_id flows from the
+    // snapshot row into the INSERT column list unchanged. Same high-water semantics as
+    // HighWaterPostgres, over the org's full attributed cache size rather than billable_bytes.
+    private const string HighWaterCachePostgres =
+        """
+        INSERT INTO usage_daily (org_id, meter, bucket, quantity, redirect_quantity, computed_at)
+        SELECT org_id, 'cache_storage_bytes', day_utc, cache_attributed_bytes, 0, @capturedAt
         FROM storage_snapshot
         WHERE day_utc = @day
         ON CONFLICT (org_id, meter, bucket) DO UPDATE SET
@@ -192,28 +237,49 @@ public sealed class StorageSnapshotRepository
 
     /// <summary>
     /// Captures every org's storage for <paramref name="day"/> and raises that day's
-    /// <c>storage_bytes</c> mark in <c>usage_daily</c> where the capture exceeds it. Both writes
-    /// commit together. Returns the number of orgs captured.
+    /// <c>storage_bytes</c> and <c>cache_storage_bytes</c> marks in <c>usage_daily</c> where the
+    /// capture exceeds them. Returns the number of orgs captured.
+    ///
+    /// The capture runs in two phases on one connection. The aggregate is a single read statement,
+    /// so it is one consistent snapshot on both providers, and it runs before the write
+    /// transaction opens because it scans every org-scoped growth table while SQLite allows only
+    /// one writer at a time. The transaction then holds the write lock only for one upsert per org
+    /// plus the two <c>usage_daily</c> carries, and all the writes commit together.
     /// </summary>
     public async Task<int> CaptureAsync(DateOnly day, DateTimeOffset capturedAt, CancellationToken ct = default)
     {
         string dayLabel = UsageRollupRepository.DayLabel(day);
         string capturedAtIso = capturedAt.ToUtcIso();
 
-        // xtenant: the capture records every org's billable storage in one statement.
+        // xtenant: the capture reads and records every org's billable storage on one connection.
         await using var conn = await _db.OpenCrossTenantAsync("storage snapshot capture", ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        var rows = await QueryAggregateAsync(conn, dayLabel, capturedAtIso, ct);
 
-        int captured = await conn.ExecuteAsync(
-            CaptureSql, new { day = dayLabel, capturedAt = capturedAtIso }, transaction: tx);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await conn.ExecuteAsync(UpsertSql, rows, transaction: tx);
+        bool postgres = _db.Provider == DbProvider.Postgres;
         await conn.ExecuteAsync(
-            _db.Provider == DbProvider.Postgres ? HighWaterPostgres : HighWaterSqlite,
+            postgres ? HighWaterPostgres : HighWaterSqlite,
+            new { day = dayLabel, capturedAt = capturedAtIso },
+            transaction: tx);
+        await conn.ExecuteAsync(
+            postgres ? HighWaterCachePostgres : HighWaterCacheSqlite,
             new { day = dayLabel, capturedAt = capturedAtIso },
             transaction: tx);
 
         await tx.CommitAsync(ct);
-        return captured;
+        return rows.Count;
     }
+
+    /// <summary>
+    /// Computes every org's snapshot figures for one day on <paramref name="conn"/> without
+    /// writing anything. It runs outside any transaction, so on SQLite it reads its own snapshot
+    /// of the database and neither waits on nor blocks a concurrent writer.
+    /// </summary>
+    internal static async Task<List<StorageSnapshotRow>> QueryAggregateAsync(
+        DbConnection conn, string dayLabel, string capturedAtIso, CancellationToken ct = default) =>
+        (await conn.QueryAsync<StorageSnapshotRow>(new CommandDefinition(
+            AggregateSql, new { day = dayLabel, capturedAt = capturedAtIso }, cancellationToken: ct))).AsList();
 
     /// <summary>
     /// Whether any org has a captured snapshot for <paramref name="day"/> — used only to decide

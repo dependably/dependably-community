@@ -93,7 +93,7 @@ public sealed partial class MavenController
         await using (var artifactStream = new FileStream(
             staged.Path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 81920, useAsync: true))
         {
-            await _svc.Blobs.PutAsync(blobKey, artifactStream, ct);
+            await _svc.Blobs.Registry.PutAsync(blobKey, artifactStream, ct);
         }
 
         await using var conn = await _svc.Db.OpenAsync(ct);

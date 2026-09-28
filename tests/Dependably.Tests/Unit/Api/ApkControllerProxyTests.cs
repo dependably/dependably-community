@@ -144,7 +144,7 @@ public sealed class ApkControllerProxyTests : IAsyncLifetime
             Tokens: _tokens,
             Audit: _audit,
             Packages: _packages,
-            Blobs: new TieredBlobStorage(_blobs, _blobs).Cache,
+            Blobs: new TieredBlobStorage(_blobs, _blobs),
             Upstream: upstreamClient,
             Registries: new UpstreamRegistryResolver(
                 new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Unconfigured())),

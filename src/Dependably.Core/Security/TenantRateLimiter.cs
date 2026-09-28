@@ -63,6 +63,9 @@ internal sealed record TenantRateLimitSettings(
 /// <c>TENANT_RATE_LIMIT_PERMITS</c> normally, and <c>tenant-throttled:{id}</c> at
 /// <c>TENANT_THROTTLED_RATE_LIMIT_PERMITS</c> while the org's usage posture is
 /// <c>downloads_throttled</c>. Like <c>download</c> and <c>push</c>, the state is per replica.
+/// Only traffic the org serves as its own draws on it: a request
+/// <see cref="TenantBudgetAttributionMiddleware"/> marks under <see cref="NotTenantTrafficItemKey"/>
+/// is limited by the per-caller link alone, so an anonymous source cannot spend an org's window.
 ///
 /// <para>
 /// A rejection this limiter makes stamps the rejected partition key into
@@ -99,8 +102,18 @@ internal static class TenantRateLimiter
     /// <summary>The <c>HttpContext.Items</c> key a tenant-dimension rejection records its partition under.</summary>
     internal const string RejectedPartitionItemKey = "Dependably.RateLimit.TenantRejectedPartition";
 
-    // Sliding-window segments per one-second window, the same granularity as download/push.
-    private const int WindowSegments = 4;
+    /// <summary>
+    /// The <c>HttpContext.Items</c> key <see cref="TenantBudgetAttributionMiddleware"/> sets to
+    /// <c>true</c> on a request the tenant does not serve as its own traffic. Such a request is
+    /// never charged to the tenant partition; an unmarked request is.
+    /// </summary>
+    internal const string NotTenantTrafficItemKey = "Dependably.RateLimit.NotTenantTraffic";
+
+    // The sliding window and its segments, the same granularity as download/push. A permit
+    // returns when the segment it was drawn in leaves the window, so it can stay held for up to
+    // one window plus one segment after it was drawn.
+    internal static readonly TimeSpan Window = TimeSpan.FromSeconds(1);
+    internal const int WindowSegments = 4;
 
     /// <summary>
     /// The <c>policy</c> and bounded <c>partition</c> labels a rejection reports on
@@ -162,7 +175,7 @@ internal static class TenantRateLimiter
             return RateLimitPartition.GetSlidingWindowLimiter(key, _ => new SlidingWindowRateLimiterOptions
             {
                 PermitLimit = permits,
-                Window = TimeSpan.FromSeconds(1),
+                Window = Window,
                 SegmentsPerWindow = WindowSegments,
                 QueueLimit = queue,
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst,

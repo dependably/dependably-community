@@ -203,6 +203,25 @@ public sealed class SystemUsageTests : IClassFixture<DependablyMultiFactory>, IA
     }
 
     [Fact]
+    public async Task Fleet_listing_reports_billable_cache_storage_as_the_average_of_its_marks()
+    {
+        var (orgId, slug, _, _, _) = await CreateTenantAsync();
+        await SeedDailyAsync(orgId, "cache_storage_bytes", "2026-09-01", 400);
+        await SeedDailyAsync(orgId, "cache_storage_bytes", "2026-09-02", 600);
+
+        using var client = await _factory.CreateSystemAdminClient();
+        var resp = await client.GetAsync("/api/v1/system/usage?from=2026-09-01&to=2026-09-02&pageSize=200");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var row = doc.RootElement.GetProperty("items").EnumerateArray()
+            .First(i => i.GetProperty("slug").GetString() == slug);
+        Assert.Equal(500L, row.GetProperty("cacheStorageBytes").GetInt64());
+        Assert.Equal(2, row.GetProperty("cacheMarkDays").GetInt64());
+        Assert.True(doc.RootElement.GetProperty("totals").TryGetProperty("cacheStorageBytes", out _));
+    }
+
+    [Fact]
     public async Task Fleet_listing_sorts_by_database_footprint()
     {
         var (orgId, slug, _, _, _) = await CreateTenantAsync();
@@ -272,10 +291,12 @@ public sealed class SystemUsageTests : IClassFixture<DependablyMultiFactory>, IA
             + "storage_mark_days,snapshot_billable_bytes,snapshot_hosted_bytes,snapshot_oci_uploaded_bytes,"
             + "snapshot_cache_attributed_bytes,snapshot_captured_at,last_computed_at,request_count,"
             + "metadata_request_count,snapshot_artifact_count,snapshot_hosted_version_count,"
-            + "snapshot_oci_manifest_count,snapshot_oci_blob_count,snapshot_cache_entry_count,snapshot_db_row_count",
+            + "snapshot_oci_manifest_count,snapshot_oci_blob_count,snapshot_cache_entry_count,snapshot_db_row_count,"
+            + "cache_storage_bytes,cache_mark_days",
             lines[0]);
         string row = Assert.Single(lines, l => l.StartsWith(orgId + ",", StringComparison.Ordinal));
-        Assert.EndsWith(",17,23,15,12,3,40,56,7890", row, StringComparison.Ordinal);
+        // No cache_storage_bytes mark was seeded for this org/range, so the two appended columns read 0.
+        Assert.EndsWith(",17,23,15,12,3,40,56,7890,0,0", row, StringComparison.Ordinal);
     }
 
     // ── Per-tenant series ─────────────────────────────────────────────────────────────────────
@@ -326,6 +347,23 @@ public sealed class SystemUsageTests : IClassFixture<DependablyMultiFactory>, IA
             .GetProperty("egressBytes").GetInt64());
         Assert.Equal(200L, series.First(b => b.GetProperty("bucket").GetString() == "2026-09-02")
             .GetProperty("egressBytes").GetInt64());
+    }
+
+    [Fact]
+    public async Task Per_tenant_daily_series_and_month_to_date_carry_cache_storage_bytes()
+    {
+        var (orgId, slug, _, _, _) = await CreateTenantAsync();
+        await SeedDailyAsync(orgId, "cache_storage_bytes", "2026-09-01", 700);
+
+        using var client = await _factory.CreateSystemAdminClient();
+        var resp = await client.GetAsync($"/api/v1/system/tenants/{slug}/usage?from=2026-09-01&to=2026-09-01");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var bucket = Assert.Single(doc.RootElement.GetProperty("series").EnumerateArray());
+        Assert.Equal(700L, bucket.GetProperty("cacheStorageBytes").GetInt64());
+        var mtd = doc.RootElement.GetProperty("monthToDate");
+        Assert.Equal(700L, mtd.GetProperty("cacheStorageBytes").GetInt64());
     }
 
     [Fact]

@@ -84,6 +84,25 @@ public sealed class InstanceControllerUnitTests
     }
 
     [Fact]
+    public async Task UpdateSettings_AuditRowCarriesTheCallersSourceIp()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        b.InstanceController.HttpContext.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("203.0.113.44");
+
+        var result = await b.InstanceController.UpdateSettings(
+            new Dictionary<string, string> { ["max_upload_bytes"] = "2097152" },
+            CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+        string? sourceIp = await conn.QuerySingleAsync<string?>(
+            "SELECT source_ip FROM audit_log WHERE action = 'instance_settings_updated'");
+        Assert.Equal("203.0.113.44", sourceIp);
+    }
+
+    [Fact]
     public async Task UpdateSettings_RejectsUnknownKey_BeforeAnyWrite()
     {
         await using var s = await ControllerScenario.CreateAsync();
@@ -118,6 +137,8 @@ public sealed class InstanceControllerUnitTests
     [InlineData("siem_max_lookback_days", "60")]
     [InlineData("default_storage_quota_bytes", "1073741824")]
     [InlineData("max_active_tokens_per_tenant", "250")]
+    [InlineData("cache_size_warn_bytes", "1000000000")]
+    [InlineData("cache_size_warn_bytes", "0")] // explicit disable — a valid, meaningful value
     public async Task UpdateSettings_AcceptsEachAllowedKey(string key, string value)
     {
         await using var s = await ControllerScenario.CreateAsync();
@@ -127,6 +148,26 @@ public sealed class InstanceControllerUnitTests
         var result = await b.InstanceController.UpdateSettings(
             new Dictionary<string, string> { [key] = value }, CancellationToken.None);
         Assert.IsType<NoContentResult>(result);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("not-a-number")]
+    public async Task UpdateSettings_CacheSizeWarnBytesInvalid_Returns400_BeforeAnyWrite(string badValue)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.InstanceController.UpdateSettings(
+            new Dictionary<string, string> { ["cache_size_warn_bytes"] = badValue },
+            CancellationToken.None);
+        Assert.IsType<BadRequestObjectResult>(result);
+
+        await using var conn = await b.Db.OpenAsync();
+        long written = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM instance_settings WHERE key = 'cache_size_warn_bytes'");
+        Assert.Equal(0, written);
     }
 }
 

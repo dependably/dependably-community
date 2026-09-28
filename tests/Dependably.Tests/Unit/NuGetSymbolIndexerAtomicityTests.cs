@@ -55,7 +55,7 @@ public sealed class NuGetSymbolIndexerAtomicityTests : IAsyncLifetime
 
         var blobs = new LocalBlobStore(_blobRoot);
         var repo = new NuGetSymbolIndexRepository(_db, TestTime.Frozen());
-        var indexer = new NuGetSymbolIndexer(repo, blobs, NullLogger<NuGetSymbolIndexer>.Instance);
+        var indexer = new NuGetSymbolIndexer(repo, new TieredBlobStorage(blobs, blobs), NullLogger<NuGetSymbolIndexer>.Instance);
 
         // Establish a working index for the version — this is what a failed rebuild must not
         // destroy.
@@ -82,7 +82,7 @@ public sealed class NuGetSymbolIndexerAtomicityTests : IAsyncLifetime
 
         var failingDb = new FailOnNthInsertMetadataStore(_db, failOnOccurrence: 2);
         var failingRepo = new NuGetSymbolIndexRepository(failingDb, TestTime.Frozen());
-        var failingIndexer = new NuGetSymbolIndexer(failingRepo, blobs, NullLogger<NuGetSymbolIndexer>.Instance);
+        var failingIndexer = new NuGetSymbolIndexer(failingRepo, new TieredBlobStorage(blobs, blobs), NullLogger<NuGetSymbolIndexer>.Instance);
 
         using (var newStream = new MemoryStream(newSnupkg))
         {

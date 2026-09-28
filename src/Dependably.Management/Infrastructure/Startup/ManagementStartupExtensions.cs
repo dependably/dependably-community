@@ -101,6 +101,7 @@ public static class ManagementStartupExtensions
         builder.Services.AddSingleton<StatsRefreshService.Dependencies>();
         builder.Services.AddHostedService<StatsRefreshService>();
         builder.Services.AddHostedService<SamlCertExpiryCheckService>();
+        builder.Services.AddHostedService<CacheSizeAlertService>();
 
         // JWT signing-key load. A hosted service registered after CoreStartupService so it runs
         // once first-boot has written jwt_secret; it primes JwtSigningKeyProvider, which the

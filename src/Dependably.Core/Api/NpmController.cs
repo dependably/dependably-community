@@ -249,6 +249,7 @@ public class NpmController : ControllerBase
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.YankNpm)]
     [EnableRateLimiting("push")]
+    [UsageCapAdmittedWrite("prune-only: removes stored uploaded versions absent from the keep-set and never ingests one; the first step of npm unpublish pkg@version, whose final tarball DELETE is already admitted")]
     public Task<IActionResult> UnpublishRevPut(string pkg, string rev, CancellationToken ct)
         => _publish.UnpublishRevPutAsync(HttpContext, CurrentTenantId(), pkg, rev, ct);
 
@@ -257,6 +258,7 @@ public class NpmController : ControllerBase
     [Authorize(AuthenticationSchemes = "Bearer," + TokenAuthenticationDefaults.Scheme)]
     [RequireCapability(Capabilities.YankNpm)]
     [EnableRateLimiting("push")]
+    [UsageCapAdmittedWrite("prune-only: removes stored uploaded versions absent from the keep-set and never ingests one; the first step of npm unpublish pkg@version, whose final tarball DELETE is already admitted")]
     public Task<IActionResult> UnpublishRevPutScoped(string scope, string pkg, string rev, CancellationToken ct)
         => _publish.UnpublishRevPutScopedAsync(HttpContext, CurrentTenantId(), scope, pkg, rev, ct);
 

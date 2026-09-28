@@ -231,8 +231,11 @@ public static class RateLimitPartitions
     /// single mode resolves to the one tenant and must stay reachable. Under a
     /// <c>downloads_throttled</c> usage posture the key is <c>tenant-throttled:{id}</c>, whether or
     /// not the budget is on; otherwise it is <c>tenant:{id}</c> when
-    /// <paramref name="tenantBudgetEnabled"/>, else null. The key carries the org id, so it is for the
-    /// limiter and the denial audit only — never a metric attribute.
+    /// <paramref name="tenantBudgetEnabled"/>, else null. A request
+    /// <see cref="TenantBudgetAttributionMiddleware"/> marked as not the tenant's own traffic
+    /// (<see cref="TenantRateLimiter.NotTenantTrafficItemKey"/>) is never partitioned; an unmarked
+    /// one is, so a request that never passed the attribution step is charged. The key carries the
+    /// org id, so it is for the limiter and the denial audit only — never a metric attribute.
     /// </summary>
     public static string? GetTenantPartitionKey(HttpContext httpContext, bool tenantBudgetEnabled)
     {
@@ -240,6 +243,11 @@ public static class RateLimitPartitions
             {
                 IsTenant: true, TenantId: { Length: > 0 } tenantId,
             } tenant)
+        {
+            return null;
+        }
+
+        if (httpContext.Items[TenantRateLimiter.NotTenantTrafficItemKey] is true)
         {
             return null;
         }

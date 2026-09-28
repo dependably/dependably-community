@@ -230,6 +230,22 @@
           </div>
         {/if}
 
+        <!-- Proxy cache size, beside the staging-disk tile: only rendered as a warning, like
+             tenants-needing-attention below, since an under-threshold cache has nothing to say. -->
+        {#if health.storage?.cacheAboveThreshold}
+          <div class="health-section">
+            <div class="health-section-label">{$t('system.dashboard.health.cacheSizeLabel')}</div>
+            <span class="health-warn-text">
+              {$t('system.dashboard.health.cacheSizeAboveThresholdDetail', {
+                values: {
+                  size: $formatBytes(health.storage.cacheSizeLastBytes ?? 0),
+                  threshold: $formatBytes(health.storage.cacheSizeWarnBytes ?? 0)
+                }
+              })}
+            </span>
+          </div>
+        {/if}
+
         <!-- Tenants needing attention -->
         {#if (health.tenants?.needAttention ?? 0) > 0}
           <div class="health-section">

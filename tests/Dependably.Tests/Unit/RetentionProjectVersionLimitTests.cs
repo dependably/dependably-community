@@ -376,7 +376,7 @@ public sealed class RetentionProjectVersionLimitTests : IAsyncLifetime
     {
         var cfg = new ConfigurationBuilder().Build();
         return new RetentionService(new RetentionService.Dependencies(
-            _db, _blobs, new JwtRevocationRepository(_db, time: _clock),
+            _db, new TieredBlobStorage(_blobs, _blobs), new JwtRevocationRepository(_db, time: _clock),
             new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock),
             new TrustedDeviceService(_db, _clock, cfg),
             cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, _clock,

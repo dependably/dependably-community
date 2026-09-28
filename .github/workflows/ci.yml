@@ -111,8 +111,11 @@ jobs:
       - name: Build
         run: dotnet build --no-restore -c Release
 
+      # Category=Benchmark tests are Postgres-backed measurements, not gates (they need
+      # TEST_POSTGRES_CONNECTION and throw without it); GitLab's integration jobs exclude them the
+      # same way. Minimal verbosity keeps a failure findable instead of buried in per-test output.
       - name: Integration Tests
-        run: dotnet test --no-build -c Release --verbosity normal --filter "Category=Integration" --collect:"XPlat Code Coverage"
+        run: dotnet test --no-build -c Release --verbosity minimal --filter "Category=Integration&Category!=Benchmark" --collect:"XPlat Code Coverage"
 
       - name: Upload integration coverage
         if: always()

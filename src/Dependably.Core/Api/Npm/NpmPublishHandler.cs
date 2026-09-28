@@ -25,7 +25,7 @@ public sealed class NpmPublishHandler(
     PackageRepository packages,
     TokenRepository tokens,
     AuditRepository audit,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     IPackagePublishService publish,
     ClaimResolver claimResolver,
     LicenseRepository licenses,
@@ -722,7 +722,7 @@ public sealed class NpmPublishHandler(
         var removedTags = new HashSet<string>(StringComparer.Ordinal);
         foreach (var ver in toRemove)
         {
-            await blobs.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
+            await blobs.Registry.DeleteAsync(BlobKeys.StoreKey(ver.BlobKey), ct);
             await packages.DeleteVersionAsync(ver.Id, ct);
             foreach (string tag in await distTags.DeleteTagsForVersionAsync(orgId, pkg.Id, ver.Version, ct))
             {

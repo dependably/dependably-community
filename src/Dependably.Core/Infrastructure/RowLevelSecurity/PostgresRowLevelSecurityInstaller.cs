@@ -21,8 +21,10 @@ namespace Dependably.Infrastructure.RowLevelSecurity;
 /// connection carries no tenant. An empty result would read as "no rule applies" to the blocklist,
 /// policy and trust-anchor lookups, and as "nothing to copy" to a migration — a silent fail-open
 /// or data loss. The tenant value also records the backend it was set on, and the function raises
-/// <see cref="SessionMismatchSqlState"/> when a statement runs on a different backend, which is
-/// what a transaction-mode connection pooler would otherwise do silently.</para>
+/// <see cref="SessionMismatchSqlState"/> when a setting is read on a different backend from the one
+/// that wrote it. It cannot catch a transaction-mode connection pooler handing a statement to a
+/// backend another client bound — that setting was written on the same backend, so its pid
+/// matches — which is why <see cref="ProbeTenantSessionAsync"/> detects such a pool at boot.</para>
 ///
 /// <para><b>Owner bypass is by role, not FORCE.</b> The connecting role owns the tables and is
 /// exempt; tenant connections switch to the non-owner <see cref="RowLevelSecurityOptions.RoleName"/>.
@@ -316,11 +318,37 @@ public static class PostgresRowLevelSecurityInstaller
         return problems;
     }
 
+    // Several connections held open at once is what separates a pooler from a direct connection:
+    // one connection on one backend is always self-consistent. The boot holds this many tenant
+    // connections plus the owner connection while it probes, so a multi-tenant deployment needs a
+    // MaxPoolSize of at least ProbeConnections + 1.
+    private const int ProbeConnections = 3;
+
+    private const string SessionReadSql = """
+        SELECT pg_backend_pid(), current_setting(@setting, true), current_user::text, r.rolsuper, r.rolbypassrls
+        FROM pg_roles r
+        WHERE r.rolname = current_user
+        """;
+
+    private const string PoolerSentence =
+        "statements are not staying on one session, which is what a transaction-mode pooler "
+        + "(PgBouncer pool_mode=transaction) does between statements. Row-level security cannot run over it; "
+        + "use a session-mode pool or a direct connection.";
+
+    /// <summary>One read of a probe connection's session state, taken as its own statement.</summary>
+    internal readonly record struct SessionReading(
+        int Connection, int Pass, string ExpectedOrg, int BackendPid, string? Tenant, string User, bool Super, bool Bypass);
+
     /// <summary>
-    /// Opens a real tenant connection through <paramref name="store"/> and checks that it runs as
-    /// the RLS role, which is neither superuser nor BYPASSRLS. This is the end-to-end proof that a
-    /// tenant connection is actually subject to the policies — a misconfigured role makes every
-    /// other check pass while the policies are skipped.
+    /// Opens several tenant connections through <paramref name="store"/> at once, each bound to its
+    /// own tenant, and reads each one back twice as separate statements. It checks that every
+    /// connection runs as the RLS role, which is neither superuser nor BYPASSRLS — a misconfigured
+    /// role makes every other check pass while the policies are skipped — and that each keeps its
+    /// database backend and its own tenant from one statement to the next. A transaction-mode
+    /// pooler reassigns the backend between statements, so a connection reads back a tenant
+    /// another client bound, on the backend that wrote it; <see cref="SessionMismatchSqlState"/>
+    /// never raises on that, so it is detected here and reported like any other reason the
+    /// backstop cannot hold.
     /// </summary>
     public static Task<IReadOnlyList<string>> ProbeTenantSessionAsync(
         IMetadataStore store, RowLevelSecurityOptions options, CancellationToken ct = default)
@@ -333,25 +361,104 @@ public static class PostgresRowLevelSecurityInstaller
     private static async Task<IReadOnlyList<string>> ProbeTenantSessionCoreAsync(
         IMetadataStore store, RowLevelSecurityOptions options, CancellationToken ct)
     {
-        await using var conn = await store.OpenForTenantAsync(TenantDbScope.ForOrgIteration("rls-probe"), ct);
-        var session = await conn.QuerySingleAsync<(string User, bool Super, bool Bypass)>(
-            """
-            SELECT current_user::text, r.rolsuper, r.rolbypassrls
-            FROM pg_roles r
-            WHERE r.rolname = current_user
-            """);
+        var connections = new List<DbConnection>(ProbeConnections);
+        try
+        {
+            // Each open binds as its own statement, which is the unit a transaction pooler reassigns.
+            for (int i = 1; i <= ProbeConnections; i++)
+            {
+                connections.Add(await store.OpenForTenantAsync(TenantDbScope.ForOrgIteration(ProbeOrg(i)), ct));
+            }
+
+            // Every read is its own implicit transaction. The second pass runs in reverse so a
+            // round-robin pool the size of the probe cannot hand each connection its own backend
+            // back by coincidence.
+            var readings = new List<SessionReading>(ProbeConnections * 2);
+            for (int i = 0; i < ProbeConnections; i++)
+            {
+                readings.Add(await ReadSessionAsync(connections[i], i + 1, pass: 1, ct));
+            }
+
+            for (int i = ProbeConnections - 1; i >= 0; i--)
+            {
+                readings.Add(await ReadSessionAsync(connections[i], i + 1, pass: 2, ct));
+            }
+
+            return FindSessionProblems(readings, options);
+        }
+        finally
+        {
+            foreach (var conn in connections)
+            {
+                await conn.DisposeAsync();
+            }
+        }
+    }
+
+    private static string ProbeOrg(int connection) => $"rls-probe-{connection}";
+
+    private static async Task<SessionReading> ReadSessionAsync(
+        DbConnection conn, int connection, int pass, CancellationToken ct)
+    {
+        var row = await conn.QuerySingleAsync<(int Pid, string? Tenant, string User, bool Super, bool Bypass)>(
+            new CommandDefinition(SessionReadSql, new { setting = TenantSetting }, cancellationToken: ct));
+        return new SessionReading(
+            connection, pass, ProbeOrg(connection), row.Pid, row.Tenant, row.User, row.Super, row.Bypass);
+    }
+
+    /// <summary>
+    /// Every reason the probe readings show the backstop would not hold, each kind reported once.
+    /// Only values the server returned are judged: a failed read raises instead, so a dropped
+    /// backend is never mistaken for a pooler.
+    /// </summary>
+    internal static IReadOnlyList<string> FindSessionProblems(
+        IReadOnlyList<SessionReading> readings, RowLevelSecurityOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(readings);
+        ArgumentNullException.ThrowIfNull(options);
 
         var problems = new List<string>();
-        if (!string.Equals(session.User, options.RoleName, StringComparison.Ordinal))
+        string? tenantDrift = null;
+        foreach (var reading in readings)
         {
-            problems.Add($"A tenant connection runs as '{session.User}', not '{options.RoleName}'.");
+            if (!string.Equals(reading.User, options.RoleName, StringComparison.Ordinal))
+            {
+                problems.Add($"A tenant connection runs as '{reading.User}', not '{options.RoleName}'.");
+            }
+
+            if (reading.Super || reading.Bypass)
+            {
+                problems.Add($"A tenant connection runs as '{reading.User}', which is a superuser or has BYPASSRLS.");
+            }
+
+            // The setting is <backend pid>:<org>. Comparing the whole value catches both a backend
+            // another client bound and a backend whose setting was reset.
+            string expected = $"{reading.BackendPid}:{reading.ExpectedOrg}";
+            if (tenantDrift is null && !string.Equals(reading.Tenant, expected, StringComparison.Ordinal))
+            {
+                string seen = string.IsNullOrEmpty(reading.Tenant) ? "<none>" : reading.Tenant;
+                tenantDrift =
+                    $"A tenant connection bound to '{reading.ExpectedOrg}' read back tenant '{seen}' on backend "
+                    + $"{reading.BackendPid}: {PoolerSentence}";
+            }
         }
 
-        if (session.Super || session.Bypass)
+        if (tenantDrift is not null)
         {
-            problems.Add($"A tenant connection runs as '{session.User}', which is a superuser or has BYPASSRLS.");
+            problems.Add(tenantDrift);
         }
 
-        return problems;
+        int[]? backendChange = readings
+            .GroupBy(r => r.Connection)
+            .Select(g => g.OrderBy(r => r.Pass).Select(r => r.BackendPid).Distinct().ToArray())
+            .FirstOrDefault(pids => pids.Length > 1);
+        if (backendChange is not null)
+        {
+            problems.Add(
+                $"A tenant connection changed database backend between two statements (pid {backendChange[0]} then "
+                + $"{backendChange[1]}): {PoolerSentence}");
+        }
+
+        return problems.Distinct(StringComparer.Ordinal).ToList();
     }
 }

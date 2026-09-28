@@ -237,6 +237,11 @@ public static class AuditActions
         "system_admin.timezone_changed",
         "user.language_changed",
         "user.timezone_changed",
+
+        // Instance capacity. Raised by a background sweep against a configured threshold, not by
+        // an operator edit — grouped here rather than with tenant lifecycle/security because the
+        // audience is capacity planning, not incident triage.
+        "system.cache_size_threshold_exceeded",
     ];
 
     /// <summary>Every declared <c>audit_log.action</c> value, security set first.</summary>

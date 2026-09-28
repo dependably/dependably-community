@@ -58,13 +58,19 @@ deliberately looks past `FROM` lines at the pulls the build tooling makes on its
 from `docker.io` before reading the first instruction, and an `ARG *IMAGE*=` default is the
 public fallback a mirrorless build silently uses. None of those appear in any `FROM`.
 
-Two rules are worth knowing before you add an image reference:
+Three rules are worth knowing before you add an image reference or move the mirror:
 
 - **Name any variable holding an image `*IMAGE*`.** A bare `$VAR` in a `docker pull` passes
   only when the guard can find that variable's declaration and check its value; an
   unrecognized name fails. "It starts with a dollar" is not evidence of anything.
 - **The mirror host is matched as a prefix, never a substring**, so
   `dependably.northwardlabs.ca.example.com/x` is not the mirror.
+- **The mirror host is pinned in the guard itself** (`PINNED_MIRROR_HOST` in
+  `ci/image-registry-guard.sh`) and cross-checked against the `DEP_IMAGE_REGISTRY` default in
+  `.gitlab-ci.yml`, so the guard never trusts a host taken only from the file it audits. A
+  mirror migration changes both in one MR; a change to either alone fails the guard.
+  `ci/image-registry-guard-test.sh` runs first in the same job and proves that a changed
+  default fails.
 
 Mark a deliberate public pull `# image-registry-ok: <reason>` on the line or within the five
 lines above it. The reason is required — a bare marker is rejected as malformed, same as

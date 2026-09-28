@@ -46,7 +46,7 @@ public sealed partial class StorageSnapshotDbFootprintTests
     [Fact]
     public void The_capture_counts_exactly_the_documented_tables()
     {
-        var counted = FootprintArmRegex().Matches(StorageSnapshotRepository.CaptureSql)
+        var counted = FootprintArmRegex().Matches(StorageSnapshotRepository.AggregateSql)
             .Select(m => m.Groups["table"].Value)
             .ToList();
 
@@ -70,7 +70,17 @@ public sealed partial class StorageSnapshotDbFootprintTests
     {
         foreach (string mediaType in Dependably.Protocol.OciManifestParser.AcceptedMediaTypes)
         {
-            Assert.Contains("'" + mediaType + "'", StorageSnapshotRepository.CaptureSql, StringComparison.Ordinal);
+            Assert.Contains("'" + mediaType + "'", StorageSnapshotRepository.AggregateSql, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void The_aggregate_is_a_read_only_statement()
+    {
+        // The aggregate scans every org-scoped growth table and runs before the write transaction
+        // opens; a write folded back into it would hold SQLite's write lock for the whole scan.
+        Assert.StartsWith("SELECT", StorageSnapshotRepository.AggregateSql.TrimStart(), StringComparison.Ordinal);
+        Assert.DoesNotContain("INSERT", StorageSnapshotRepository.AggregateSql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ON CONFLICT", StorageSnapshotRepository.AggregateSql, StringComparison.OrdinalIgnoreCase);
     }
 }

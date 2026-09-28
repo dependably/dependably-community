@@ -33,7 +33,6 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly StatsSnapshotRepository _statsSnapshots;
     private readonly AuditRepository _audit;
     private readonly OrgAccessGuard _guard;
-    private readonly IBlobStore _blobs;
     private readonly TieredBlobStorage _blobStorage;
     private readonly OciOrphanBlobDeleter _orphanBlobs;
     private readonly LicenseRepository _licenses;
@@ -56,7 +55,6 @@ public sealed class OrgController : OrgScopedControllerBase
         _statsSnapshots = svc.StatsSnapshots;
         _audit = svc.Audit;
         _guard = svc.Guard;
-        _blobs = svc.Blobs;
         _blobStorage = svc.BlobStorage;
         _orphanBlobs = svc.OrphanBlobs;
         _licenses = svc.Licenses;
@@ -450,9 +448,10 @@ public sealed class OrgController : OrgScopedControllerBase
             {
                 blobKeys.Add(fileBlobKey);
             }
+            // Uploaded-plane versions are published bytes, stored in the registry tier.
             foreach (string key in blobKeys)
             {
-                await _blobs.DeleteAsync(BlobKeys.StoreKey(key), ct);
+                await _blobStorage.Registry.DeleteAsync(BlobKeys.StoreKey(key), ct);
             }
             await _packages.DeleteVersionAsync(ver.Id, ct);
         }

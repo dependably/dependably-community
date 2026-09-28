@@ -42,9 +42,12 @@ public sealed class UsageReportRepositoryTests : IAsyncLifetime
         // (1000+3000)/3.
         await InsertDaily("o1", UsageMeters.EgressBytes, Day1, quantity: 100, redirect: 40);
         await InsertDaily("o1", UsageMeters.EgressBytes, Day2, quantity: 200, redirect: 0);
+        // o1's cache-storage marks average to 500, independently of the storage_bytes average.
         await InsertDaily("o1", UsageMeters.EgressMetadataBytes, Day1, quantity: 10);
         await InsertDaily("o1", UsageMeters.StorageBytes, Day1, quantity: 1000);
         await InsertDaily("o1", UsageMeters.StorageBytes, Day3, quantity: 3000);
+        await InsertDaily("o1", UsageMeters.CacheStorageBytes, Day1, quantity: 400);
+        await InsertDaily("o1", UsageMeters.CacheStorageBytes, Day2, quantity: 600);
 
         var (items, total) = await _reports.ListFleetUsageAsync(RangeStart, RangeEndExclusive, null, null, 50, 0);
 
@@ -56,11 +59,15 @@ public sealed class UsageReportRepositoryTests : IAsyncLifetime
         Assert.Equal(10L, o1.EgressMetadataBytes);
         Assert.Equal(2, o1.StorageMarkCount);
         Assert.Equal(2000L, o1.BillableStorageBytes);
+        Assert.Equal(2, o1.CacheMarkCount);
+        Assert.Equal(500L, o1.CacheStorageBytes);
 
         var o2 = Assert.Single(items, i => i.OrgId == "o2");
         Assert.Equal(0L, o2.EgressBytes);
         Assert.Equal(0L, o2.BillableStorageBytes);
         Assert.Equal(0, o2.StorageMarkCount);
+        Assert.Equal(0L, o2.CacheStorageBytes);
+        Assert.Equal(0, o2.CacheMarkCount);
     }
 
     /// <summary>
@@ -108,6 +115,20 @@ public sealed class UsageReportRepositoryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Cache_storage_sorts_through_the_allowlist_on_its_own_average()
+    {
+        await InsertDaily("o1", UsageMeters.CacheStorageBytes, Day1, quantity: 100);
+        await InsertDaily("o2", UsageMeters.CacheStorageBytes, Day1, quantity: 900);
+        await InsertDaily("o3", UsageMeters.CacheStorageBytes, Day1, quantity: 5);
+
+        var (desc, _) = await _reports.ListFleetUsageAsync(RangeStart, RangeEndExclusive, "cacheStorageBytes", "desc", 50, 0);
+        Assert.Equal(["o2", "o1", "o3"], desc.Select(i => i.OrgId).ToArray());
+
+        var (asc, _) = await _reports.ListFleetUsageAsync(RangeStart, RangeEndExclusive, "cacheStorageBytes", "asc", 50, 0);
+        Assert.Equal(["o3", "o1", "o2"], asc.Select(i => i.OrgId).ToArray());
+    }
+
+    [Fact]
     public async Task Listing_paginates_server_side()
     {
         await InsertDaily("o1", UsageMeters.EgressBytes, Day1, quantity: 300);
@@ -132,6 +153,8 @@ public sealed class UsageReportRepositoryTests : IAsyncLifetime
         await InsertDaily("o1", UsageMeters.StorageBytes, Day2, quantity: 3000);
         await InsertDaily("o2", UsageMeters.StorageBytes, Day1, quantity: 200);
         await InsertDaily("orphan", UsageMeters.EgressBytes, Day1, quantity: 9);
+        await InsertDaily("o1", UsageMeters.CacheStorageBytes, Day1, quantity: 100);
+        await InsertDaily("o2", UsageMeters.CacheStorageBytes, Day1, quantity: 50);
 
         var totals = await _reports.GetFleetTotalsAsync(RangeStart, RangeEndExclusive);
 
@@ -140,6 +163,8 @@ public sealed class UsageReportRepositoryTests : IAsyncLifetime
         Assert.Equal(7L, totals.EgressMetadataBytes);
         // o1's own average is (1000+3000)/2 = 2000; o2's is 200; fleet total is their sum.
         Assert.Equal(2200L, totals.BillableStorageBytes);
+        // o1's own average is 100; o2's is 50; fleet total is their sum.
+        Assert.Equal(150L, totals.CacheStorageBytes);
     }
 
     [Fact]

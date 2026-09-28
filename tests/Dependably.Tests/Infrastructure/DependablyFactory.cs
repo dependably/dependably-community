@@ -37,6 +37,19 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
     public InMemoryBlobStore BlobStore { get; } = new();
 
     /// <summary>
+    /// The cache-tier store when <see cref="SplitTiers"/> is set. Unused otherwise: with one
+    /// store behind both tiers, <see cref="BlobStore"/> is the cache tier too.
+    /// </summary>
+    public InMemoryBlobStore CacheBlobStore { get; } = new();
+
+    /// <summary>
+    /// Puts the cache tier on <see cref="CacheBlobStore"/> and the registry tier on
+    /// <see cref="BlobStore"/>, the shape of a deployment with <c>*_CACHE</c> / <c>*_REGISTRY</c>
+    /// storage overrides. Off by default: both tiers share <see cref="BlobStore"/>.
+    /// </summary>
+    public bool SplitTiers { get; init; }
+
+    /// <summary>
     /// Which metadata database the host runs on, from <c>TEST_INTEGRATION_DB</c>: <c>sqlite</c>
     /// (default, in-memory), <c>postgres</c>, or <c>postgres-rls</c> (Postgres with
     /// <c>DB_ROW_LEVEL_SECURITY=enforce</c>). The Postgres modes create a throwaway database per
@@ -314,14 +327,18 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
                 .ConfigurePrimaryHttpMessageHandler(() => new StubbedOciUpstreamHandler(responder));
         }
 
-        // Test overrides: replace real stores with in-memory equivalents. Both the legacy
-        // IBlobStore registration AND the new TieredBlobStorage registration must be
-        // replaced so tier-aware code (UpstreamClient, CacheEvictionService,
-        // PackagePublishService) lands on the in-memory store rather than the real backend.
+        // Test overrides: replace the real stores with in-memory equivalents. Production code
+        // resolves only TieredBlobStorage; the IBlobStore registration here is a test-only
+        // backing store, resolved lazily so a ServiceOverrides replacement of IBlobStore still
+        // flows into both tiers (or the registry tier alone under SplitTiers).
         builder.Services.RemoveAll<IBlobStore>();
         builder.Services.AddSingleton<IBlobStore>(BlobStore);
         builder.Services.RemoveAll<TieredBlobStorage>();
-        builder.Services.AddSingleton(new TieredBlobStorage(BlobStore, BlobStore));
+        builder.Services.AddSingleton(sp =>
+        {
+            var registry = sp.GetRequiredService<IBlobStore>();
+            return new TieredBlobStorage(SplitTiers ? CacheBlobStore : registry, registry);
+        });
 
         _db!.ConfigureServices(builder.Services);
 
@@ -417,6 +434,9 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // self-throttle the fixture. Tests that explicitly exercise the 429 behaviour create
         // a dedicated factory instance with a tight limit.
         builder.WebHost.UseSetting("RESCAN_RATE_LIMIT_PERMITS", "1000000");
+        // The apex usage-report policy is registered in single mode too (no route mounts it
+        // there); raised to match the multi-mode fixture so a shared principal never trips it.
+        builder.WebHost.UseSetting("USAGE_REPORT_RATE_LIMIT_PERMITS", "100000");
 
         foreach (var (key, value) in ExtraSettings)
         {

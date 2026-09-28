@@ -19,7 +19,7 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed class NuGetSymbolIndexer(
     NuGetSymbolIndexRepository symbolIndex,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     ILogger<NuGetSymbolIndexer> logger)
 {
     /// <summary>
@@ -89,7 +89,8 @@ public sealed class NuGetSymbolIndexer(
     public async Task<int?> ReindexFromBlobAsync(
         string orgId, string packageVersionId, string snupkgBlobKey, CancellationToken ct = default)
     {
-        var stream = await blobs.GetAsync(BlobKeys.StoreKey(snupkgBlobKey), ct);
+        // The re-index path serves hosted versions only, whose .snupkg is a registry-tier blob.
+        var stream = await blobs.Registry.GetAsync(BlobKeys.StoreKey(snupkgBlobKey), ct);
         if (stream is null)
         {
             return null;

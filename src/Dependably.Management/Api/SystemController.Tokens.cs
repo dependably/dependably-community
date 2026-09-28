@@ -97,6 +97,9 @@ public sealed partial class SystemController
             return Unauthorized();
         }
 
+        // actor.Kind and actor.Label resolve NULL under this controller's JWT-only [Authorize];
+        // threading them through SystemActor keeps the row correctly attributed if the accepted
+        // schemes ever widen to a system token.
         await _audit.LogSystemAsync(
             action: "system_admin.token_created",
             actorId: actor.Id,
@@ -108,6 +111,8 @@ public sealed partial class SystemController
                 description,
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            actorKind: actor.Kind,
+            actorLabel: actor.Label,
             ct: ct);
 
         return Ok(new { token = raw, record });
@@ -158,6 +163,8 @@ public sealed partial class SystemController
             actorId: actor.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(new { token_id = id }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            actorKind: actor.Kind,
+            actorLabel: actor.Label,
             ct: ct);
 
         return NoContent();

@@ -28,9 +28,9 @@ public enum RowLevelSecurityMode
 /// mistypes the value must not run believing the backstop is on.</para>
 ///
 /// <para>The default never makes a deployment unbootable: a defaulted <c>enforce</c> whose database
-/// cannot support it (no <c>CREATEROLE</c>, Postgres older than 15, a multiplexed connection) falls
-/// back to <c>off</c> with a startup warning, leaving the application's <c>org_id</c> filter as the
-/// isolation layer it always was. Only an explicit <c>enforce</c> fails closed —
+/// cannot support it (no <c>CREATEROLE</c>, Postgres older than 15, a multiplexed connection, a
+/// transaction-mode connection pool) falls back to <c>off</c> with a startup warning, leaving the
+/// application's <c>org_id</c> filter as the isolation layer it always was. Only an explicit <c>enforce</c> fails closed —
 /// <see cref="Explicit"/> tells the two apart.</para>
 /// </summary>
 public sealed partial record RowLevelSecurityOptions(RowLevelSecurityMode Mode, string RoleName)

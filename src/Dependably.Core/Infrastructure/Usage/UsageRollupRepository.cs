@@ -176,8 +176,9 @@ public sealed class UsageRollupRepository
     /// <summary>
     /// Every org's stored <c>usage_daily</c> egress-meter rows in [<paramref name="fromDay"/>,
     /// <paramref name="toDayExclusive"/>) — the weekly reconciliation's "what we billed" side.
-    /// <c>storage_bytes</c> is excluded: it is a snapshot high-water mark, not an events sum, so
-    /// it has no events-derived counterpart to reconcile against.
+    /// <c>storage_bytes</c> and <c>cache_storage_bytes</c> are excluded: both are snapshot
+    /// high-water marks, not an events sum, so neither has an events-derived counterpart to
+    /// reconcile against.
     /// </summary>
     public async Task<IReadOnlyList<UsageDailyRow>> ListDailyEgressAsync(
         DateOnly fromDay, DateOnly toDayExclusive, CancellationToken ct = default)

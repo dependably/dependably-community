@@ -115,6 +115,26 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task StoreAndRecordAsync_OrgAtUsageCap_ThrowsUsageCapReached_BeforeAnyWrite()
+    {
+        // Every hosted publish — protocol plane and the management-plane bulk import alike —
+        // flows through this seam, so the usage cap holds here even where
+        // TenantStatusEnforcementMiddleware's protocol-plane check never runs.
+        await using (var setup = await _db.OpenAsync())
+        {
+            await setup.ExecuteAsync("UPDATE orgs SET usage_posture = 'uploads_refused' WHERE id = 'o1'");
+        }
+
+        var ex = await Assert.ThrowsAsync<TenantNotReadyException>(
+            () => Build().StoreAndRecordAsync(Sample()));
+        Assert.Equal(TenantNotReadyReason.UsageCapReached, ex.Reason);
+
+        Assert.Empty(_blobs.GetKeys());
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal(0L, await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM package_versions"));
+    }
+
+    [Fact]
     public async Task DuplicateVersion_RejectedWith409()
     {
         var svc = Build();

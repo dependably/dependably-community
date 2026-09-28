@@ -493,6 +493,11 @@ public partial class Program
         // documents / ApiContract gate.
         Dependably.Api.EdgeStatusEndpoint.Map(app, version);
 
+        // Marks a protocol request its tenant does not serve as its own (no credential of that
+        // org while anonymous pull is off) so the rate limiter never charges it to the tenant
+        // budget. It needs the routed endpoint and the validated principal, so it sits after
+        // UseRouting and UseAuthorization, and it must run before the limiter it informs.
+        app.UseMiddleware<Dependably.Security.TenantBudgetAttributionMiddleware>();
         app.UseRateLimiter();
 
         // The tenant lockout gate for a suspended/archived/deleting org. Deliberately sits here —

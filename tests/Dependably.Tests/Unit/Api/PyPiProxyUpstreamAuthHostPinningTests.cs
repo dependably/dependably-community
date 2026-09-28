@@ -96,7 +96,7 @@ public sealed class PyPiProxyUpstreamAuthHostPinningTests : IAsyncLifetime
             new StubPerOrgTrustAnchorStore(), NullLogger<PyPiProvenanceVerifier>.Instance);
 
         return new PyPiProxyFetcher(
-            audit, upstreamBlobs, upstreamClient, allowlist, blocklist,
+            audit, new TieredBlobStorage(upstreamBlobs, upstreamBlobs), upstreamClient, allowlist, blocklist,
             cacheRecorder, proxyFetch, registries, provenance, NullLogger<PyPiProxyFetcher>.Instance);
     }
 

@@ -20,7 +20,7 @@ public sealed partial class CrossTenantOpenComplianceTests
     /// Pinned count of <c>OpenCrossTenantAsync</c> call sites under <c>src/</c>. Raise it only
     /// together with the new call and its <c>xtenant:</c> reason.
     /// </summary>
-    private const int ExpectedCrossTenantOpens = 44;
+    private const int ExpectedCrossTenantOpens = 45;
 
     private const int MarkerWindow = 5;
 

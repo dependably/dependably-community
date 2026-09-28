@@ -703,6 +703,8 @@ lockfile-registry-guard:
 # The runners cannot reach public registry CDNs, and the pulls that break are the ones no
 # `FROM` line shows — buildx booting its own BuildKit image, BuildKit resolving a `# syntax=`
 # frontend. Rationale and the `# image-registry-ok:` opt-out live in the script header.
+# ci/image-registry-guard-test.sh runs first, proving against the real guard that a changed
+# DEP_IMAGE_REGISTRY default fails it, so the guard cannot quietly trust the file it audits.
 image-registry-guard:
   stage: validate
   extends: [.runs-on-ci, .release-required]
@@ -710,6 +712,7 @@ image-registry-guard:
   script:
     - !reference [.apk-mirror-setup, script]
     - apk add --no-cache grep
+    - sh ci/image-registry-guard-test.sh
     - sh ci/image-registry-guard.sh .
 
 # Fails the pipeline early when the private registry isn't actually in effect, so a
@@ -2003,6 +2006,13 @@ ai-review-architecture:
   # 31st is refused outright rather than delayed — a 429 the seeding helper reports as a failed
   # upload, in whichever spec happened to be running.
   export SBOM_UPLOAD_RATE_LIMIT_PERMITS=100000
+  # The apex fleet-usage report routes and the on-demand rescan endpoint each carry their own
+  # per-caller limiter (30/min and 20/min, QueueLimit = 0), which the management knob does not
+  # reach. The management scan probes /api/v1/system/usage and /tenants/{slug}/usage as a system
+  # admin, crosses 30 within seconds, and the 429 boundary landing between a probe pair is the
+  # boolean-SQL [40018] false positive described above.
+  export USAGE_REPORT_RATE_LIMIT_PERMITS=100000
+  export RESCAN_RATE_LIMIT_PERMITS=100000
   # DAST log volume: a full active scan drives tens of thousands of probes, each of which
   # UseSerilogRequestLogging records as one request-completion event. At the default
   # Information level that is one ECS-JSON line per probe — the after_script's app-log dump

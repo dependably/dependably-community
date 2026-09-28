@@ -28,7 +28,7 @@ public sealed class HealthcheckPingerTests : IAsyncLifetime
         await initializer.InitializeAsync();
         var blobs = new InMemoryBlobStore();
         var sp = new ServiceCollection().BuildServiceProvider();
-        _readiness = new ReadinessAggregator(_db, blobs, sp);
+        _readiness = new ReadinessAggregator(_db, new TieredBlobStorage(blobs, blobs), sp);
     }
 
     public async Task DisposeAsync() => await _db.DisposeAsync();

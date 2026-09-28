@@ -1233,7 +1233,7 @@ public sealed class TerraformControllerProxyTests : IAsyncLifetime
         var svc = new TerraformControllerServices(
             Tokens: new TokenRepository(_db, TimeProvider.System),
             Orgs: new OrgRepository(_db),
-            Blobs: tiered.Cache,
+            Blobs: tiered,
             Upstream: upstream,
             Registries: new UpstreamRegistryResolver(
                 new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Unconfigured())),

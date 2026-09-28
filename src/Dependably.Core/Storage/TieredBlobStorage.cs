@@ -8,11 +8,12 @@ namespace Dependably.Storage;
 /// (<c>STORAGE_BACKEND_CACHE</c> / <c>STORAGE_BACKEND_REGISTRY</c> overrides) rather than a
 /// code change.
 ///
-/// Tier-aware code (<c>UpstreamClient</c>, <c>CacheEvictionService</c>,
-/// <c>PackagePublishService</c>) consumes this type. Tier-agnostic code (anywhere else
-/// that just needs blob R/W) keeps consuming <see cref="IBlobStore"/> directly — that
-/// registration resolves to the registry tier so legacy callers default to the durable
-/// store, not the cache.
+/// There is no tier-agnostic consumer: no <see cref="IBlobStore"/> is registered on its own,
+/// so every service takes this type and each code path names the tier its bytes live in.
+/// Tier is a physical-placement fact chosen per code path, not derived from the key or the
+/// origin column: <c>oci/</c> keys live in both tiers (push vs pull), and Hex docs live in
+/// the registry when published and in the cache when proxied. A method that takes an
+/// <see cref="IBlobStore"/> parameter leaves that choice to its caller.
 /// </summary>
 public sealed class TieredBlobStorage
 {
@@ -25,6 +26,7 @@ public sealed class TieredBlobStorage
     /// </summary>
     public bool IsSplit => !ReferenceEquals(Cache, Registry);
 
+    // blobtier-ok: this is the tier pair itself; each store is bound to its named tier here.
     public TieredBlobStorage(IBlobStore cache, IBlobStore registry)
     {
         Cache = cache;

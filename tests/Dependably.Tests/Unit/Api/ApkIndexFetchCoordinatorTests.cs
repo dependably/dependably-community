@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Protocol;
@@ -274,7 +276,130 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
         Assert.Equal(1, handler.CallCount); // still exactly one upstream round-trip
     }
 
+    // ── cross-tenant credential isolation ─────────────────────────────────────
+
+    [Theory]
+    [InlineData(IndexFile)]
+    [InlineData("DESCRIPTION")]
+    public async Task GetAsync_DifferentCredentials_SameUpstream_DoesNotServeOtherTenantsCachedIndex(string filename)
+    {
+        // Two orgs configure the same upstream base URL: org-a with a private-mirror credential,
+        // org-b anonymously. The coordinator is one shared singleton, so org-b must get its own
+        // upstream answer, never org-a's cached credentialed bytes.
+        string path = $"/{Release}/{Repo}/{Arch}/{filename}";
+        StubCredentialedAndAnonymous(path, "Bearer org-a-secret", "private-index-a", anonymousStatus: 200, anonymousBody: "public-index");
+
+        var coordinator = BuildCoordinator();
+
+        var first = await coordinator.GetAsync(_upstream, Release, Repo, Arch, filename, null, "Bearer org-a-secret", "org-a", default);
+        Assert.NotNull(first);
+        Assert.Equal("private-index-a", Encoding.UTF8.GetString(await ReadAllAsync(first!.Body)));
+
+        var second = await coordinator.GetAsync(_upstream, Release, Repo, Arch, filename, null, null, "org-b", default);
+        Assert.NotNull(second);
+        Assert.Equal("public-index", Encoding.UTF8.GetString(await ReadAllAsync(second!.Body)));
+        Assert.Equal(2, CountRequests(path));
+    }
+
+    [Fact]
+    public async Task GetAsync_DifferentCredentials_SameUpstream_SecondTenantGetsOwnUpstreamAnswer_401()
+    {
+        // The anonymous tenant's own request is refused upstream; it must see that refusal rather
+        // than the credentialed tenant's cached private index.
+        string path = $"/{Release}/{Repo}/{Arch}/{IndexFile}";
+        StubCredentialedAndAnonymous(path, "Bearer org-a-secret", "private-index-a", anonymousStatus: 401, anonymousBody: "unauthorized");
+
+        var coordinator = BuildCoordinator();
+
+        var first = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, "Bearer org-a-secret", "org-a", default);
+        Assert.NotNull(first);
+        Assert.Equal("private-index-a", Encoding.UTF8.GetString(await ReadAllAsync(first!.Body)));
+
+        await Assert.ThrowsAsync<HttpRequestException>(
+            () => coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, "org-b", default));
+    }
+
+    [Fact]
+    public async Task GetAsync_DifferentCredentials_ConcurrentFetch_DoesNotJoinOtherTenantsInFlightFetch()
+    {
+        var handler = new GatedHandler();
+        var coordinator = BuildCoordinator(handler: handler);
+
+        var taskA = coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, "Bearer org-a-secret", "org-a", default);
+        await handler.FirstCallStarted;
+
+        // org-b (anonymous) requests the same coordinate while org-a's credentialed fetch is held
+        // on the gate. It must start its own fetch rather than join org-a's.
+        var taskB = coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, "org-b", default);
+
+        var winner = await Task.WhenAny(taskB, Task.Delay(TimeSpan.FromMilliseconds(300)));
+        Assert.Same(taskB, winner);
+        Assert.Equal(2, handler.CallCount);
+        string?[] seenHeaders = [.. handler.SeenAuthorizationHeaders];
+        Assert.Equal(2, seenHeaders.Length);
+        Assert.Equal("Bearer org-a-secret", seenHeaders[0]);
+        Assert.Null(seenHeaders[1]);
+        Assert.NotNull(await taskB);
+
+        handler.ReleaseFirstCall();
+        var resultA = await taskA;
+        Assert.NotNull(resultA);
+        Assert.Equal("gated-apkindex-body"u8.ToArray(), await ReadAllAsync(resultA!.Body));
+    }
+
+    [Fact]
+    public async Task GetAsync_SameCredentials_DifferentOrgs_ShareCacheAndFetch()
+    {
+        // Adversarial twin: two orgs presenting the identical credential disclose nothing to each
+        // other, so they keep sharing one cache entry and one upstream round trip.
+        string path = $"/{Release}/{Repo}/{Arch}/{IndexFile}";
+        StubCredentialedAndAnonymous(path, "Bearer shared-secret", "shared-index", anonymousStatus: 401, anonymousBody: "unauthorized");
+
+        var coordinator = BuildCoordinator();
+
+        var a = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, "Bearer shared-secret", "org-a", default);
+        var b = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, "Bearer shared-secret", "org-b", default);
+
+        Assert.NotNull(a);
+        Assert.NotNull(b);
+        Assert.Equal("shared-index", Encoding.UTF8.GetString(await ReadAllAsync(b!.Body)));
+        Assert.Equal(1, CountRequests(path));
+    }
+
+    [Fact]
+    public async Task GetAsync_BothAnonymous_DifferentOrgs_ShareCacheAndFetch()
+    {
+        // Adversarial twin: anonymous orgs proxying the same public mirror collapse to one cache
+        // entry and one upstream fetch.
+        StubIndex("public-index"u8.ToArray());
+        string path = $"/{Release}/{Repo}/{Arch}/{IndexFile}";
+
+        var coordinator = BuildCoordinator();
+
+        var a = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, "org-a", default);
+        var b = await coordinator.GetAsync(_upstream, Release, Repo, Arch, IndexFile, null, null, "org-b", default);
+
+        Assert.NotNull(a);
+        Assert.NotNull(b);
+        Assert.Equal("public-index"u8.ToArray(), await ReadAllAsync(b!.Body));
+        Assert.Equal(1, CountRequests(path));
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    private void StubCredentialedAndAnonymous(
+        string path, string authorization, string credentialedBody, int anonymousStatus, string anonymousBody)
+    {
+        _server.Given(Request.Create().WithPath(path).UsingGet().WithHeader("Authorization", authorization))
+               .AtPriority(1)
+               .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(credentialedBody));
+        _server.Given(Request.Create().WithPath(path).UsingGet())
+               .AtPriority(10)
+               .RespondWith(Response.Create().WithStatusCode(anonymousStatus).WithBody(anonymousBody));
+    }
+
+    private int CountRequests(string path) => _server.LogEntries.Count(e =>
+        string.Equals(e.RequestMessage?.Path, path, StringComparison.OrdinalIgnoreCase));
 
     private void StubIndex(byte[] body) =>
         _server.Given(Request.Create().WithPath($"/{Release}/{Repo}/{Arch}/{IndexFile}").UsingGet())
@@ -414,15 +539,19 @@ public sealed class ApkIndexFetchCoordinatorTests : IAsyncLifetime
     private sealed class GatedHandler : HttpMessageHandler
     {
         private int _callCount;
+        private readonly ConcurrentQueue<string?> _seenAuthorizationHeaders = new();
         private readonly TaskCompletionSource _firstCallStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _releaseFirstCall = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int CallCount => _callCount;
+        public IReadOnlyCollection<string?> SeenAuthorizationHeaders => _seenAuthorizationHeaders;
         public Task FirstCallStarted => _firstCallStarted.Task;
         public void ReleaseFirstCall() => _releaseFirstCall.TrySetResult();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
+            _seenAuthorizationHeaders.Enqueue(
+                request.Headers.TryGetValues("Authorization", out var values) ? string.Join(",", values) : null);
             if (Interlocked.Increment(ref _callCount) == 1)
             {
                 _firstCallStarted.SetResult();

@@ -20,9 +20,9 @@ namespace Dependably.Infrastructure.Usage;
 /// excluded because it is still accumulating and comparing it would flag every in-progress day as
 /// a false mismatch.
 ///
-/// <para>The <c>storage_bytes</c> meter is outside this first phase: its rows come from
-/// <see cref="StorageSnapshotRepository"/> snapshots, not from summing events, so they have no
-/// events-derived figure to reconcile against.</para>
+/// <para>The <c>storage_bytes</c> and <c>cache_storage_bytes</c> meters are outside this first
+/// phase: their rows come from <see cref="StorageSnapshotRepository"/> snapshots, not from summing
+/// events, so they have no events-derived figure to reconcile against.</para>
 ///
 /// <para><b>Stored bytes</b> are the second phase: for each storage plane (a top-level key family
 /// in <see cref="Storage.BlobKeys.PlanePrefixes"/>) the bytes the blob store holds must agree with

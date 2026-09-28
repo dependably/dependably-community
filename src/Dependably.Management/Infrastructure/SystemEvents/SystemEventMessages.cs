@@ -30,6 +30,10 @@ public static class SystemEventMessages
             "tenant.hard_deleted" => localizer["system.slack.tenantHardDeleted", slug],
             "system_admin.admin_created" => localizer["system.slack.adminCreated", actor],
             "system_admin.admin_deleted" => localizer["system.slack.adminDeleted", actor],
+            // Raised by CacheSizeAlertService — a capacity threshold, not a tenant or operator
+            // action, so there is no slug/actor to name. The message stays generic and points at
+            // System Health rather than repeating the byte counts already in the audit detail.
+            "system.cache_size_threshold_exceeded" => localizer["system.slack.cacheSizeThresholdExceeded"],
             _ => localizer["system.slack.genericEvent", record.Action],
         };
     }

@@ -32,7 +32,8 @@ namespace Dependably.Tests.Unit.Security;
 public sealed class TenantRateLimiterTests
 {
     private static DefaultHttpContext Request(
-        string path, TenantContext? tenant, bool controllerAction = true, string? user = null, Type? controller = null)
+        string path, TenantContext? tenant, bool controllerAction = true, string? user = null, Type? controller = null,
+        bool exempt = false)
     {
         var ctx = new DefaultHttpContext();
         ctx.Request.Path = path;
@@ -40,6 +41,11 @@ public sealed class TenantRateLimiterTests
         if (tenant is not null)
         {
             ctx.Items[TenantContext.HttpItemsKey] = tenant;
+        }
+
+        if (exempt)
+        {
+            ctx.Items[TenantRateLimiter.NotTenantTrafficItemKey] = true;
         }
 
         if (user is not null)
@@ -129,6 +135,55 @@ public sealed class TenantRateLimiterTests
         Assert.Null(RateLimitPartitions.GetTenantPartitionKey(Request("/npm/left-pad", TenantContext.Apex), true));
         Assert.Null(RateLimitPartitions.GetTenantPartitionKey(Request("/npm/left-pad", TenantContext.Uninitialized), true));
         Assert.Null(RateLimitPartitions.GetTenantPartitionKey(Request("/npm/left-pad", tenant: null), true));
+    }
+
+    // ── Traffic the tenant does not serve as its own ───────────────────────────
+
+    [Theory]
+    [InlineData(UsagePostures.Normal)]
+    [InlineData(UsagePostures.DownloadsThrottled)]
+    public void A_request_marked_not_tenant_traffic_is_never_tenant_partitioned(string posture)
+    {
+        Assert.Null(RateLimitPartitions.GetTenantPartitionKey(
+            Request("/npm/left-pad", Tenant("org-1", posture), exempt: true), tenantBudgetEnabled: true));
+
+        using var limiter = TenantRateLimiter.Create(new TenantRateLimitSettings(1, 0, 1, 0));
+        for (int i = 0; i < 50; i++)
+        {
+            var ctx = Request("/npm/a", Tenant("org-1", posture), exempt: true);
+            Assert.True(limiter.AttemptAcquire(ctx).IsAcquired);
+            Assert.False(ctx.Items.ContainsKey(TenantRateLimiter.RejectedPartitionItemKey));
+        }
+    }
+
+    [Theory]
+    [InlineData(UsagePostures.Normal, "tenant:org-1")]
+    [InlineData(UsagePostures.DownloadsThrottled, "tenant-throttled:org-1")]
+    public void An_unmarked_request_is_still_charged_to_the_tenant(string posture, string partition)
+    {
+        using var limiter = TenantRateLimiter.Create(new TenantRateLimitSettings(1, 0, 1, 0));
+
+        Assert.True(limiter.AttemptAcquire(Request("/npm/a", Tenant("org-1", posture))).IsAcquired);
+        var second = Request("/npm/a", Tenant("org-1", posture));
+        Assert.False(limiter.AttemptAcquire(second).IsAcquired);
+        Assert.Equal(partition, second.Items[TenantRateLimiter.RejectedPartitionItemKey]);
+    }
+
+    [Fact]
+    public void Marked_anonymous_traffic_does_not_drain_the_window_for_the_orgs_own_callers()
+    {
+        using var chained = TenantRateLimiter.Chain(
+            PartitionedRateLimiter.Create<HttpContext, string>(_ => RateLimitPartition.GetNoLimiter("none")),
+            new TenantRateLimitSettings(1, 0, 10, 0));
+
+        for (int i = 0; i < 20; i++)
+        {
+            Assert.True(chained.AttemptAcquire(Request("/npm/a", Tenant("org-1"), exempt: true)).IsAcquired);
+        }
+
+        var own = Request("/npm/a", Tenant("org-1"), user: "alice");
+        Assert.True(chained.AttemptAcquire(own).IsAcquired);
+        Assert.False(own.Items.ContainsKey(TenantRateLimiter.RejectedPartitionItemKey));
     }
 
     // ── Settings ───────────────────────────────────────────────────────────────

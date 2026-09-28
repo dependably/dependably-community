@@ -12,7 +12,7 @@ namespace Dependably.Tests.Unit.Infrastructure;
 /// <summary>
 /// <see cref="UsageStorageSnapshotService"/> captures today's storage every tick, backfills
 /// yesterday only when it was never captured, and never lowers a day's already-recorded
-/// usage_daily storage_bytes mark.
+/// usage_daily storage_bytes or cache_storage_bytes mark.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class UsageStorageSnapshotServiceTests : IAsyncLifetime
@@ -67,9 +67,12 @@ public sealed class UsageStorageSnapshotServiceTests : IAsyncLifetime
         Assert.NotNull(snapshot);
         Assert.Equal(1000L, snapshot.BillableBytes);
 
-        var mark = Assert.Single(await _rollups.GetDailyAsync("o1", Today, Today.AddDays(1)));
-        Assert.Equal(UsageMeters.StorageBytes, mark.Meter);
-        Assert.Equal(1000L, mark.Quantity);
+        var marks = await _rollups.GetDailyAsync("o1", Today, Today.AddDays(1));
+        Assert.Equal(2, marks.Count);
+        var storageMark = marks.Single(m => m.Meter == UsageMeters.StorageBytes);
+        Assert.Equal(1000L, storageMark.Quantity);
+        var cacheMark = marks.Single(m => m.Meter == UsageMeters.CacheStorageBytes);
+        Assert.Equal(0L, cacheMark.Quantity);
     }
 
     [Fact]
@@ -80,8 +83,9 @@ public sealed class UsageStorageSnapshotServiceTests : IAsyncLifetime
         var yesterdaySnapshot = await _snapshots.GetAsync("o1", Yesterday);
         Assert.NotNull(yesterdaySnapshot);
 
-        var mark = Assert.Single(await _rollups.GetDailyAsync("o1", Yesterday, Yesterday.AddDays(1)));
-        Assert.Equal(1000L, mark.Quantity);
+        var marks = await _rollups.GetDailyAsync("o1", Yesterday, Yesterday.AddDays(1));
+        Assert.Equal(2, marks.Count);
+        Assert.Equal(1000L, marks.Single(m => m.Meter == UsageMeters.StorageBytes).Quantity);
     }
 
     [Fact]
@@ -108,8 +112,8 @@ public sealed class UsageStorageSnapshotServiceTests : IAsyncLifetime
     public async Task The_storage_mark_only_rises_across_repeated_captures()
     {
         await Build().RunPassAsync(CancellationToken.None);
-        var firstMark = Assert.Single(await _rollups.GetDailyAsync("o1", Today, Today.AddDays(1)));
-        Assert.Equal(1000L, firstMark.Quantity);
+        var firstMarks = await _rollups.GetDailyAsync("o1", Today, Today.AddDays(1));
+        Assert.Equal(1000L, firstMarks.Single(m => m.Meter == UsageMeters.StorageBytes).Quantity);
 
         // Storage shrinks between captures on the same day.
         await using (var conn = await _db.OpenAsync())
@@ -120,8 +124,8 @@ public sealed class UsageStorageSnapshotServiceTests : IAsyncLifetime
         _clock.Advance(TimeSpan.FromHours(1));
         await Build().RunPassAsync(CancellationToken.None);
 
-        var secondMark = Assert.Single(await _rollups.GetDailyAsync("o1", Today, Today.AddDays(1)));
-        Assert.Equal(1000L, secondMark.Quantity);
+        var secondMarks = await _rollups.GetDailyAsync("o1", Today, Today.AddDays(1));
+        Assert.Equal(1000L, secondMarks.Single(m => m.Meter == UsageMeters.StorageBytes).Quantity);
 
         var snapshot = await _snapshots.GetAsync("o1", Today);
         Assert.NotNull(snapshot);

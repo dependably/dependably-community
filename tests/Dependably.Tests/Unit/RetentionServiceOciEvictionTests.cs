@@ -44,7 +44,7 @@ public sealed class RetentionServiceOciEvictionTests : IAsyncLifetime
         var invites = new InviteRepository(_db, _clock);
         var samlConfig = new SamlConfigRepository(_db, _clock);
         return new RetentionService(new RetentionService.Dependencies(
-            _db, _blobs, jwt, invites, samlConfig, new TrustedDeviceService(_db, _clock, cfg), cfg, new AirGapMode(cfg),
+            _db, new TieredBlobStorage(_blobs, _blobs), jwt, invites, samlConfig, new TrustedDeviceService(_db, _clock, cfg), cfg, new AirGapMode(cfg),
             NullLogger<RetentionService>.Instance, _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(

@@ -56,6 +56,8 @@ public sealed class UsageMeteringRepositoryTests : IAsyncLifetime
         Assert.Throws<ArgumentOutOfRangeException>(() => UsageEvent.Create(
             Guid.NewGuid(), "o1", UsageMeters.StorageBytes, UsageDelivery.Streamed, 1, "npm", null, T0));
         Assert.Throws<ArgumentOutOfRangeException>(() => UsageEvent.Create(
+            Guid.NewGuid(), "o1", UsageMeters.CacheStorageBytes, UsageDelivery.Streamed, 1, "npm", null, T0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => UsageEvent.Create(
             Guid.NewGuid(), "o1", UsageMeters.EgressBytes, "cdn", 1, "npm", null, T0));
         Assert.Throws<ArgumentOutOfRangeException>(() => UsageEvent.Create(
             Guid.NewGuid(), "o1", UsageMeters.EgressBytes, UsageDelivery.Streamed, -1, "npm", null, T0));
@@ -270,14 +272,28 @@ public sealed class UsageMeteringRepositoryTests : IAsyncLifetime
         // but not toward the bill.
         Assert.Equal(270L, o1.CacheAttributedBytes);
 
+        // o2 also reaches the same shared proxied npm artifact (200) o1 does. Attribution is
+        // never split between them: each gets the artifact's full size, not half of it.
+        var o2 = await _snapshots.GetAsync("o2", Day);
+        Assert.NotNull(o2);
+        Assert.Equal(200L, o2.CacheAttributedBytes);
+
         var empty = await _snapshots.GetAsync("o3", Day);
         Assert.NotNull(empty);
         Assert.Equal(0L, empty.BillableBytes);
         Assert.Equal(0L, empty.CacheAttributedBytes);
 
-        var mark = Assert.Single(await _rollups.GetDailyAsync("o1", Day, Day.AddDays(1)));
-        Assert.Equal(UsageMeters.StorageBytes, mark.Meter);
-        Assert.Equal(5100L, mark.Quantity);
+        var marks = await _rollups.GetDailyAsync("o1", Day, Day.AddDays(1));
+        Assert.Equal(2, marks.Count);
+        var storageMark = marks.Single(m => m.Meter == UsageMeters.StorageBytes);
+        Assert.Equal(5100L, storageMark.Quantity);
+        var cacheMark = marks.Single(m => m.Meter == UsageMeters.CacheStorageBytes);
+        Assert.Equal(270L, cacheMark.Quantity);
+
+        // o2's own cache_storage_bytes mark also carries the full 200, not a split share.
+        var o2CacheMark = (await _rollups.GetDailyAsync("o2", Day, Day.AddDays(1)))
+            .Single(m => m.Meter == UsageMeters.CacheStorageBytes);
+        Assert.Equal(200L, o2CacheMark.Quantity);
     }
 
     [Fact]
@@ -289,6 +305,7 @@ public sealed class UsageMeteringRepositoryTests : IAsyncLifetime
         await using (var conn = await _db.OpenAsync())
         {
             await conn.ExecuteAsync("DELETE FROM oci_blobs WHERE org_id = 'o1' AND origin = 'uploaded'");
+            await conn.ExecuteAsync("DELETE FROM oci_blobs WHERE org_id = 'o1' AND origin = 'proxy'");
         }
 
         await _snapshots.CaptureAsync(Day, T0.AddHours(6));
@@ -296,9 +313,13 @@ public sealed class UsageMeteringRepositoryTests : IAsyncLifetime
         var snapshot = await _snapshots.GetAsync("o1", Day);
         Assert.NotNull(snapshot);
         Assert.Equal(100L, snapshot.BillableBytes);
+        // The proxy-cached OCI layer was deleted too, but the day's cache mark never falls.
+        Assert.Equal(200L, snapshot.CacheAttributedBytes);
 
-        var mark = Assert.Single(await _rollups.GetDailyAsync("o1", Day, Day.AddDays(1)));
-        Assert.Equal(5100L, mark.Quantity);
+        var marks = await _rollups.GetDailyAsync("o1", Day, Day.AddDays(1));
+        Assert.Equal(2, marks.Count);
+        Assert.Equal(5100L, marks.Single(m => m.Meter == UsageMeters.StorageBytes).Quantity);
+        Assert.Equal(270L, marks.Single(m => m.Meter == UsageMeters.CacheStorageBytes).Quantity);
     }
 
     [Fact]
@@ -413,7 +434,8 @@ public sealed class UsageMeteringRepositoryTests : IAsyncLifetime
 
         Assert.Equal(1, await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM usage_events WHERE org_id = 'o2'"));
         Assert.Equal(1, await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM usage_hourly WHERE org_id = 'o2'"));
-        Assert.Equal(2, await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM usage_daily WHERE org_id = 'o2'"));
+        // egress_bytes (from the rollup) plus storage_bytes and cache_storage_bytes (from the capture).
+        Assert.Equal(3, await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM usage_daily WHERE org_id = 'o2'"));
         Assert.Equal(1, await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM storage_snapshot WHERE org_id = 'o2'"));
     }
 
@@ -514,8 +536,9 @@ public sealed class UsageMeteringRepositoryTests : IAsyncLifetime
 
     /// <summary>
     /// o1 holds one hosted npm version (100), one pushed OCI layer (5000), one proxied npm
-    /// artifact (200) and one proxy-cached OCI layer (70). o2 holds one hosted version (999).
-    /// o3 holds nothing.
+    /// artifact (200, shared with o2) and one proxy-cached OCI layer (70). o2 holds one hosted
+    /// version (999) and also reaches the same shared proxied npm artifact (200) o1 does. o3
+    /// holds nothing.
     /// </summary>
     private async Task SeedStorageAsync()
     {
@@ -537,7 +560,8 @@ public sealed class UsageMeteringRepositoryTests : IAsyncLifetime
             INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, size_bytes) VALUES
               ('cap', 'npm', 'proxied-pkg', '2.0.0', 'proxied-pkg-2.0.0.tgz', 'proxy/cap', 'cap', 200)
             """);
-        await conn.ExecuteAsync("INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1', 'cap')");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES ('o1', 'cap'), ('o2', 'cap')");
         await conn.ExecuteAsync(
             """
             INSERT INTO oci_blobs (digest, org_id, blob_key, size_bytes, media_type, origin) VALUES

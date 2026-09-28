@@ -28,7 +28,7 @@ public sealed class NuGetSymbolProxyFetcher(
     ProxyFetchService proxyFetch,
     NuGetSymbolIndexRepository symbolIndex,
     CacheArtifactRepository cacheArtifacts,
-    IBlobStore blobs,
+    TieredBlobStorage blobs,
     ILogger<NuGetSymbolProxyFetcher> logger)
 {
     /// <summary>
@@ -115,7 +115,7 @@ public sealed class NuGetSymbolProxyFetcher(
         // BlobHandle wraps the cached bytes so ProxyFetchService can reopen a fresh stream over
         // them without the caller holding one across the record.
         var blob = new BlobHandle(fetched.BlobKey, fetched.Sha256Hex, fetched.SizeBytes,
-            async openCt => await blobs.GetAsync(fetched.BlobKey, openCt) ?? Stream.Null);
+            async openCt => await blobs.Cache.GetAsync(fetched.BlobKey, openCt) ?? Stream.Null);
         var recorded = await proxyFetch.RecordAndScanAsync(
             BuildRequest(request, blob, url), ct);
 

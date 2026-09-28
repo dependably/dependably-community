@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Dapper;
 using Dependably.Api;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
@@ -107,6 +108,20 @@ public sealed class SystemBannersControllerTests : IAsyncLifetime
         Assert.Equal("system", banner.Scope);
         Assert.Null(banner.OrgId);
         Assert.Equal(_actorId, banner.CreatedBy);
+    }
+
+    [Fact]
+    public async Task Create_AuditRowCarriesTheCallersSourceIp()
+    {
+        var ctrl = BuildController();
+        ctrl.HttpContext.Connection.RemoteIpAddress = System.Net.IPAddress.Parse("2001:db8:0:1:2:3:4:5");
+
+        Assert.IsType<CreatedResult>(await ctrl.Create(ValidCreateRequest(), CancellationToken.None));
+
+        await using var conn = await _db.OpenAsync();
+        string? sourceIp = await conn.QuerySingleAsync<string?>(
+            "SELECT source_ip FROM audit_log WHERE action = 'banner.created'");
+        Assert.Equal("2001:db8:0:1:2:3:4:5", sourceIp);
     }
 
     [Fact]

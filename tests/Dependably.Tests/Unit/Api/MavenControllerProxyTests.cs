@@ -291,7 +291,7 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
 
         var svc = new MavenControllerServices(
             Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
-            Blobs: _blobs, Db: _db, Upstream: upstream, Config: config,
+            Blobs: new TieredBlobStorage(_blobs, _blobs), Db: _db, Upstream: upstream, Config: config,
             ProxyFetch: proxyFetch, BlockGate: blockGate,
             ReservedNamespaces: new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(

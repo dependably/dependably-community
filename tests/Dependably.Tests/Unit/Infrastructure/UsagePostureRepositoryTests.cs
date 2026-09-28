@@ -43,7 +43,8 @@ public sealed class UsagePostureRepositoryTests : IAsyncLifetime
             new { orgId, meter, bucket, quantity });
     }
 
-    private async Task SeedSnapshotAsync(string orgId, string day, long billable, long hostedVersions, long ociManifests)
+    private async Task SeedSnapshotAsync(
+        string orgId, string day, long billable, long hostedVersions, long ociManifests)
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
@@ -146,6 +147,16 @@ public sealed class UsagePostureRepositoryTests : IAsyncLifetime
         await SetCapsAsync("o1", (UsageCapMeters.StorageBytes, 1), (UsageCapMeters.ArtifactCount, 1));
 
         Assert.Equal(UsagePostures.Normal, await _repo.RecomputeForOrgAsync("o1"));
+    }
+
+    [Fact]
+    public async Task Cache_storage_is_billed_but_not_a_cappable_meter()
+    {
+        // cache_storage_bytes is billed (usage_daily) but not cappable: the schema's CHECK on
+        // org_usage_caps rejects it, so SetCapsAsync never persists it and the posture never
+        // reads or enforces it.
+        await Assert.ThrowsAnyAsync<Exception>(() => SetCapsAsync("o1", ("cache_storage_bytes", 5000)));
+        Assert.Empty(await _repo.GetCapsAsync("o1"));
     }
 
     [Fact]

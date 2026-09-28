@@ -49,7 +49,7 @@ public sealed class ClaimsController : ControllerBase
     private readonly PackageRepository _packages;
     private readonly CacheArtifactRepository _cache;
     private readonly Dependably.Infrastructure.CacheOrphanBlobDeleter _cacheOrphanBlobs;
-    private readonly Dependably.Storage.IBlobStore _blobs;
+    private readonly Dependably.Storage.TieredBlobStorage _blobs;
     private readonly ILogger<ClaimsController> _logger;
     private readonly TimeProvider _time;
 
@@ -115,7 +115,7 @@ public sealed class ClaimsController : ControllerBase
                 // row left to exclude from the shared-key count; string.Empty can never match a
                 // real (GUID) id and so excludes nothing. The store key is the DB key verbatim,
                 // matching this path's delete target before this guard existed.
-                await _cacheOrphanBlobs.DeleteIfUnreferencedAsync(key, string.Empty, key, _blobs, ct);
+                await _cacheOrphanBlobs.DeleteIfUnreferencedAsync(key, string.Empty, key, _blobs.Cache, ct);
             }
             catch (Exception ex)
             {
@@ -135,13 +135,15 @@ public sealed class ClaimsController : ControllerBase
     /// <list type="bullet">
     ///   <item>An org-namespaced key (<c>hosted/{orgId}/…</c>, and the
     ///   <c>go|cargo|apk|terraform/{orgId}/…</c> proxy shapes) belongs to this org alone and comes
-    ///   off unconditionally — no other tenant can reference it.</item>
+    ///   off unconditionally — no other tenant can reference it. A <c>hosted/</c> key comes off
+    ///   the registry tier, where published bytes live; the proxy shapes come off the cache
+    ///   tier.</item>
     ///   <item><c>proxy/{sha256}</c> is content-addressed with no org segment, so the identical
     ///   key is what every other tenant's cache-plane row for byte-identical content records.
     ///   Deleting it outright turns one org's claim transition into a serve-time 404 for every
     ///   tenant still holding that artifact, so it goes through the same locked refcount guard the
-    ///   cache-plane loop above uses. The store key stays the DB key verbatim, leaving the delete
-    ///   target exactly what it was and adding only the guard.</item>
+    ///   cache-plane loop above uses, against the cache tier. The store key stays the DB key
+    ///   verbatim.</item>
     ///   <item><c>oci/{algo}/{hex}</c> is content-addressed too, but its references live in
     ///   <c>oci_blobs</c>/<c>oci_tags</c>, which the cache-plane refcount cannot see — a
     ///   cache-guarded delete would still strand another tenant's manifest. Physical reclaim of an
@@ -161,11 +163,12 @@ public sealed class ClaimsController : ControllerBase
             // The package_versions row referencing this key is already gone (deleted inside
             // DeleteProxyVersionsForNameAsync), and string.Empty can never match a real
             // cache_artifact id, so nothing is excluded from the shared-key count.
-            await _cacheOrphanBlobs.DeleteIfUnreferencedAsync(key, string.Empty, key, _blobs, ct);
+            await _cacheOrphanBlobs.DeleteIfUnreferencedAsync(key, string.Empty, key, _blobs.Cache, ct);
             return;
         }
 
-        await _blobs.DeleteAsync(key, ct);
+        var tier = key.StartsWith("hosted/", StringComparison.Ordinal) ? _blobs.Registry : _blobs.Cache;
+        await tier.DeleteAsync(key, ct);
     }
 
     /// <summary>GET /api/v1/admin/claims</summary>
@@ -536,6 +539,6 @@ public sealed record ClaimsControllerServices(
     PackageRepository Packages,
     CacheArtifactRepository Cache,
     Dependably.Infrastructure.CacheOrphanBlobDeleter CacheOrphanBlobs,
-    Dependably.Storage.IBlobStore Blobs,
+    Dependably.Storage.TieredBlobStorage Blobs,
     ILogger<ClaimsController> Logger,
     TimeProvider Time);

@@ -340,6 +340,9 @@
   <data name="error.system.quotaInvalid" xml:space="preserve">
     <value>Le quota doit être un nombre d'octets positif, ou null pour effacer.</value>
   </data>
+  <data name="error.system.cacheSizeWarnInvalid" xml:space="preserve">
+    <value>Le seuil d'alerte de taille du cache doit être un nombre d'octets non négatif.</value>
+  </data>
   <data name="error.system.usageCapInvalid" xml:space="preserve">
     <value>Un plafond d'utilisation doit être une quantité positive, ou null pour l'effacer.</value>
   </data>
@@ -631,6 +634,9 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   </data>
   <data name="system.slack.adminDeleted" xml:space="preserve">
     <value>Dependably [système] : compte opérateur supprimé par {0}</value>
+  </data>
+  <data name="system.slack.cacheSizeThresholdExceeded" xml:space="preserve">
+    <value>Dependably [système] : le cache proxy de l'instance a dépassé son seuil de taille configuré — voir la santé de l'instance pour plus de détails.</value>
   </data>
   <data name="system.slack.genericEvent" xml:space="preserve">
     <value>Dependably [système] : {0}</value>

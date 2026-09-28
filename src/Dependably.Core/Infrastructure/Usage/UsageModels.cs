@@ -23,7 +23,15 @@ public static class UsageMeters
     /// </summary>
     public const string StorageBytes = "storage_bytes";
 
-    /// <summary>The meters an event may carry.</summary>
+    /// <summary>
+    /// The day's high-water mark of proxy-cache storage, billed at each tenant's full attributed
+    /// size (<c>storage_snapshot.cache_attributed_bytes</c>), never split across the tenants that
+    /// share a cached artifact. Appears in <c>usage_daily</c> only; it is captured from
+    /// <c>storage_snapshot</c>, never from events, the same way <see cref="StorageBytes"/> is.
+    /// </summary>
+    public const string CacheStorageBytes = "cache_storage_bytes";
+
+    /// <summary>The meters an event may carry. The daily-only high-water marks are not events.</summary>
     public static bool IsEventMeter(string meter) => meter is EgressBytes or EgressMetadataBytes;
 }
 
@@ -139,6 +147,13 @@ public sealed class StorageSnapshotRow
     public string DayUtc { get; init; } = "";
     public long HostedBytes { get; init; }
     public long OciUploadedBytes { get; init; }
+
+    /// <summary>
+    /// The org's full attributed share of proxy-cache storage, including proxied OCI layers,
+    /// never split across the tenants that reach the same cached artifact. Billed through
+    /// <see cref="UsageMeters.CacheStorageBytes"/>; also counted, undivided, toward
+    /// <c>org_storage_bytes</c> quota.
+    /// </summary>
     public long CacheAttributedBytes { get; init; }
     public long BillableBytes { get; init; }
 

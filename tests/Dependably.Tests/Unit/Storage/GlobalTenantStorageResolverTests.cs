@@ -111,6 +111,78 @@ public sealed class GlobalTenantStorageResolverTests : IAsyncLifetime
         Assert.Contains("not found", ex.Detail);
     }
 
+    // ── Usage-posture gate ────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("uploads_refused")]
+    [InlineData("downloads_throttled")]
+    public async Task GetRegistryAsync_PostureRefusesUploads_WriteIntent_ThrowsUsageCapReached(string posture)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE orgs SET usage_posture = @posture WHERE id = 't-active'", new { posture });
+
+        var ex = await Assert.ThrowsAsync<TenantNotReadyException>(
+            () => _sut.GetRegistryAsync("t-active", forWrite: true));
+        Assert.Equal("t-active", ex.TenantId);
+        Assert.Equal(TenantNotReadyReason.UsageCapReached, ex.Reason);
+        Assert.Contains(posture, ex.Detail);
+    }
+
+    [Theory]
+    [InlineData("uploads_refused")]
+    [InlineData("downloads_throttled")]
+    public async Task GetRegistryAsync_PostureRefusesUploads_ReadIntent_Succeeds(string posture)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE orgs SET usage_posture = @posture WHERE id = 't-active'", new { posture });
+
+        // Downloads keep working at the cap: a read intent is never gated by posture.
+        var store = await _sut.GetRegistryAsync("t-active");
+        Assert.Same(_registry, store);
+    }
+
+    [Fact]
+    public async Task GetRegistryAsync_PostureNormal_WriteIntent_Succeeds()
+    {
+        // Default usage_posture is 'normal' — a write intent is admitted.
+        var store = await _sut.GetRegistryAsync("t-active", forWrite: true);
+        Assert.Same(_registry, store);
+    }
+
+    [Theory]
+    [InlineData("read_only", TenantNotReadyReason.ReadOnlyWrite)]
+    [InlineData("suspended", TenantNotReadyReason.StatusInactive)]
+    public async Task GetRegistryAsync_StatusGatedAndCapped_WriteIntent_ReportsStatusReasonFirst(
+        string status, TenantNotReadyReason expected)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE orgs SET status = @status, usage_posture = 'uploads_refused' WHERE id = 't-active'",
+            new { status });
+
+        // The lifecycle gate precedes the usage-posture gate.
+        var ex = await Assert.ThrowsAsync<TenantNotReadyException>(
+            () => _sut.GetRegistryAsync("t-active", forWrite: true));
+        Assert.Equal(expected, ex.Reason);
+    }
+
+    [Fact]
+    public async Task GetRegistryAsync_CappedAndProvisioningPending_WriteIntent_ReportsUsageCapFirst()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("UPDATE orgs SET usage_posture = 'uploads_refused' WHERE id = 't-active'");
+        await conn.ExecuteAsync(
+            "INSERT INTO tenant_provisioning_jobs (id, org_id, kind, state) " +
+            "VALUES ('j1', 't-active', 'registry_bucket_create', 'creating')");
+
+        // The usage-posture gate precedes the provisioning gate.
+        var ex = await Assert.ThrowsAsync<TenantNotReadyException>(
+            () => _sut.GetRegistryAsync("t-active", forWrite: true));
+        Assert.Equal(TenantNotReadyReason.UsageCapReached, ex.Reason);
+    }
+
     // ── Provisioning-state gate ───────────────────────────────────────────────────
 
     [Fact]

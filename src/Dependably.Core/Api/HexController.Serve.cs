@@ -104,12 +104,12 @@ public sealed partial class HexController
         }
 
         string storeKey = BlobKeys.StoreKey(hosted.BlobKey);
-        if (await TryRedirectTarballAsync(storeKey, hosted.SizeBytes, BlobOrigins.FromColumn(hosted.Origin), ct) is { } redirect)
+        if (await TryRedirectTarballAsync(_svc.Blobs.Registry, storeKey, hosted.SizeBytes, BlobOrigins.FromColumn(hosted.Origin), ct) is { } redirect)
         {
             return redirect;
         }
 
-        var body = await _svc.Blobs.GetAsync(storeKey, ct);
+        var body = await _svc.Blobs.Registry.GetAsync(storeKey, ct);
         return body is null ? NotFound() : File(body, TarContentType, ctx.Filename);
     }
 
@@ -117,13 +117,13 @@ public sealed partial class HexController
     /// The presigned-redirect decision for a package tarball. A release tarball is immutable — its
     /// outer checksum is in the signed index — so a hosted or cached one may redirect. Docs
     /// tarballs stream: a proxied one is not a cache-plane artefact and has no recorded size to
-    /// meter the redirect by.
+    /// meter the redirect by. <paramref name="tier"/> is the tier holding the tarball's bytes.
     /// </summary>
     private async Task<IActionResult?> TryRedirectTarballAsync(
-        string storeKey, long sizeBytes, BlobOrigin origin, CancellationToken ct)
+        IBlobStore tier, string storeKey, long sizeBytes, BlobOrigin origin, CancellationToken ct)
         => _svc.Presign is not { } presign
             ? null
-            : await presign.TryRedirectAsync(HttpContext, _svc.Blobs, storeKey, sizeBytes, origin, Ecosystem, ct);
+            : await presign.TryRedirectAsync(HttpContext, tier, storeKey, sizeBytes, origin, Ecosystem, ct);
 
     /// <summary>
     /// The cache plane's arm, or null when the recorded blob is missing and the caller should fall
@@ -138,9 +138,9 @@ public sealed partial class HexController
         // the only existence check the redirect makes.
         string storeKey = BlobKeys.StoreKey(cached.BlobKey);
         var probe = _svc.Presign is { } presign
-            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, storeKey, BlobOrigin.Proxied, Ecosystem, ct)
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs.Cache, storeKey, BlobOrigin.Proxied, Ecosystem, ct)
             : null;
-        var stream = probe is null ? await _svc.Blobs.GetAsync(storeKey, ct) : null;
+        var stream = probe is null ? await _svc.Blobs.Cache.GetAsync(storeKey, ct) : null;
         if (stream is null && probe is not { Exists: true })
         {
             return null;
@@ -170,7 +170,7 @@ public sealed partial class HexController
             return redirect;
         }
 
-        stream ??= await _svc.Blobs.GetAsync(storeKey, ct);
+        stream ??= await _svc.Blobs.Cache.GetAsync(storeKey, ct);
         if (stream is null)
         {
             return null;
@@ -224,7 +224,7 @@ public sealed partial class HexController
 
         await RecordProxiedReleaseFactsAsync(ctx, release, ct);
 
-        var body = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(fetched!.BlobKey), ct);
+        var body = await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(fetched!.BlobKey), ct);
         if (body is null)
         {
             return NotFound();
@@ -279,7 +279,7 @@ public sealed partial class HexController
         var (downloadUrl, checksum) = target;
 
         var blob = new BlobHandle(fetched.BlobKey, fetched.Sha256Hex, fetched.SizeBytes,
-            async openCt => await _svc.Blobs.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), openCt)
+            async openCt => await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), openCt)
                 ?? throw new InvalidOperationException($"Blob {fetched.BlobKey} vanished between fetch and serve."));
 
         try
@@ -318,13 +318,13 @@ public sealed partial class HexController
         }
         catch (ProxyCatalogueUnavailableException)
         {
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
+            await _svc.Blobs.Cache.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
             _svc.Logger.LogWarning("Cache plane unavailable recording hex {Name} {Version} for org {OrgId}; refusing the fetch.", ctx.Name, ctx.Version, ctx.OrgId);
             return (null, StatusCode(StatusCodes.Status503ServiceUnavailable, "Package could not be recorded on the cache plane; retry."));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
+            await _svc.Blobs.Cache.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
             throw;
         }
     }
@@ -402,7 +402,7 @@ public sealed partial class HexController
                 return StatusCode(StatusCodes.Status403Forbidden);
             }
 
-            var docs = await _svc.Blobs.GetAsync(BlobKeys.HexDocs(orgId, name, version), ct);
+            var docs = await _svc.Blobs.Registry.GetAsync(BlobKeys.HexDocs(orgId, name, version), ct);
             return docs is null ? NotFound() : File(docs, "application/gzip", $"{name}-{version}.tar.gz");
         }
 
@@ -422,7 +422,7 @@ public sealed partial class HexController
         }
 
         string docsKey = BlobKeys.HexDocs(orgId, name, version);
-        var existing = await _svc.Blobs.GetAsync(docsKey, ct);
+        var existing = await _svc.Blobs.Cache.GetAsync(docsKey, ct);
         if (existing is not null)
         {
             return File(existing, "application/gzip", $"{name}-{version}.tar.gz");
@@ -449,7 +449,7 @@ public sealed partial class HexController
                 var fetched = await _svc.Upstream.GetOrFetchToBlobKeyAsync(
                     docsKey, url, null, Ecosystem, orgId, PurlNormalizer.Hex(name, version),
                     authorizationHeader: source.AuthorizationHeader, containmentBase: source.Url, ct: ct);
-                if (await _svc.Blobs.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), ct) is { } body)
+                if (await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), ct) is { } body)
                 {
                     return body;
                 }

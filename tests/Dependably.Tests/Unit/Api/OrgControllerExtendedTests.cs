@@ -506,6 +506,38 @@ public sealed class OrgControllerExtendedTests
     }
 
     [Fact]
+    public async Task DeleteVersion_SplitTiers_DeletesTheUploadedBlobFromTheRegistryTierOnly()
+    {
+        // An uploaded version's bytes are in the registry tier. With the tiers on separate stores
+        // the delete must land there; a copy of the key in the cache tier pins that it does not
+        // reach across.
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync(); await s.WithUserAsync(role: "owner");
+        await s.WithPackageAsync("tieredpkg", ecosystem: "npm");
+        await s.WithPackageVersionAsync("tieredpkg", "1.0.0", ecosystem: "npm");
+        s.WithSplitTiers();
+        var b = await s.BuildAsync();
+
+        string blobKey;
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            blobKey = await conn.ExecuteScalarAsync<string>(
+                "SELECT pv.blob_key FROM package_versions pv JOIN packages p ON p.id = pv.package_id WHERE p.name = 'tieredpkg'")
+                ?? throw new InvalidOperationException("version not seeded");
+        }
+
+        string storeKey = Dependably.Storage.BlobKeys.StoreKey(blobKey);
+        await b.Blobs.PutAsync(storeKey, new MemoryStream([1, 2, 3]), default);
+        await b.CacheBlobs.PutAsync(storeKey, new MemoryStream([1, 2, 3]), default);
+
+        var result = await b.OrgController.DeleteVersion("npm", "tieredpkg", "1.0.0", CancellationToken.None);
+        Assert.IsType<NoContentResult>(result);
+
+        Assert.False(await b.Blobs.ExistsAsync(storeKey, default), "the deleted version's bytes are still in the registry tier");
+        Assert.True(await b.CacheBlobs.ExistsAsync(storeKey, default), "the uploaded delete reached into the cache tier");
+    }
+
+    [Fact]
     public async Task DeleteVersion_LeavesOtherVersions_DoesNotGcPackage()
     {
         await using var s = await ControllerScenario.CreateAsync();

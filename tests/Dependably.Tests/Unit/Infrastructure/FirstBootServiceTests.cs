@@ -174,6 +174,19 @@ public sealed class FirstBootServiceTests
             "SELECT value FROM instance_settings WHERE key = 'gc_schedule'"));
         Assert.Equal(InstanceSettingDefaults.SiemMaxLookbackDays, await conn.ExecuteScalarAsync<string>(
             "SELECT value FROM instance_settings WHERE key = 'siem_max_lookback_days'"));
+        Assert.Equal(InstanceSettingDefaults.CacheSizeWarnBytes, await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'cache_size_warn_bytes'"));
+    }
+
+    [Fact]
+    public async Task RunAsync_SeedsCacheSizeWarnBytesFromEnvWhenProvided()
+    {
+        await using var fx = await NewFixtureAsync();
+        await NewSut(fx, Cfg(("CACHE_SIZE_WARN_BYTES", "1000000000"))).RunAsync();
+
+        await using var conn = await fx.Store.OpenAsync();
+        Assert.Equal("1000000000", await conn.ExecuteScalarAsync<string>(
+            "SELECT value FROM instance_settings WHERE key = 'cache_size_warn_bytes'"));
     }
 
     [Fact]

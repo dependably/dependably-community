@@ -43,7 +43,8 @@ public static class TokenAuthExtensions
     }
 
     /// <summary>
-    /// Resolves the token from the request's Authorization header (Bearer or Basic).
+    /// Resolves the token from the request's Authorization header (Bearer, Basic, or the bare
+    /// scheme-less form; see <see cref="ExtractAuthorizationToken"/>).
     /// Returns null if no token is present or it cannot be resolved.
     /// Does NOT enforce tenant binding — callers that proceed to write or to serve
     /// tenant-scoped data must call the org-scoped overload or check
@@ -62,42 +63,7 @@ public static class TokenAuthExtensions
             return null;
         }
 
-        string? raw = null;
-
-        if (auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-        {
-            raw = auth["Bearer ".Length..].Trim();
-        }
-        else if (auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
-        {
-            string encoded = auth["Basic ".Length..].Trim();
-            try
-            {
-                string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
-                // format is user:token — take everything after the first colon as the token
-                int colonIdx = decoded.IndexOf(':');
-                if (colonIdx >= 0)
-                {
-                    raw = decoded[(colonIdx + 1)..];
-                }
-            }
-            catch
-            {
-                Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(
-                    1, new KeyValuePair<string, object?>("outcome", "invalid"));
-                RecordRejection(request);
-                return null;
-            }
-        }
-
-        else if (!auth.Contains(' ', StringComparison.Ordinal))
-        {
-            // Hex clients send the credential as the whole header value with no scheme
-            // ("authorization: <token>", hex_core's repo_key / api_key). No other client here
-            // sends a scheme-less header, and a value with a space is some other scheme this
-            // resolver does not speak, so the bare form is accepted only when it is exactly that.
-            raw = auth.Trim();
-        }
+        string? raw = ExtractAuthorizationToken(auth);
 
         if (string.IsNullOrEmpty(raw))
         {
@@ -107,7 +73,7 @@ public static class TokenAuthExtensions
             return null;
         }
 
-        var resolved = await tokens.ResolveAsync(raw, ct);
+        var resolved = TakePreResolved(request.HttpContext, raw) ?? await tokens.ResolveAsync(raw, ct);
         Dependably.Infrastructure.Observability.DependablyMeter.TokenAuthRequests.Add(
             1, new KeyValuePair<string, object?>("outcome", resolved is null ? "invalid" : "success"));
         if (resolved is null)
@@ -126,6 +92,65 @@ public static class TokenAuthExtensions
             await tokens.TouchLastUsedAsync(resolved.Id, resolved.Source, ct: ct);
         }
         return resolved;
+    }
+
+    /// <summary>
+    /// Extracts the raw credential from an <c>Authorization</c> header value in every form
+    /// <see cref="ResolveTokenAsync(HttpRequest, TokenRepository, CancellationToken)"/> accepts:
+    /// <c>Bearer &lt;token&gt;</c> (npm), <c>Basic base64(user:&lt;token&gt;)</c> (PyPI, NuGet),
+    /// and the bare, scheme-less <c>&lt;token&gt;</c> that Cargo and Hex clients send. Returns
+    /// null for a malformed Basic value or a value in some other scheme. The resolver and
+    /// <see cref="TenantBudgetAttributionMiddleware"/> both read through this one method, so the
+    /// credentials the rate-limit attribution recognizes are exactly the ones the protocol
+    /// handlers resolve.
+    /// </summary>
+    internal static string? ExtractAuthorizationToken(string auth)
+    {
+        if (auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            return auth["Bearer ".Length..].Trim();
+        }
+
+        if (auth.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
+        {
+            string encoded = auth["Basic ".Length..].Trim();
+            try
+            {
+                string decoded = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+                // format is user:token — take everything after the first colon as the token
+                int colonIdx = decoded.IndexOf(':');
+                return colonIdx >= 0 ? decoded[(colonIdx + 1)..] : null;
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
+        }
+
+        // Cargo and Hex clients send the credential as the whole header value with no scheme
+        // ("authorization: <token>", hex_core's repo_key / api_key, cargo's registry token). A
+        // value with a space is some other scheme this resolver does not speak, so the bare form
+        // is accepted only when it is exactly one token.
+        return auth.Contains(' ', StringComparison.Ordinal) ? null : auth.Trim();
+    }
+
+    /// <summary>
+    /// The resolution <see cref="TenantBudgetAttributionMiddleware"/> already made for this
+    /// request, when it resolved the very credential this overload extracted. It is consumed on
+    /// first use, so a later call in the same request resolves afresh. Only a live credential is
+    /// ever recorded, so an unresolved one always reaches the repository and its refusal is
+    /// counted here as usual.
+    /// </summary>
+    private static TokenRecord? TakePreResolved(HttpContext context, string raw)
+    {
+        if (context.Items[TenantBudgetAttributionMiddleware.ResolvedTokenItemKey]
+            is not TenantBudgetAttributionMiddleware.PreResolvedToken pre)
+        {
+            return null;
+        }
+
+        context.Items.Remove(TenantBudgetAttributionMiddleware.ResolvedTokenItemKey);
+        return string.Equals(pre.RawToken, raw, StringComparison.Ordinal) ? pre.Token : null;
     }
 
     /// <summary>

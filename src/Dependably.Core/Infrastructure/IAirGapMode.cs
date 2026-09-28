@@ -55,6 +55,7 @@ internal static class BackgroundJobs
             "usage-rollup-daily",
             "usage-storage-snapshot",
             "usage-reconcile-weekly",
+            "cache-size-alert",
         };
 
     /// <summary>

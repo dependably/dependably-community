@@ -47,6 +47,27 @@ public static class InstanceSettingDefaults
     // the worst-case staging footprint per tenant.
     public const string MaxConcurrentOciUploadsPerTenant = "32";
 
+    // 500 GB decimal — the instance-wide proxy cache tier size at which CacheSizeAlertService
+    // warns the apex/system admin. The cache tier is shared and content-addressed across every
+    // tenant, so this is an instance setting rather than a per-org one. An explicit "0" disables
+    // the alert; see ParseCacheSizeWarnBytes for how an absent or unparseable value differs from
+    // a deliberate zero.
+    public const string CacheSizeWarnBytes = "500000000000";
+
+    /// <summary>
+    /// Resolves the effective cache-size warning threshold from a raw
+    /// <c>instance_settings.cache_size_warn_bytes</c> value, falling back to
+    /// <see cref="CacheSizeWarnBytes"/> when the value is absent or unparseable. An explicit
+    /// <c>"0"</c> is a deliberate disable and is honoured as zero rather than falling back — zero
+    /// means "never alert", not "use the default". Shared by <c>CacheSizeAlertService</c> (the
+    /// enforcing check) and <c>HealthService</c> (the read-only health flag) so the two can never
+    /// disagree about the configured threshold.
+    /// </summary>
+    public static long ParseCacheSizeWarnBytes(string? raw) =>
+        raw is not null && long.TryParse(raw, out long bytes) && bytes >= 0
+            ? bytes
+            : long.Parse(CacheSizeWarnBytes);
+
     /// <summary>
     /// Canonical set of instance-setting keys an operator may write through the management API.
     /// Both the multi-mode system surface (<c>/api/v1/system/settings</c>) and the single-mode
@@ -76,5 +97,6 @@ public static class InstanceSettingDefaults
         "max_active_tokens_per_tenant",
         "max_pending_invites_per_tenant",
         "max_concurrent_oci_uploads_per_tenant",
+        "cache_size_warn_bytes",
     };
 }

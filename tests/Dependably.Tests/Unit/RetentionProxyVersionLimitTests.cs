@@ -39,7 +39,7 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
     {
         var cfg = new ConfigurationBuilder().Build();
         return new RetentionService(new RetentionService.Dependencies(
-            _db, _blobs, new JwtRevocationRepository(_db, time: _clock),
+            _db, new TieredBlobStorage(_blobs, _blobs), new JwtRevocationRepository(_db, time: _clock),
             new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock), new TrustedDeviceService(_db, _clock, cfg),
             cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
@@ -266,7 +266,7 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
 
         var cfg = new ConfigurationBuilder().Build();
         var svc = new RetentionService(new RetentionService.Dependencies(
-            _db, blobs, new JwtRevocationRepository(_db, time: _clock),
+            _db, new TieredBlobStorage(blobs, blobs), new JwtRevocationRepository(_db, time: _clock),
             new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock), new TrustedDeviceService(_db, _clock, cfg),
             cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
@@ -382,7 +382,7 @@ public sealed class RetentionProxyVersionLimitTests : IAsyncLifetime
 
         var cfg = new ConfigurationBuilder().Build();
         var svc = new RetentionService(new RetentionService.Dependencies(
-            _db, blobs, new JwtRevocationRepository(_db, time: _clock),
+            _db, new TieredBlobStorage(blobs, blobs), new JwtRevocationRepository(_db, time: _clock),
             new InviteRepository(_db, _clock), new SamlConfigRepository(_db, _clock), new TrustedDeviceService(_db, _clock, cfg),
             cfg, new AirGapMode(cfg), NullLogger<RetentionService>.Instance, _clock,
             new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),

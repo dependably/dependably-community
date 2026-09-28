@@ -696,7 +696,7 @@ public sealed class TerraformController : OrgScopedControllerBase
 
         var fetched = fetchedResult!;
         var blob = new BlobHandle(fetched.BlobKey, fetched.Sha256Hex, fetched.SizeBytes,
-            async openCt => await _svc.Blobs.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), openCt)
+            async openCt => await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), openCt)
                 ?? throw new InvalidOperationException(
                     $"Blob {fetched.BlobKey} vanished between fetch and serve."));
 
@@ -739,11 +739,11 @@ public sealed class TerraformController : OrgScopedControllerBase
             // therefore serve ungated on every later request — a permanent bypass rather than a
             // deferred one. The blob key is org-scoped, so discarding it affects no other tenant.
             // Same reasoning as ApkController / GoController / CargoController.
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
+            await _svc.Blobs.Cache.DeleteAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
             return StatusCode(StatusCodes.Status403Forbidden);
         }
 
-        var body = await _svc.Blobs.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
+        var body = await _svc.Blobs.Cache.GetAsync(BlobKeys.StoreKey(fetched.BlobKey), ct);
         if (body is null)
         {
             return NotFound();
@@ -864,7 +864,7 @@ public sealed class TerraformController : OrgScopedControllerBase
         catch (ProxyCatalogueUnavailableException)
         {
             // 503, never 404: the provider exists upstream, we just could not admit it.
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+            await _svc.Blobs.Cache.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
             _svc.Logger.LogWarning(
                 "Cache plane unavailable recording terraform {Provider} {Version} {Platform} for org "
                 + "{OrgId}; refusing the fetch.", providerName, version, platform, orgId);
@@ -874,7 +874,7 @@ public sealed class TerraformController : OrgScopedControllerBase
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Discard the blob, then let the exception surface to its dedicated middleware.
-            await _svc.Blobs.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
+            await _svc.Blobs.Cache.DeleteAsync(BlobKeys.StoreKey(facts.BlobKey), ct);
             throw;
         }
     }
@@ -955,9 +955,9 @@ public sealed class TerraformController : OrgScopedControllerBase
         // the only existence check the redirect makes. Terraform is proxy-only, so the archive is
         // proxied bytes.
         var probe = _svc.Presign is { } presign
-            ? await presign.ProbeAsync(HttpContext, _svc.Blobs, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, Ecosystem, ct)
+            ? await presign.ProbeAsync(HttpContext, _svc.Blobs.Cache, BlobKeys.StoreKey(blobKey), BlobOrigin.Proxied, Ecosystem, ct)
             : null;
-        var cached = probe is null ? await _svc.Blobs.GetAsync(blobKey, ct) : null;
+        var cached = probe is null ? await _svc.Blobs.Cache.GetAsync(blobKey, ct) : null;
         if (cached is null && probe is not { Exists: true })
         {
             return null;
@@ -984,7 +984,7 @@ public sealed class TerraformController : OrgScopedControllerBase
             : null;
         if (redirect is null)
         {
-            cached ??= await _svc.Blobs.GetAsync(blobKey, ct);
+            cached ??= await _svc.Blobs.Cache.GetAsync(blobKey, ct);
             if (cached is null)
             {
                 return null;
@@ -1732,7 +1732,7 @@ public sealed class TerraformController : OrgScopedControllerBase
 public sealed record TerraformControllerServices(
     TokenRepository Tokens,
     OrgRepository Orgs,
-    IBlobStore Blobs,
+    TieredBlobStorage Blobs,
     UpstreamClient Upstream,
     UpstreamRegistryResolver Registries,
     CacheAccessRecorder CacheRecorder,
