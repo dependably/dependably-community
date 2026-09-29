@@ -69,7 +69,11 @@ public abstract class ScheduledBackgroundService : BackgroundService
     /// <summary>
     /// When true, an exception thrown from <see cref="RunTickAsync"/> is caught, logged,
     /// and the loop continues. When false the exception propagates out of
-    /// <see cref="ExecuteAsync"/> and terminates the service. Default is true.
+    /// <see cref="ExecuteAsync"/>, and under the host's default
+    /// <c>BackgroundServiceExceptionBehavior.StopHost</c> that stops the whole application, not
+    /// just this service; with <see cref="RunOnStartup"/> that is a crash loop on every boot. No
+    /// production job sets it false (<c>BackgroundJobTickErrorComplianceTests</c>); it exists for
+    /// the base-class tests. Default is true.
     /// </summary>
     protected virtual bool ContinueOnTickError => true;
 

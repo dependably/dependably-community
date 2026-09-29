@@ -64,7 +64,6 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     protected override string DefaultCron => "0 5 * * *";
     protected override string? JitterEnvKey => "DEPRECATION_REFRESH_JITTER_SECONDS";
     protected override bool RunOnStartup => true;
-    protected override bool ContinueOnTickError => false;
 
     // Refreshes shared package/version rows and drives one-shot upstream fetches — with
     // RunOnStartup=true a rolling deploy would otherwise fire N simultaneous upstream sweeps.
@@ -216,8 +215,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         // key. That resolve — and the zero-rows "proxying deliberately disabled" check that
         // depends on it — must stay inside this try alongside the fetch, so a decrypt failure for
         // this one org lands in the same catch as any other upstream-fetch failure rather than
-        // escaping ProcessGroupAsync uncaught and taking the whole refresh pass (and, via
-        // ContinueOnTickError=false + RunOnStartup=true, the replica) down with it.
+        // escaping ProcessGroupAsync uncaught and failing the whole refresh pass for every
+        // other org.
         Dictionary<string, string?> upstreamDeprecated;
         UpstreamLatestVersion upstreamLatest;
         try

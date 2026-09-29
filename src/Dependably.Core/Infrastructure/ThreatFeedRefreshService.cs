@@ -30,7 +30,6 @@ public sealed class ThreatFeedRefreshService : ScheduledBackgroundService
     protected override string DefaultCron => "0 5 * * *";
     protected override string? JitterEnvKey => "THREAT_FEED_JITTER_SECONDS";
     protected override bool RunOnStartup => true;
-    protected override bool ContinueOnTickError => false;
 
     // Enriches shared vulnerabilities rows and fetches external KEV/EPSS feeds — RunOnStartup=true
     // means a rolling deploy would otherwise fire N simultaneous feed pulls and racing writers.

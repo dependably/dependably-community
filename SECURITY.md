@@ -7,13 +7,7 @@ harbour for good-faith research. Do not open a public issue for security vulnera
 ## Supported versions
 
 Security fixes land on the latest released minor and are shipped in a new patch release; there
-are no long-term back-support branches for a pre-1.0 project. Operators should track the
-latest release.
-
-| Version | Supported |
-| --- | --- |
-| Latest `0.4.x` | Yes — fixes released as new `0.4.x` patches |
-| Older `0.x` | No — upgrade to the latest `0.4.x` |
+are no long-term back-support branches. Operators should track the latest release.
 
 ## Leaked credentials
 

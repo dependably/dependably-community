@@ -48,7 +48,6 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
     protected override string CronEnvKey => "LICENSE_BACKFILL_SCHEDULE";
     protected override string DefaultCron => "0 6 * * *";
     protected override bool RunOnStartup => true;
-    protected override bool ContinueOnTickError => false;
 
     // Mutates authoritative cache_artifact rows — one replica per tick in HA mode.
     protected override bool RequiresLeaderLock => true;

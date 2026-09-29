@@ -465,6 +465,11 @@ public sealed class CacheArtifactRepository
         string? afterId = null,
         CancellationToken ct = default)
     {
+        // Bound as the canonical string the registered DateTimeOffsetHandler writes for a value,
+        // because Dapper binds a null itself and skips the handler: a null DateTimeOffset reaches
+        // Npgsql untyped, and Postgres rejects "$1 IS NULL" on the first page with 42P08. A null
+        // string is bound as text on both providers.
+        string? afterFirstCachedAtIso = afterFirstCachedAt?.ToUtcIso();
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<LicenseBackfillCandidate>(
             """
@@ -477,14 +482,14 @@ public sealed class CacheArtifactRepository
                     OR (ecosystem = 'maven' AND LOWER(filename) LIKE '%.pom')
                   )
               AND (
-                    @afterFirstCachedAt IS NULL
-                    OR first_cached_at > @afterFirstCachedAt
-                    OR (first_cached_at = @afterFirstCachedAt AND id > @afterId)
+                    @afterFirstCachedAtIso IS NULL
+                    OR first_cached_at > @afterFirstCachedAtIso
+                    OR (first_cached_at = @afterFirstCachedAtIso AND id > @afterId)
                   )
             ORDER BY first_cached_at ASC, id ASC
             LIMIT @limit
             """,
-            new { limit, afterFirstCachedAt, afterId });
+            new { limit, afterFirstCachedAtIso, afterId });
         return rows.ToList();
     }
 

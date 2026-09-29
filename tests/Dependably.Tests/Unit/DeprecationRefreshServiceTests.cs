@@ -827,8 +827,7 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         // exactly like an unreachable/failed upstream fetch: caught, logged, and the group's slot
         // yielded — never an unhandled exception escaping the pass. An unhandled exception here
         // propagates through ProcessGroupsAsync/RunRefreshPassInnerAsync/RunRefreshPassAsync
-        // uncaught, and in production (ContinueOnTickError=false, RunOnStartup=true) that takes
-        // the whole replica down in a boot crash loop over one org's undecryptable secret.
+        // uncaught, and one org's undecryptable secret then fails the pass for every other org.
         var (orgId, _, caId, _) = await SeedVersionAsync(
             ecosystem: "npm", name: "undecryptable-secret-pkg", version: "1.0.0", origin: "proxy",
             deprecated: "already known", deprecationCheckedAt: null);
