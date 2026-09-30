@@ -147,6 +147,7 @@ Instance-wide defaults for per-tenant caps.
 |---|---|---|
 | `DEFAULT_STORAGE_QUOTA_BYTES` | — (unlimited) | Default aggregate hosted-storage quota (bytes) applied to every tenant that has no explicit per-tenant override. Seeded into `instance_settings` at first boot, and only when set — upgrading an existing install does not suddenly impose a ceiling. Editable afterward from the system_admin Settings page. |
 | `USAGE_CAP_INFO_URL` | — (unset) | Absolute `http`/`https` URL that a tenant refused for reaching a [usage cap](#usage-caps) is pointed to. When set, it becomes the `type` of the `402` problem response and a `Link: <…>; rel="help"` header, and the `detail.infoUrl` of the OCI `DENIED` error. Unset, or any value that is not an absolute web URL, leaves `type` as `about:blank` and adds no link. |
+| `DEFAULT_USAGE_CAPS` | — (unset) | `DEPLOYMENT_MODE=multi` or `header` only; ignored in other modes. Default [usage caps](#usage-caps) for every tenant, as comma-separated `meter=quantity` pairs over `egress_bytes`, `egress_metadata_bytes`, `storage_bytes` and `artifact_count` (for example `egress_bytes=500000000000,artifact_count=10000`). A tenant inherits the default on each meter where it has no explicit cap. Unset or empty means no defaults. An unknown meter, a repeated meter, or a quantity that is not a positive whole number stops startup with an error naming the bad pair. Ignored in single and edge mode. Read at startup, so a change takes a restart. |
 | `MAX_ACTIVE_TOKENS_PER_TENANT` | `1000` | Maximum number of active (non-revoked) tokens a single tenant may hold at once. Seeded into `instance_settings` at first boot; editable afterward from the system_admin Settings page. |
 | `MAX_CONCURRENT_OCI_UPLOADS_PER_TENANT` | `32` | Maximum number of concurrent OCI chunked-upload sessions a single tenant may have open. Bounds staging-volume exposure from abandoned `docker push` sessions. Seeded into `instance_settings` at first boot; editable afterward from the system_admin Settings page. |
 | `OCI_UPLOAD_TTL_MINUTES` | `60` | Age (minutes) after which an OCI upload session's `created_at` makes it eligible for cleanup by the staging janitor. Read directly from configuration on every janitor pass — not an `instance_settings` value, so it can be changed by restarting with a new value. |
@@ -1010,14 +1011,15 @@ Proxy-cache storage is measured and billed (`cache_storage_bytes` in `usage_dail
 curl -s -H "Authorization: Bearer dpsys_..." -H "Content-Type: application/json" \
   -X PATCH "https://<apex>/api/v1/system/tenants/acme/usage-limits" \
   -d '{"caps":{"egress_bytes":500000000000,"artifact_count":null}}'
-# => { "slug": "acme", "caps": { "egress_bytes": 500000000000 }, "usagePosture": "normal" }
+# => { "slug": "acme", "caps": { "egress_bytes": 500000000000 }, "defaultCaps": {},
+#      "effectiveCaps": { "egress_bytes": 500000000000 }, "usagePosture": "normal" }
 ```
 
 The [hourly usage rollup](#usage-metering) compares each capped tenant's usage with its caps and records one of three postures:
 
 | Posture | When | Effect |
 |---|---|---|
-| `normal` | Every capped meter is under its cap, or the tenant has no caps | None |
+| `normal` | Every capped meter is under its cap, or the tenant has no caps (explicit or default) | None |
 | `uploads_refused` | Any capped meter is at or over 100 % of its cap | Protocol-plane `POST`, `PUT` and `PATCH` get `402` (`403 DENIED` on `/v2/`). Downloads, `DELETE`, the management plane, npm's advisory lookup (the `POST` that `npm install` and `npm audit` send) and npm's unpublish prune (the `PUT …/-rev/{rev}` that `npm unpublish pkg@version` sends before its tarball `DELETE`) keep working |
 | `downloads_throttled` | A capped egress meter is at or over 110 % of its cap | Uploads are refused as above, and the tenant's protocol-plane requests draw on the small [`TENANT_THROTTLED_RATE_LIMIT_PERMITS`](#rate-limiting) budget. Downloads slow down; they are not refused |
 
@@ -1025,7 +1027,13 @@ Nothing is deleted at any posture. `DELETE` stays open so a tenant at its storag
 
 The tenant budgets are aggregate over the traffic the tenant serves as its own: every protocol request on the tenant's host while anonymous pull is on, otherwise only requests carrying one of that tenant's credentials, in any form its clients send (Bearer, Basic, the bare token Cargo and Hex send, or a NuGet API key). A request the tenant refuses for lack of its own credential never draws on them. Where a tenant allows anonymous pull, an anonymous client can use up a throttled tenant's budget and slow that tenant's own users.
 
-A tenant with no caps is metered but never enforced, which is how a pilot runs. Clearing every cap returns the tenant to `normal`.
+A tenant with no caps is metered but never enforced, which is how a pilot runs. Clearing every cap returns the tenant to `normal` unless a default cap still applies.
+
+Set `DEFAULT_USAGE_CAPS` to cap every tenant without a `PATCH` per tenant, for example `DEFAULT_USAGE_CAPS=egress_bytes=500000000000,artifact_count=10000`. A tenant inherits the default on each meter where it has no explicit cap, so a new tenant is capped from the moment it exists. An explicit cap always wins over the default, whether it is lower or higher. To exempt one tenant from a default, give it an explicit cap above anything it will reach, such as `9223372036854775807`. Clearing an explicit cap with `null` returns that meter to the default, not to uncapped.
+
+The `GET` and `PATCH` responses show where each cap comes from. `caps` holds only the tenant's explicit caps, `defaultCaps` the instance defaults, and `effectiveCaps` the caps the posture is computed from: the explicit caps plus the default on every meter without one. A meter in `effectiveCaps` but not in `caps` is inherited.
+
+With `DEFAULT_USAGE_CAPS` unset, nothing is inherited and a tenant with no explicit caps is not enforced. A malformed value stops startup instead of running uncapped. The value is read at startup, so a changed default applies to every tenant after a restart and the next hourly rollup, or at once for a tenant whose caps you `PATCH`.
 
 The `PATCH` recomputes that tenant's posture before it responds and clears the replica's tenant cache, so raising or lifting a cap restores service on the next request to that replica. Other replicas pick it up within five seconds. Without a `PATCH`, the egress caps can trip up to an hour late, because they read the hourly rollup. The storage and artefact caps can trip up to a day late, because they read the daily snapshot. A tenant with no snapshot yet counts as zero on both.
 

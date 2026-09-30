@@ -482,13 +482,68 @@ describe('navigate + takePendingRoute', () => {
     const spy = vi.spyOn(window, 'scrollTo')
     // The document is short, so every scrollTo is clamped back to 0 — the exact failure that
     // made a single deferred frame land Back at the top of a list the user had scrolled.
+    let scrollY = 0
+    vi.spyOn(window, 'scrollY', 'get').mockImplementation(() => scrollY)
+    restoreScroll({ scroll: 900 })
+    // Half a second of 60fps frames — well past the ten frames the retry used to stop at, and
+    // still inside a slow fetch. The offset must still be pending, not abandoned.
+    let now = 0
+    for (let i = 0; i < 30; i++) { frames.shift()(now); now += 16 }
+    expect(spy).toHaveBeenCalledTimes(30)
+    expect(frames).toHaveLength(1)
+    // The data lands, the page grows, and the next frame's scrollTo finally sticks.
+    scrollY = 900
+    frames.shift()(now)
+    expect(spy).toHaveBeenLastCalledWith(0, 900)
+    expect(frames).toHaveLength(0)
+  })
+
+  it('restoreScroll gives up once its time budget runs out on a page that never grows', async () => {
+    const { restoreScroll } = await import('./store.js')
+    const frames = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return 1 })
+    vi.spyOn(window, 'scrollTo')
     vi.spyOn(window, 'scrollY', 'get').mockReturnValue(0)
     restoreScroll({ scroll: 900 })
+    let now = 0
     let ticks = 0
-    while (frames.length && ticks < 50) { frames.shift()(0); ticks++ }
-    expect(spy).toHaveBeenCalledWith(0, 900)
-    // Bounded: it gives up rather than re-arming forever on a page that never grows.
-    expect(spy.mock.calls.length).toBe(10)
+    while (frames.length && ticks < 1000) { frames.shift()(now); now += 16; ticks++ }
+    // Bounded: it stops rather than re-arming forever — and not before ~3s of frames.
+    expect(frames).toHaveLength(0)
+    expect(ticks).toBeGreaterThan(150)
+    expect(ticks).toBeLessThan(250)
+  })
+
+  it('restoreScroll stops as soon as the user scrolls or interacts', async () => {
+    const { restoreScroll } = await import('./store.js')
+    const frames = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return 1 })
+    const spy = vi.spyOn(window, 'scrollTo')
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(0)
+    restoreScroll({ scroll: 900 })
+    frames.shift()(0)
+    frames.shift()(16)
+    expect(spy).toHaveBeenCalledTimes(2)
+    // The user reaches for the wheel: from here the viewport is theirs.
+    window.dispatchEvent(new Event('wheel'))
+    while (frames.length) frames.shift()(32)
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('a later navigation supersedes a restore still in flight', async () => {
+    const { restoreScroll, scrollToTop } = await import('./store.js')
+    const frames = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return 1 })
+    const spy = vi.spyOn(window, 'scrollTo')
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(0)
+    restoreScroll({ scroll: 900 })
+    frames.shift()(0)
+    // The user navigates on before the popped page has grown: the new page is seated at the top
+    // and the old entry's offset must never be applied to it.
+    scrollToTop()
+    spy.mockClear()
+    while (frames.length) frames.shift()(16)
+    expect(spy).not.toHaveBeenCalledWith(0, 900)
   })
 
   it('restoreScroll falls back to the top for an entry with no stamped offset', async () => {

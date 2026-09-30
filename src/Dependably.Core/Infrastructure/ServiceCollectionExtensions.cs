@@ -47,6 +47,9 @@ public static partial class ServiceCollectionExtensions
         services.AddSingleton<Usage.StoredBytesRepository>();
         services.AddSingleton<Usage.StoredByteReconciler>();
         services.AddSingleton<Usage.UsageReportRepository>();
+        // DEFAULT_USAGE_CAPS is parsed here, while the container is built, so a malformed value
+        // fails startup instead of leaving every tenant uncapped.
+        services.AddSingleton(Usage.DefaultUsageCaps.FromConfiguration(config));
         services.AddSingleton<Usage.UsagePostureRepository>();
         services.AddSingleton<TokenRepository>();
         // Async batched activity writer. The hosted service drains the channel into

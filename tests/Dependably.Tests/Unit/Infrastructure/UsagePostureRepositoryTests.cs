@@ -271,6 +271,117 @@ public sealed class UsagePostureRepositoryTests : IAsyncLifetime
         Assert.Empty(await _repo.GetCapsAsync("o1"));
     }
 
+    // ── Default caps (DEFAULT_USAGE_CAPS) ─────────────────────────────────────────────────────
+
+    private UsagePostureRepository WithDefaults(string defaults) =>
+        new(_db, _clock, DefaultUsageCaps.Parse(defaults));
+
+    [Fact]
+    public async Task A_tenant_with_no_rows_reaches_uploads_refused_on_a_default_cap()
+    {
+        var repo = WithDefaults("storage_bytes=5000,artifact_count=10");
+        await SeedSnapshotAsync("o1", "2026-09-24", billable: 4999, hostedVersions: 9, ociManifests: 0);
+        Assert.Equal(UsagePostures.Normal, await repo.RecomputeForOrgAsync("o1"));
+
+        await SeedSnapshotAsync("o1", "2026-09-25", billable: 10, hostedVersions: 10, ociManifests: 0);
+
+        Assert.Empty(await repo.GetCapsAsync("o1"));
+        Assert.Equal(UsagePostures.UploadsRefused, await repo.RecomputeForOrgAsync("o1"));
+        Assert.Equal(UsagePostures.UploadsRefused, await repo.GetPostureAsync("o1"));
+    }
+
+    [Fact]
+    public async Task A_tenant_with_no_rows_reaches_downloads_throttled_on_a_default_egress_cap()
+    {
+        var repo = WithDefaults("egress_bytes=100");
+        await SeedHourlyAsync("o1", UsageMeters.EgressBytes, "2026-09-24T10:00:00Z", 109);
+        Assert.Equal(UsagePostures.UploadsRefused, await repo.RecomputeForOrgAsync("o1"));
+
+        await SeedHourlyAsync("o1", UsageMeters.EgressBytes, "2026-09-24T11:00:00Z", 1);
+        Assert.Equal(UsagePostures.DownloadsThrottled, await repo.RecomputeForOrgAsync("o1"));
+    }
+
+    [Fact]
+    public async Task The_sweep_caps_every_tenant_by_the_defaults_when_none_has_rows()
+    {
+        var repo = WithDefaults("egress_bytes=100,storage_bytes=1000");
+
+        // o1: at the default storage cap → uploads_refused.
+        await SeedSnapshotAsync("o1", "2026-09-24", billable: 1000, hostedVersions: 0, ociManifests: 0);
+        // o2: 110 % of the default egress cap → downloads_throttled.
+        await SeedHourlyAsync("o2", UsageMeters.EgressBytes, "2026-09-24T10:00:00Z", 110);
+        // o3: under both defaults → stays normal, never written.
+        await SeedHourlyAsync("o3", UsageMeters.EgressBytes, "2026-09-24T10:00:00Z", 99);
+        // o4: an explicit higher cap exempts it from the default it is far over.
+        await SetCapsAsync("o4", (UsageCapMeters.EgressBytes, long.MaxValue));
+        await SeedHourlyAsync("o4", UsageMeters.EgressBytes, "2026-09-24T10:00:00Z", 1_000_000);
+        // o5: an explicit lower cap wins over the default it is under.
+        await SetCapsAsync("o5", (UsageCapMeters.StorageBytes, 10));
+        await SeedSnapshotAsync("o5", "2026-09-24", billable: 10, hostedVersions: 0, ociManifests: 0);
+
+        int changed = await repo.RecomputeAsync();
+
+        Assert.Equal(3, changed);
+        Assert.Equal(UsagePostures.UploadsRefused, await repo.GetPostureAsync("o1"));
+        Assert.Equal(UsagePostures.DownloadsThrottled, await repo.GetPostureAsync("o2"));
+        Assert.Equal(UsagePostures.Normal, await repo.GetPostureAsync("o3"));
+        Assert.Equal(UsagePostures.Normal, await repo.GetPostureAsync("o4"));
+        Assert.Equal(UsagePostures.UploadsRefused, await repo.GetPostureAsync("o5"));
+        Assert.Equal(0, await repo.RecomputeAsync());
+
+        // The sweep and the single-org recompute agree on every org.
+        foreach (string org in new[] { "o1", "o2", "o3", "o4", "o5" })
+        {
+            Assert.Equal(await repo.GetPostureAsync(org), await repo.RecomputeForOrgAsync(org));
+        }
+    }
+
+    [Fact]
+    public async Task Removing_the_defaults_lifts_a_posture_they_set_on_the_next_sweep()
+    {
+        // With the defaults gone the sweep no longer widens to every org, so a tenant capped
+        // only by a default is reached solely through the "posture is not normal" branch of
+        // the candidate query. That branch is what lifts it.
+        var capped = WithDefaults("egress_bytes=100");
+        await SeedHourlyAsync("o1", UsageMeters.EgressBytes, "2026-09-24T10:00:00Z", 110);
+        Assert.Equal(1, await capped.RecomputeAsync());
+        Assert.Equal(UsagePostures.DownloadsThrottled, await capped.GetPostureAsync("o1"));
+
+        var uncapped = new UsagePostureRepository(_db, _clock, DefaultUsageCaps.None);
+        Assert.Equal(1, await uncapped.RecomputeAsync());
+        Assert.Equal(UsagePostures.Normal, await uncapped.GetPostureAsync("o1"));
+    }
+
+    [Fact]
+    public async Task Clearing_an_explicit_cap_returns_the_meter_to_its_default()
+    {
+        var repo = WithDefaults("egress_bytes=100");
+        await SeedHourlyAsync("o1", UsageMeters.EgressBytes, "2026-09-24T10:00:00Z", 500);
+        await SetCapsAsync("o1", (UsageCapMeters.EgressBytes, 1000));
+        Assert.Equal(UsagePostures.Normal, await repo.RecomputeForOrgAsync("o1"));
+
+        await SetCapsAsync("o1", (UsageCapMeters.EgressBytes, null));
+
+        Assert.Equal(UsagePostures.DownloadsThrottled, await repo.RecomputeForOrgAsync("o1"));
+    }
+
+    [Fact]
+    public async Task Without_defaults_an_uncapped_tenant_over_any_default_stays_normal()
+    {
+        // The same usage that trips the default caps above, on a repository built with no
+        // defaults — the self-hosted install with DEFAULT_USAGE_CAPS unset.
+        await SeedHourlyAsync("o1", UsageMeters.EgressBytes, "2026-09-24T10:00:00Z", 1_000_000);
+        await SeedSnapshotAsync("o1", "2026-09-24", billable: 1_000_000, hostedVersions: 1000, ociManifests: 0);
+
+        Assert.Equal(0, await _repo.RecomputeAsync());
+        Assert.Equal(UsagePostures.Normal, await _repo.RecomputeForOrgAsync("o1"));
+        Assert.Equal(UsagePostures.Normal, await _repo.GetPostureAsync("o1"));
+
+        var unset = new UsagePostureRepository(_db, _clock, DefaultUsageCaps.Parse(null));
+        Assert.Equal(0, await unset.RecomputeAsync());
+        Assert.Equal(UsagePostures.Normal, await unset.RecomputeForOrgAsync("o1"));
+    }
+
     [Fact]
     public void Month_start_is_the_first_hour_of_the_UTC_month()
     {

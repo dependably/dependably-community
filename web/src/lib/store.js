@@ -286,6 +286,8 @@ export function cancelTransition() {
  */
 export function scrollToTop() {
   if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return
+  // A newer placement supersedes any restore still re-applying an older entry's offset.
+  cancelScrollRestore()
   window.scrollTo(0, 0)
   // The arriving page mounts after this tick. As the outgoing page is torn down and the new
   // one's placeholders grow the document back, the browser's scroll anchoring re-applies the
@@ -298,16 +300,28 @@ export function scrollToTop() {
   }
 }
 
-// Frames over which a popped entry's offset is re-applied. The arriving page mounts empty and
+// How long a popped entry's offset keeps being re-applied. The arriving page mounts empty and
 // grows as its placeholders and then its data land, and a scrollTo against a document that is
-// still short is silently clamped — one frame is not enough to catch the final height.
-const SCROLL_RESTORE_FRAMES = 10
+// still short is silently clamped. Bounded by elapsed time rather than a frame count: how long
+// the page takes to grow depends on the network and the server, not on the frame rate, and a
+// ten-frame budget (~170ms) lost the offset whenever the fetch was slower than that.
+const SCROLL_RESTORE_BUDGET_MS = 3_000
+
+// Input that means the user has taken the viewport over, so a pending restore must stop rather
+// than yank them back to the stamped offset.
+const SCROLL_RESTORE_ABORT_EVENTS = ['wheel', 'touchstart', 'keydown', 'pointerdown']
+
+/** Stops the in-flight restore, if any. Set by restoreScroll while one is running. */
+let cancelScrollRestore = () => {}
 
 /**
- * Reapplies a popped history entry's stamped offset, retrying across a few frames until it
- * sticks. Deferred rather than applied synchronously because the arriving page has not drawn
- * when popstate fires, so the browser would clamp the offset against an empty document — which
- * is exactly what history.scrollRestoration = 'auto' did.
+ * Reapplies a popped history entry's stamped offset, retrying across frames until it sticks.
+ * Deferred rather than applied synchronously because the arriving page has not drawn when
+ * popstate fires, so the browser would clamp the offset against an empty document — which is
+ * exactly what history.scrollRestoration = 'auto' did.
+ *
+ * The retry ends when the offset lands, when the budget runs out, when the user scrolls or
+ * interacts, or when a later navigation places the viewport itself.
  *
  * An entry left via Back/Forward rather than via navigate() carries no stamp, so returning to it
  * lands at the top. The dominant flow — scroll a list, open a detail page, go Back — is stamped.
@@ -316,12 +330,30 @@ export function restoreScroll(state) {
   if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return
   const top = state?.scroll ?? 0
   if (top === 0) { scrollToTop(); return }
-  let frames = 0
-  const apply = () => {
-    if (typeof window.scrollTo !== 'function') return
+  cancelScrollRestore()
+
+  let active = true
+  let startedAt = null
+  const stop = () => {
+    active = false
+    for (const type of SCROLL_RESTORE_ABORT_EVENTS) window.removeEventListener(type, stop, true)
+    if (cancelScrollRestore === stop) cancelScrollRestore = () => {}
+  }
+  cancelScrollRestore = stop
+  for (const type of SCROLL_RESTORE_ABORT_EVENTS) {
+    window.addEventListener(type, stop, { capture: true, passive: true })
+  }
+
+  const apply = (now) => {
+    if (!active) return
+    if (typeof window.scrollTo !== 'function') { stop(); return }
+    startedAt ??= now
     window.scrollTo(0, top)
     // Landed, or the page never grew tall enough to hold the offset — either way, stop.
-    if (Math.abs((window.scrollY ?? 0) - top) < 1 || ++frames >= SCROLL_RESTORE_FRAMES) return
+    if (Math.abs((window.scrollY ?? 0) - top) < 1 || now - startedAt >= SCROLL_RESTORE_BUDGET_MS) {
+      stop()
+      return
+    }
     window.requestAnimationFrame(apply)
   }
   window.requestAnimationFrame(apply)

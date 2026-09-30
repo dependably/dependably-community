@@ -150,6 +150,100 @@ public sealed class S3BlobStoreTests
         Assert.Equal(1234, await sut.GetTotalSizeAsync());
     }
 
+    // AWSSDK v4 returns a null S3Objects, not an empty list, for an empty bucket or prefix.
+    private void StubEmptyListing()
+        => _s3.ListObjectsV2Async(Arg.Any<ListObjectsV2Request>(), Arg.Any<CancellationToken>())
+            .Returns(new ListObjectsV2Response { S3Objects = null, IsTruncated = false });
+
+    [Fact]
+    public async Task GetTotalSizeAsync_EmptyBucket_NullS3Objects_ReturnsZero()
+    {
+        StubEmptyListing();
+
+        await using var sut = NewSut();
+        Assert.Equal(0, await sut.GetTotalSizeAsync());
+    }
+
+    [Fact]
+    public async Task ListAsync_EmptyPrefix_NullS3Objects_YieldsNothing()
+    {
+        StubEmptyListing();
+
+        await using var sut = NewSut();
+        var listed = new List<BlobInfo>();
+        await foreach (var b in sut.ListAsync("hosted/"))
+        {
+            listed.Add(b);
+        }
+
+        Assert.Empty(listed);
+        await _s3.Received(1).ListObjectsV2Async(
+            Arg.Is<ListObjectsV2Request>(r => r.Prefix == "hosted/"), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task ListAsync_IteratesPaginationCursors_YieldingEveryObject()
+    {
+        var modified = new DateTime(2026, 3, 14, 9, 26, 53, DateTimeKind.Utc);
+        var page1 = new ListObjectsV2Response
+        {
+            S3Objects =
+            [
+                new() { Key = "hosted/npm/left-pad-1.3.0.tgz", Size = 100, LastModified = modified },
+                new() { Key = "hosted/npm/left-pad-1.3.1.tgz", Size = 250, LastModified = modified },
+            ],
+            NextContinuationToken = "PAGE2",
+            IsTruncated = true,
+        };
+        var page2 = new ListObjectsV2Response
+        {
+            S3Objects = [new() { Key = "hosted/pypi/requests-2.32.3.tar.gz", Size = 50, LastModified = null }],
+            NextContinuationToken = null,
+            IsTruncated = false,
+        };
+        _s3.ListObjectsV2Async(
+                Arg.Is<ListObjectsV2Request>(r => r.ContinuationToken == null),
+                Arg.Any<CancellationToken>())
+            .Returns(page1);
+        _s3.ListObjectsV2Async(
+                Arg.Is<ListObjectsV2Request>(r => r.ContinuationToken == "PAGE2"),
+                Arg.Any<CancellationToken>())
+            .Returns(page2);
+
+        await using var sut = NewSut();
+        var listed = new List<BlobInfo>();
+        await foreach (var b in sut.ListAsync("hosted/"))
+        {
+            listed.Add(b);
+        }
+
+        Assert.Equal(
+            [
+                new BlobInfo("hosted/npm/left-pad-1.3.0.tgz", 100, new DateTimeOffset(modified, TimeSpan.Zero)),
+                new BlobInfo("hosted/npm/left-pad-1.3.1.tgz", 250, new DateTimeOffset(modified, TimeSpan.Zero)),
+                new BlobInfo("hosted/pypi/requests-2.32.3.tar.gz", 50, DateTimeOffset.MinValue),
+            ],
+            listed);
+        await _s3.Received(2).ListObjectsV2Async(Arg.Any<ListObjectsV2Request>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task GetTotalSizeAsync_NullS3ObjectsOnTruncatedPage_StillFollowsContinuation()
+    {
+        // S3 may return a truncated page with no keys; the continuation must still be followed.
+        _s3.ListObjectsV2Async(
+                Arg.Is<ListObjectsV2Request>(r => r.ContinuationToken == null),
+                Arg.Any<CancellationToken>())
+            .Returns(new ListObjectsV2Response { S3Objects = null, NextContinuationToken = "PAGE2", IsTruncated = true });
+        _s3.ListObjectsV2Async(
+                Arg.Is<ListObjectsV2Request>(r => r.ContinuationToken == "PAGE2"),
+                Arg.Any<CancellationToken>())
+            .Returns(new ListObjectsV2Response { S3Objects = [new() { Size = 75 }], IsTruncated = false });
+
+        await using var sut = NewSut();
+        Assert.Equal(75, await sut.GetTotalSizeAsync());
+    }
+
     // ── Presigned reads ───────────────────────────────────────────────────────
 
     [Fact]

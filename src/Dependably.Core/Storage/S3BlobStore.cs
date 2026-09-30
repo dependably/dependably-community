@@ -333,6 +333,8 @@ public sealed class S3BlobStore : IBlobStore, IPresignedReadBlobStore, IAsyncDis
     public async Task DeleteAsync(string key, CancellationToken ct = default)
         => await _client.DeleteObjectAsync(_bucket, key, ct);
 
+    // AWSSDK v4 leaves a response collection null, not empty, when the service returns none, so
+    // an empty bucket or prefix lists as a null S3Objects on every page it spans.
     public async Task<long> GetTotalSizeAsync(CancellationToken ct = default)
     {
         long total = 0;
@@ -341,7 +343,7 @@ public sealed class S3BlobStore : IBlobStore, IPresignedReadBlobStore, IAsyncDis
         do
         {
             response = await _client.ListObjectsV2Async(request, ct);
-            total += response.S3Objects.Sum(o => o.Size ?? 0L);
+            total += (response.S3Objects ?? []).Sum(o => o.Size ?? 0L);
             request.ContinuationToken = response.NextContinuationToken;
         } while (response.IsTruncated ?? false);
         return total;
@@ -359,7 +361,7 @@ public sealed class S3BlobStore : IBlobStore, IPresignedReadBlobStore, IAsyncDis
         do
         {
             response = await _client.ListObjectsV2Async(request, ct);
-            foreach (var obj in response.S3Objects)
+            foreach (var obj in response.S3Objects ?? [])
             {
                 if (ct.IsCancellationRequested)
                 {

@@ -4,6 +4,17 @@ const ADMIN_EMAIL = process.env.DEPENDABLY_E2E_ADMIN_EMAIL ?? 'admin@dependably.
 const ADMIN_PASSWORD = process.env.DEPENDABLY_E2E_ADMIN_PASSWORD ?? 'E2eTestPassword123!'
 
 /**
+ * How long a submitted login may take to land on the app shell.
+ *
+ * A login is the costliest request the suite makes (a BCrypt verify plus session and audit
+ * writes), and CI runs this job beside other heavy jobs on a shared host. Under that load a
+ * login routinely takes several seconds and has been observed at nearly ten, so a 10s wait
+ * failed specs whose login had in fact succeeded. The per-test timeout still bounds a login
+ * that genuinely never completes.
+ */
+export const LOGIN_SETTLE_TIMEOUT = 30_000
+
+/**
  * Signs one page in through the login form.
  *
  * Exported so a spec whose cases all need the same session can log in once in a `beforeAll`
@@ -20,7 +31,7 @@ export async function loginAs(page: Page, email = ADMIN_EMAIL, password = ADMIN_
   await page.fill('input[type="password"]', password)
   await page.click('button[type="submit"]')
   // Wait for the sticky navbar to appear (successful login routes to dashboard)
-  await page.waitForSelector('nav.sidebar', { timeout: 10_000 })
+  await page.waitForSelector('nav.sidebar', { timeout: LOGIN_SETTLE_TIMEOUT })
 }
 
 export const test = base.extend<{

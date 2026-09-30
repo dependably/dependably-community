@@ -73,6 +73,16 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         // unless a test opts in by setting MasterKey.
         builder.Configuration["DEPENDABLY_MASTER_KEY"] = MasterKey;
 
+        // Settings are also visible to ConfigureBuilder, so a setting parsed while the container
+        // is built (DEFAULT_USAGE_CAPS) sees the test's value; they are re-applied below as well.
+        if (Settings is not null)
+        {
+            foreach (var (key, value) in Settings)
+            {
+                builder.Configuration[key] = value;
+            }
+        }
+
         _db.ConfigureBefore(builder);
 
         Program.ConfigureBuilder(builder);

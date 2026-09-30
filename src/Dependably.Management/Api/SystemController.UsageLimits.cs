@@ -15,9 +15,12 @@ namespace Dependably.Api;
 public sealed partial class SystemController
 {
     /// <summary>
-    /// GET /api/v1/system/tenants/{slug}/usage-limits — the tenant's caps, keyed by meter (a meter
-    /// with no cap is absent), and its current usage posture. 404 when the slug does not resolve
-    /// to a live tenant.
+    /// GET /api/v1/system/tenants/{slug}/usage-limits — the tenant's explicit caps
+    /// (<c>caps</c>), the instance-wide defaults from <c>DEFAULT_USAGE_CAPS</c>
+    /// (<c>defaultCaps</c>), the caps that actually apply (<c>effectiveCaps</c>: explicit, plus
+    /// the default on each meter with no explicit cap), and its current usage posture. Each map
+    /// is keyed by meter, and a meter with no cap is absent. 404 when the slug does not resolve to
+    /// a live tenant.
     /// </summary>
     [HttpGet("tenants/{slug}/usage-limits")]
     [Authorize(AuthenticationSchemes = "Bearer," + SystemTokenDefaults.Scheme)]
@@ -34,7 +37,7 @@ public sealed partial class SystemController
 
         var caps = await postures.GetCapsAsync(org.Id, ct);
         string posture = await postures.GetPostureAsync(org.Id, ct);
-        return Ok(ProjectUsageLimits(org.Slug, caps, posture));
+        return Ok(ProjectUsageLimits(org.Slug, caps, postures.Defaults, posture));
     }
 
     /// <summary>
@@ -42,7 +45,8 @@ public sealed partial class SystemController
     /// caps. Body: <c>{ "caps": { "egress_bytes": 500000000000, "artifact_count": null } }</c>. The
     /// keys are the meter literals <c>egress_bytes</c>, <c>egress_metadata_bytes</c>,
     /// <c>storage_bytes</c> and <c>artifact_count</c>; a positive quantity sets that meter's cap,
-    /// an explicit null clears it, and a meter left out keeps its current cap. Zero, a negative
+    /// an explicit null clears it (the meter falls back to its <c>DEFAULT_USAGE_CAPS</c> default,
+    /// if it has one), and a meter left out keeps its current cap. Zero, a negative
     /// quantity, or an unknown meter is rejected as 422 and nothing is changed.
     ///
     /// <para>
@@ -114,17 +118,23 @@ public sealed partial class SystemController
             actorLabel: actor.Label,
             ct: ct);
 
-        return Ok(ProjectUsageLimits(org.Slug, caps, posture));
+        return Ok(ProjectUsageLimits(org.Slug, caps, postures.Defaults, posture));
     }
 
-    private static object ProjectUsageLimits(string slug, IReadOnlyDictionary<string, long> caps, string posture) => new
-    {
-        slug,
-        caps = UsageCapMeters.All
+    private static object ProjectUsageLimits(
+        string slug, IReadOnlyDictionary<string, long> caps, DefaultUsageCaps defaults, string posture) => new
+        {
+            slug,
+            caps = InMeterOrder(caps),
+            defaultCaps = InMeterOrder(defaults.Caps),
+            effectiveCaps = InMeterOrder(defaults.Effective(caps)),
+            usagePosture = posture,
+        };
+
+    private static Dictionary<string, long> InMeterOrder(IReadOnlyDictionary<string, long> caps) =>
+        UsageCapMeters.All
             .Where(caps.ContainsKey)
-            .ToDictionary(m => m, m => caps[m], StringComparer.Ordinal),
-        usagePosture = posture,
-    };
+            .ToDictionary(m => m, m => caps[m], StringComparer.Ordinal);
 }
 
 /// <summary>

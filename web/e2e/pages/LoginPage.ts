@@ -1,4 +1,5 @@
 import { Page, expect } from '@playwright/test'
+import { LOGIN_SETTLE_TIMEOUT } from '../fixtures/index.js'
 
 export class LoginPage {
   constructor(private page: Page) {}
@@ -23,6 +24,6 @@ export class LoginPage {
 
   async expectNavVisible() {
     // App.svelte: <nav class="navbar"> (sticky, always present when logged in)
-    await expect(this.page.locator('nav.sidebar')).toBeVisible({ timeout: 10_000 })
+    await expect(this.page.locator('nav.sidebar')).toBeVisible({ timeout: LOGIN_SETTLE_TIMEOUT })
   }
 }

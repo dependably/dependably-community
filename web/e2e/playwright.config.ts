@@ -20,7 +20,11 @@ const allBrowsers = !!process.env.E2E_ALL_BROWSERS
 
 export default defineConfig({
   testDir: './specs',
-  timeout: 30_000,
+  // CI shares its host with other heavy jobs (integration suites, DAST, Sonar), and under that
+  // load the app's writes slow to several seconds each: a spec that seeds a project and an SBOM
+  // trio can spend half a 30s budget before its first navigation. Sized for a loaded runner so
+  // the timeout catches a hang, not a busy host.
+  timeout: CI ? 60_000 : 30_000,
   retries: CI ? 1 : 0,
   workers: CI ? 2 : undefined,
   forbidOnly: CI,

@@ -18,6 +18,12 @@ namespace Dependably.Infrastructure.Usage;
 /// </para>
 ///
 /// <para>
+/// Posture is judged on the org's effective caps: its explicit rows plus the instance-wide
+/// <see cref="DefaultUsageCaps"/> for every meter it has no row on. With defaults configured,
+/// every org is a candidate for the sweep, not only orgs with rows.
+/// </para>
+///
+/// <para>
 /// Both recompute paths write only a posture that changed, so a pass over a fleet whose postures
 /// all hold writes nothing.
 /// </para>
@@ -27,13 +33,17 @@ public sealed class UsagePostureRepository
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
 
-    public UsagePostureRepository(IMetadataStore db, TimeProvider time)
+    public UsagePostureRepository(IMetadataStore db, TimeProvider time, DefaultUsageCaps? defaults = null)
     {
         _db = db;
         _time = time;
+        Defaults = defaults ?? DefaultUsageCaps.None;
     }
 
-    /// <summary>The org's caps, keyed by meter. Empty when the org has none.</summary>
+    /// <summary>The instance-wide default caps the effective caps fall back to.</summary>
+    public DefaultUsageCaps Defaults { get; }
+
+    /// <summary>The org's explicit caps, keyed by meter. Empty when the org has none.</summary>
     public async Task<IReadOnlyDictionary<string, long>> GetCapsAsync(string orgId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -99,7 +109,7 @@ public sealed class UsagePostureRepository
     }
 
     /// <summary>
-    /// Recomputes one org's posture from its caps and current usage, stores it when it changed,
+    /// Recomputes one org's posture from its effective caps and current usage, stores it when it changed,
     /// and returns it. Called when an operator changes the org's caps, so a lifted cap takes
     /// effect without waiting for the next hourly pass.
     /// </summary>
@@ -108,10 +118,11 @@ public sealed class UsagePostureRepository
         string monthStart = MonthStartBucket(_time.GetUtcNow());
 
         await using var conn = await _db.OpenAsync(ct);
-        var caps = (await conn.QueryAsync<CapRow>(
+        var explicitCaps = (await conn.QueryAsync<CapRow>(
                 "SELECT org_id AS OrgId, meter AS Meter, cap_quantity AS CapQuantity FROM org_usage_caps WHERE org_id = @orgId",
                 new { orgId }))
             .ToDictionary(r => r.Meter, r => r.CapQuantity, StringComparer.Ordinal);
+        var caps = Defaults.Effective(explicitCaps);
 
         var usage = UsageMeasurements.None;
         if (caps.Count > 0)
@@ -145,7 +156,8 @@ public sealed class UsagePostureRepository
     /// <summary>
     /// Recomputes the posture of every org that has a cap or is not currently
     /// <see cref="UsagePostures.Normal"/>, the latter so an org whose caps were all cleared
-    /// returns to normal. Returns the number of orgs whose posture changed. The final step of
+    /// returns to normal. With default caps configured every org has a cap, so every org is
+    /// recomputed. Returns the number of orgs whose posture changed. The final step of
     /// the hourly usage rollup.
     /// </summary>
     public async Task<int> RecomputeAsync(CancellationToken ct = default)
@@ -169,16 +181,19 @@ public sealed class UsagePostureRepository
     internal async Task<IReadOnlyList<PostureChange>> EvaluateFleetAsync(DbConnection conn)
     {
         string monthStart = MonthStartBucket(_time.GetUtcNow());
+        int allOrgs = Defaults.Any ? 1 : 0;
 
-        // xtenant: selects the orgs to evaluate; the caps subquery is correlated on orgs.id, so
-        // each org is judged only by its own rows.
+        // xtenant: selects the orgs to evaluate (all of them when default caps apply); the caps
+        // subquery is correlated on orgs.id, so each org is judged only by its own rows.
         var candidates = (await conn.QueryAsync<PostureRow>(
                 """
                 SELECT o.id AS OrgId, o.usage_posture AS Posture
                 FROM orgs o
-                WHERE o.usage_posture <> 'normal'
+                WHERE @allOrgs = 1
+                   OR o.usage_posture <> 'normal'
                    OR EXISTS (SELECT 1 FROM org_usage_caps c WHERE c.org_id = o.id)
-                """))
+                """,
+                new { allOrgs }))
             .ToList();
         if (candidates.Count == 0)
         {
@@ -201,10 +216,10 @@ public sealed class UsagePostureRepository
                 SELECT org_id AS OrgId, meter AS Meter, CAST(SUM(quantity) AS BIGINT) AS Quantity
                 FROM usage_hourly
                 WHERE bucket >= @monthStart
-                  AND org_id IN (SELECT org_id FROM org_usage_caps)
+                  AND (@allOrgs = 1 OR org_id IN (SELECT org_id FROM org_usage_caps))
                 GROUP BY org_id, meter
                 """,
-                new { monthStart }))
+                new { monthStart, allOrgs }))
             .ToLookup(r => r.OrgId, StringComparer.Ordinal);
 
         // xtenant: the latest snapshot of every capped org, joined on org_id to that org's own
@@ -217,18 +232,19 @@ public sealed class UsagePostureRepository
                 JOIN (
                     SELECT org_id, MAX(day_utc) AS day_utc
                     FROM storage_snapshot
-                    WHERE org_id IN (SELECT org_id FROM org_usage_caps)
+                    WHERE @allOrgs = 1 OR org_id IN (SELECT org_id FROM org_usage_caps)
                     GROUP BY org_id
                 ) latest ON latest.org_id = s.org_id AND latest.day_utc = s.day_utc
-                """))
+                """,
+                new { allOrgs }))
             .ToDictionary(r => r.OrgId, StringComparer.Ordinal);
 
         var changes = new List<PostureChange>();
         foreach (var candidate in candidates)
         {
-            var caps = capsByOrg.TryGetValue(candidate.OrgId, out var c)
+            var caps = Defaults.Effective(capsByOrg.TryGetValue(candidate.OrgId, out var c)
                 ? c
-                : new Dictionary<string, long>(StringComparer.Ordinal);
+                : new Dictionary<string, long>(StringComparer.Ordinal));
             var usage = caps.Count == 0
                 ? UsageMeasurements.None
                 : Measure(egressByOrg[candidate.OrgId], snapshotByOrg.GetValueOrDefault(candidate.OrgId));
