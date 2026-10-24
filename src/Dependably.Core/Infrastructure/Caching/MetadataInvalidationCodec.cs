@@ -48,8 +48,10 @@ public static class MetadataInvalidationCodec
 
     /// <summary>
     /// Decodes a received payload. Returns <see langword="false"/> — never throws — for malformed
-    /// JSON, an unknown schema version, an unknown ecosystem, or a missing org, so a bad or
-    /// future-shaped message degrades to TTL expiry instead of faulting the subscriber loop.
+    /// JSON, an unknown schema version, an unknown ecosystem, or a missing or blank org, so a bad
+    /// or future-shaped message degrades to TTL expiry instead of faulting the subscriber loop.
+    /// A blank org addresses no tenant's cache, and the org-wide expansion's epoch step rejects it
+    /// by throwing after the earlier steps have already run, so it is refused here for every kind.
     /// </summary>
     public static bool TryDecode(string? payload, out MetadataInvalidation invalidation, out string origin)
     {
@@ -73,7 +75,7 @@ public static class MetadataInvalidationCodec
 
         if (envelope is null
             || envelope.V != SchemaVersion
-            || string.IsNullOrEmpty(envelope.OrgId)
+            || string.IsNullOrWhiteSpace(envelope.OrgId)
             || !MetadataInvalidationEcosystems.IsKnown(envelope.Ecosystem))
         {
             return false;

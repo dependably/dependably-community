@@ -168,10 +168,13 @@ public sealed class AlertNotifierWiringTests : IAsyncLifetime
     /// recipient snapshot, the rendered message, the message kind, and the coalescing key.
     ///
     /// <para>
-    /// Deliberately no state or attempt-count assertion. The worker is a live hosted service nudged on
-    /// enqueue, so it may legitimately have claimed the row already; asserting <c>pending</c> here
-    /// would pin scheduling luck rather than behaviour. That the row is persisted <em>before</em> any
-    /// attempt is pinned deterministically instead by
+    /// The sender is held on a gate for the whole assertion block. The worker is a live hosted
+    /// service nudged on enqueue, so without the gate it may claim the row, deliver, and stamp the
+    /// alert's <c>EmailStatus</c> between the raise and the read, which made "queued, not delivered"
+    /// a coin flip on a loaded host. With the gate the worker can claim the row but can never finish
+    /// a send, so the alert row's outcome columns are provably untouched while they are read. The
+    /// gate is released before the host disposes. That the row is persisted <em>before</em> any
+    /// attempt is also pinned by
     /// <c>AlertEmailQueueTests.NotifyAsync_PersistsTheMessageBeforeAnyDeliveryAttempt</c>, where no
     /// worker is running at all.
     /// </para>
@@ -180,42 +183,50 @@ public sealed class AlertNotifierWiringTests : IAsyncLifetime
     public async Task RaiseQuarantineAlert_PersistsToTheOutboxThroughRealDIWiring_CarryingEverythingDeliveryNeeds()
     {
         var clock = new FakeTimeProvider(TestTime.KnownNow);
-        var sender = new CapturingMailSender();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sender = new CapturingMailSender { Gate = release.Task };
         await using var factory = new DependablyFactory { FrozenClock = clock, MailSenderOverride = sender };
 
         var arranged = await ArrangeAsync(factory, "relay.example.test");
         await using (arranged.Conn)
         {
-            string sourceRef = Guid.NewGuid().ToString("N");
-            await arranged.Service.RaiseQuarantineAlertAsync(
-                arranged.OrgId, sourceRef, "npm", "pkg:npm/wiring-test@1.0.0", "quarantine",
-                "Held pending review.");
+            try
+            {
+                string sourceRef = Guid.NewGuid().ToString("N");
+                await arranged.Service.RaiseQuarantineAlertAsync(
+                    arranged.OrgId, sourceRef, "npm", "pkg:npm/wiring-test@1.0.0", "quarantine",
+                    "Held pending review.");
 
-            var alert = (await arranged.Alerts.ListAsync(arranged.OrgId, null, 50, 0)).Items
-                .FirstOrDefault(a => a.SourceRef == sourceRef);
-            Assert.NotNull(alert);
+                var alert = (await arranged.Alerts.ListAsync(arranged.OrgId, null, 50, 0)).Items
+                    .FirstOrDefault(a => a.SourceRef == sourceRef);
+                Assert.NotNull(alert);
 
-            // The write side is synchronous with the raise, so the row is already durable here.
-            (string messageKind, string coalesceKey, string recipients, string subject, string body) =
-                await arranged.Conn.QuerySingleAsync<(string, string, string, string, string)>(
-                    """
+                // The write side is synchronous with the raise, so the row is already durable here.
+                (string messageKind, string coalesceKey, string recipients, string subject, string body) =
+                    await arranged.Conn.QuerySingleAsync<(string, string, string, string, string)>(
+                        """
                     SELECT message_kind, coalesce_key, recipients, subject, body
                     FROM email_outbox WHERE correlation_id = @id
                     """,
-                    new { id = alert!.Id });
+                        new { id = alert!.Id });
 
-            Assert.Equal(EmailOutboxMessageKinds.Alert, messageKind);
-            Assert.Equal("ops@example.com", recipients);
-            Assert.Equal($"{AlertTypes.QuarantineNew}:pkg:npm/wiring-test@1.0.0", coalesceKey);
-            Assert.Contains(alert.Title, subject);
-            Assert.Contains("Held pending review.", body);
+                Assert.Equal(EmailOutboxMessageKinds.Alert, messageKind);
+                Assert.Equal("ops@example.com", recipients);
+                Assert.Equal($"{AlertTypes.QuarantineNew}:pkg:npm/wiring-test@1.0.0", coalesceKey);
+                Assert.Contains(alert.Title, subject);
+                Assert.Contains("Held pending review.", body);
 
-            // Queued is not delivered: the raise itself records no outcome on the alert row.
-            Assert.Null(alert.EmailStatus);
+                // Queued is not delivered: the raise itself records no outcome on the alert row.
+                Assert.Null(alert.EmailStatus);
 
-            // Slack was never configured for this org — its outcome column stays untouched,
-            // confirming the two channels record independently.
-            Assert.Null(alert.SlackStatus);
+                // Slack was never configured for this org — its outcome column stays untouched,
+                // confirming the two channels record independently.
+                Assert.Null(alert.SlackStatus);
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
         }
     }
 

@@ -24,6 +24,7 @@ public sealed class MetadataInvalidationCodecTests
         MetadataInvalidationEcosystems.Maven,
         "maven-snapshot",
         MetadataInvalidationEcosystems.Rpm,
+        MetadataInvalidationEcosystems.Org,
     };
 
     private static MetadataInvalidation BuildInvalidation(string ecosystemKey) => ecosystemKey switch
@@ -34,6 +35,7 @@ public sealed class MetadataInvalidationCodecTests
         MetadataInvalidationEcosystems.Maven => MetadataInvalidation.ForMaven("org-a", "com.example", "widget"),
         "maven-snapshot" => MetadataInvalidation.ForMaven("org-a", "com.example", "widget", "1.0-SNAPSHOT"),
         MetadataInvalidationEcosystems.Rpm => MetadataInvalidation.ForRpm("org-a"),
+        MetadataInvalidationEcosystems.Org => MetadataInvalidation.ForOrg("org-a"),
         _ => throw new ArgumentOutOfRangeException(nameof(ecosystemKey), ecosystemKey, "Unknown test ecosystem key."),
     };
 
@@ -80,6 +82,48 @@ public sealed class MetadataInvalidationCodecTests
         Assert.False(doc.RootElement.TryGetProperty("group_id", out _));
     }
 
+    [Fact]
+    public void OrgWideMessageCarriesOnlyTheOrgAndTheCurrentSchemaVersion()
+    {
+        string payload = MetadataInvalidationCodec.Encode(MetadataInvalidation.ForOrg("org-a"), origin: "replica-1");
+
+        using var doc = JsonDocument.Parse(payload);
+        var names = doc.RootElement.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal);
+        Assert.Equal(["ecosystem", "org_id", "origin", "v"], names);
+        Assert.Equal("org", doc.RootElement.GetProperty("ecosystem").GetString());
+        Assert.Equal(1, MetadataInvalidationCodec.SchemaVersion);
+    }
+
+    /// <summary>
+    /// The rolling-deploy case. A replica on the previous build shares the channel with one that
+    /// publishes org-wide messages. That build's decoder accepts schema version 1 with one of
+    /// five ecosystems; the org-wide message is version 1 with a sixth value, so it must be
+    /// rejected there and evict nothing, rather than being read as a per-package message.
+    /// Each per-package message must still decode on the previous build, or this change would
+    /// break the existing fan-out mid-deploy.
+    /// </summary>
+    [Fact]
+    public void PreviousBuildDropsTheOrgWideMessage_AndStillReadsEveryOtherKind()
+    {
+        string orgWide = MetadataInvalidationCodec.Encode(MetadataInvalidation.ForOrg("org-a"), origin: "new-build");
+        Assert.False(PreviousBuildCodec.TryDecode(orgWide));
+
+        string[] perPackageKinds =
+        [
+            MetadataInvalidationEcosystems.Npm,
+            MetadataInvalidationEcosystems.PyPi,
+            MetadataInvalidationEcosystems.NuGet,
+            MetadataInvalidationEcosystems.Maven,
+            "maven-snapshot",
+            MetadataInvalidationEcosystems.Rpm,
+        ];
+        foreach (string kind in perPackageKinds)
+        {
+            string payload = MetadataInvalidationCodec.Encode(BuildInvalidation(kind), origin: "new-build");
+            Assert.True(PreviousBuildCodec.TryDecode(payload), kind);
+        }
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
@@ -92,8 +136,54 @@ public sealed class MetadataInvalidationCodecTests
     [InlineData("{\"v\":1,\"ecosystem\":\"conan\",\"org_id\":\"org-a\",\"name\":\"pkg\"}")]
     // No tenant: every rendered key is org-scoped, so this cannot address anything.
     [InlineData("{\"v\":1,\"ecosystem\":\"npm\",\"org_id\":\"\",\"name\":\"pkg\"}")]
+    // A blank org is no org either, whatever the kind.
+    [InlineData("{\"v\":1,\"ecosystem\":\"npm\",\"org_id\":\"   \",\"name\":\"pkg\"}")]
+    [InlineData("{\"v\":1,\"ecosystem\":\"org\",\"org_id\":\" \\t \"}")]
+    [InlineData("{\"v\":1,\"ecosystem\":\"org\",\"org_id\":\"\"}")]
+    [InlineData("{\"v\":1,\"ecosystem\":\"org\"}")]
     public void RejectsAnythingItCannotInterpret(string? payload)
     {
         Assert.False(MetadataInvalidationCodec.TryDecode(payload, out _, out _));
+    }
+
+    /// <summary>
+    /// The acceptance rule of the build before org-wide messages, restated: snake_case JSON,
+    /// schema version 1, a non-empty org, and an ecosystem from the five that build knew. Kept
+    /// as a frozen copy on purpose: it must not follow the live vocabulary.
+    /// </summary>
+    private static class PreviousBuildCodec
+    {
+        private static readonly string[] KnownEcosystems = ["npm", "pypi", "nuget", "maven", "rpm"];
+
+        private static readonly JsonSerializerOptions WireOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        };
+
+        public static bool TryDecode(string payload)
+        {
+            Envelope? envelope;
+            try
+            {
+                envelope = JsonSerializer.Deserialize<Envelope>(payload, WireOptions);
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+
+            return envelope is not null
+                && envelope.V == 1
+                && !string.IsNullOrEmpty(envelope.OrgId)
+                && envelope.Ecosystem is not null
+                && KnownEcosystems.Contains(envelope.Ecosystem, StringComparer.Ordinal);
+        }
+
+        private sealed class Envelope
+        {
+            public int V { get; set; }
+            public string? Ecosystem { get; set; }
+            public string? OrgId { get; set; }
+        }
     }
 }

@@ -173,8 +173,9 @@ public sealed class MavenMetadataBlockGateParityTests : IClassFixture<Dependably
     private async Task EvictMetadataCacheAsync(string artifactId)
     {
         string orgId = await DefaultOrgIdAsync();
-        _factory.Services.GetRequiredService<RenderedResponseCache<MavenMetadataKey>>()
-            .Evict(new MavenMetadataKey(orgId, GroupId, artifactId));
+        var cache = _factory.Services.GetRequiredService<RenderedResponseCache<MavenMetadataKey>>();
+        cache.Evict(new MavenMetadataKey(orgId, GroupId, artifactId));
+        cache.Evict(new MavenMetadataKey(orgId, GroupId, artifactId) { IsProxy = true });
     }
 
     private async Task<string> DefaultOrgIdAsync()

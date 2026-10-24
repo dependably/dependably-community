@@ -10,7 +10,10 @@ namespace Dependably.Protocol;
 /// shape is not uniformly cased: the top level is snake_case (<c>vulnerable_versions</c>) while
 /// the nested CVSS object is camelCase (<c>vectorString</c>). The consumer is
 /// <c>@npmcli/metavuln-calculator</c>'s <c>Advisory</c> constructor, which reads exactly these
-/// keys off each element.
+/// keys off each element. <see cref="Aliases"/> and <see cref="FixedVersion"/> are extension
+/// properties npm ignores: the other ids the same flaw is published under, and the fix for the
+/// affected range containing the requested versions (null when none resolves). They follow the
+/// top level's snake_case convention.
 /// </summary>
 public sealed record NpmAuditAdvisory(
     [property: JsonPropertyName("id")] string Id,
@@ -19,7 +22,9 @@ public sealed record NpmAuditAdvisory(
     [property: JsonPropertyName("severity")] string Severity,
     [property: JsonPropertyName("vulnerable_versions")] string VulnerableVersions,
     [property: JsonPropertyName("cwe")] string[] Cwe,
-    [property: JsonPropertyName("cvss")] NpmAuditCvss Cvss);
+    [property: JsonPropertyName("cvss")] NpmAuditCvss Cvss,
+    [property: JsonPropertyName("aliases")] string[] Aliases,
+    [property: JsonPropertyName("fixed_version")] string? FixedVersion);
 
 /// <summary>
 /// npm's CVSS sub-object. <see cref="Score"/> is null — never 0 — when the advisory carries no
@@ -215,7 +220,45 @@ public static class NpmAdvisoryProjection
             Severity: Severity(advisory),
             VulnerableVersions: VulnerableVersions(detail, packageName, knownAffectedVersions),
             Cwe: ExtractCweIds(detail?.DatabaseSpecific),
-            Cvss: new NpmAuditCvss(advisory.CvssScore, CvssVector(detail)));
+            Cvss: new NpmAuditCvss(advisory.CvssScore, CvssVector(detail)),
+            Aliases: Aliases(advisory),
+            FixedVersion: FixedVersionFor(detail, packageName, knownAffectedVersions));
+    }
+
+    // Other ids for the same flaw; the advisory's own id is never its own alias.
+    private static string[] Aliases(OsvAdvisory advisory) =>
+        [.. (advisory.Aliases ?? [])
+            .Where(a => !string.IsNullOrWhiteSpace(a)
+                && !string.Equals(a, advisory.Id, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
+
+    // The fix for each requested version's own release line, reduced to the highest so one
+    // upgrade target clears every requested version this advisory affects. Null when any affected
+    // version has no resolvable fix: a target that leaves one of them vulnerable is not a fix.
+    private static string? FixedVersionFor(
+        OsvDetail? detail, string packageName, IReadOnlyList<string> versions)
+    {
+        if (detail is null || versions.Count == 0)
+        {
+            return null;
+        }
+
+        string? highest = null;
+        foreach (string version in versions)
+        {
+            string? fix = FixedVersionResolver.Resolve(detail.Affected, NpmEcosystem, packageName, version);
+            if (fix is null)
+            {
+                return null;
+            }
+
+            if (highest is null || EcosystemVersionOrdering.Compare(NpmEcosystem, fix, highest) is > 0)
+            {
+                highest = fix;
+            }
+        }
+
+        return highest;
     }
 
     /// <summary>

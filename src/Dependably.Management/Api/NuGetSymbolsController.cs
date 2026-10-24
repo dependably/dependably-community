@@ -52,7 +52,7 @@ public sealed class NuGetSymbolsController(
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         // Org-scoped lookups throughout, and NotFound on every miss so a cross-tenant coordinate
         // is indistinguishable from an absent one.

@@ -313,13 +313,105 @@ public sealed partial class OciUpstreamResolver
             && _time.GetUtcNow() - firstSeen >= TimeSpan.FromHours(minReleaseAgeHours.Value);
     }
 
-    private async Task<int?> GetMinReleaseAgeHoursAsync(string orgId, CancellationToken ct)
+    /// <summary>
+    /// The scan half of the promotion gate. With the org's <c>oci_scan_enforcement</c> at
+    /// <c>block</c>, a moving tag is repointed only to a digest the OCI pull gate would serve
+    /// (<see cref="BlockGateService.PreviewOciImage"/>, or an approval past the
+    /// <c>unscanned</c> arm), so a tag repointed upstream to an image this org has not scanned
+    /// keeps serving its last gate-passing digest instead of turning unavailable. Any other
+    /// posture, or a deployment without scanning wired, leaves promotion age-only. A read failure
+    /// holds: promoting on evidence the gate could not read would be allowing by default.
+    /// </summary>
+    private async Task<bool> IsScanPromotionAllowedAsync(
+        string orgId, string repository, string digest, CancellationToken ct)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        return await conn.ExecuteScalarAsync<int?>(
-            "SELECT min_release_age_hours FROM org_settings WHERE org_id = @orgId",
-            new { orgId });
+        if (_pullGate is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            var settings = await _orgs.GetSettingsAsync(orgId, ct);
+            if (settings?.OciScanEnforcement != "block")
+            {
+                return true;
+            }
+
+            var context = await _pullGate.ResolveAsync(orgId, repository, digest, ct);
+            var verdict = BlockGateService.PreviewOciImage(context.Facts, context.ManualState, settings, _time.GetUtcNow());
+            if (verdict.Servable)
+            {
+                return true;
+            }
+
+            if (verdict.Arm != BlockArm.Unscanned)
+            {
+                return false;
+            }
+
+            foreach (string owner in context.Owners is { Count: > 0 } owners ? owners.Select(o => o.Digest) : [context.OwnerDigest])
+            {
+                if (!await _quarantine.HasApprovedForGateAsync(
+                        orgId, PurlNormalizer.Oci(repository, owner), BlockGateService.UnscannedGate, ct))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Could not read the scan verdict of {Repository}@{Digest} for promotion (org {OrgId}); holding the tag.",
+                repository, digest, orgId);
+            return false;
+        }
     }
+
+    /// <summary>
+    /// Under scan enforcement, acquires a digest the promotion gate is holding: fetches it by
+    /// digest, caches it (recording its reference graph and licence), catalogues it and queues it
+    /// for the org's scanner, all without repointing the tag. Without this a digest held for its
+    /// scan would never be scanned, because cataloguing otherwise happens only on promotion.
+    /// Best effort: a failure is logged and the next revalidation tries again.
+    /// </summary>
+    private async Task AcquireHeldDigestAsync(
+        OciUpstreamRegistryOptions upstream, string orgId, string repository, string digest, CancellationToken ct)
+    {
+        if (_pullGate is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if ((await _orgs.GetSettingsAsync(orgId, ct))?.OciScanEnforcement is null or "off")
+            {
+                return;
+            }
+
+            var cached = await TryGetCachedManifestByDigestAsync(orgId, digest, ct)
+                ?? await FetchAndCacheManifestAsync(upstream, orgId, repository, digest, ct);
+            if (cached is null)
+            {
+                return;
+            }
+
+            await cached.Content.DisposeAsync();
+            await CatalogueDigestPullAsync(orgId, repository, digest, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Could not acquire held digest {Repository}@{Digest} for scanning (org {OrgId}); the next revalidation retries.",
+                repository, digest, orgId);
+        }
+    }
+
+    private async Task<int?> GetMinReleaseAgeHoursAsync(string orgId, CancellationToken ct) =>
+        (await _orgs.GetSettingsAsync(orgId, ct))?.MinReleaseAgeHours;
 
     // Serves the digest the tag currently (still) resolves to: from the local cache when
     // present, otherwise re-fetched by digest from upstream with this org's own credentials —
@@ -393,7 +485,8 @@ public sealed partial class OciUpstreamResolver
             return await ServeAcceptedDigestAsync(upstream, orgId, repository, row.Digest!, ct);
         }
 
-        if (IsPromotionAllowed(row, observedDigest, minAgeHours))
+        if (IsPromotionAllowed(row, observedDigest, minAgeHours)
+            && await IsScanPromotionAllowedAsync(orgId, repository, observedDigest, ct))
         {
             var promoted = await PromoteTagAsync(upstream, orgId, repository, tag, observedDigest, ct);
             if (promoted is not null)
@@ -406,11 +499,12 @@ public sealed partial class OciUpstreamResolver
             return await ServeAcceptedDigestAsync(upstream, orgId, repository, row.Digest!, ct);
         }
 
-        // Too young to promote: record (or keep aging) the observation and keep serving the
-        // previously accepted digest. The revalidation itself succeeded, so the stamp refreshes —
-        // the next upstream ask comes after another TTL, by which time the pending digest has
-        // aged that much further.
+        // Too young to promote, or not yet passed by the org's scan: record (or keep aging) the
+        // observation and keep serving the previously accepted digest. The revalidation itself
+        // succeeded, so the stamp refreshes — the next upstream ask comes after another TTL, by
+        // which time the pending digest has aged that much further and its scan may have landed.
         await HoldPendingDigestAsync(orgId, repository, tag, observedDigest, refreshStamp: true, ct);
+        await AcquireHeldDigestAsync(upstream, orgId, repository, observedDigest, ct);
         return await ServeAcceptedDigestAsync(upstream, orgId, repository, row.Digest!, ct);
     }
 
@@ -430,7 +524,8 @@ public sealed partial class OciUpstreamResolver
         StoreTagObservation(upstream, repository, tag, m.Digest, m.MediaType, m.Bytes.Length);
 
         if (string.Equals(m.Digest, row.Digest, StringComparison.OrdinalIgnoreCase)
-            || IsPromotionAllowed(row, m.Digest, minAgeHours))
+            || (IsPromotionAllowed(row, m.Digest, minAgeHours)
+                && await IsScanPromotionAllowedAsync(orgId, repository, m.Digest, ct)))
         {
             // Unchanged (repoint is a no-op that refreshes the stamp) or promotable: the full
             // cache-and-repoint path, which writes the body before the tag as always.
@@ -438,6 +533,7 @@ public sealed partial class OciUpstreamResolver
         }
 
         await HoldPendingDigestAsync(orgId, repository, tag, m.Digest, refreshStamp: true, ct);
+        await AcquireHeldDigestAsync(upstream, orgId, repository, m.Digest, ct);
         return await ServeAcceptedDigestAsync(upstream, orgId, repository, row.Digest!, ct);
     }
 

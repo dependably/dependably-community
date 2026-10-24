@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Xunit.Abstractions;
 
 namespace Dependably.Tests.Integration;
 
@@ -44,8 +45,11 @@ public sealed class PresignedArtifactRedirectTests : IAsyncLifetime
     private string _pullToken = "";
     private bool _rpmPushed;
 
-    public PresignedArtifactRedirectTests()
+    private readonly ITestOutputHelper _output;
+
+    public PresignedArtifactRedirectTests(ITestOutputHelper output)
     {
+        _output = output;
         _factory = new DependablyFactory
         {
             RpmUpstreamMode = "merged",
@@ -463,12 +467,41 @@ public sealed class PresignedArtifactRedirectTests : IAsyncLifetime
                 new { orgId = _orgId, like }));
     }
 
+    /// <summary>
+    /// Waits for every background writer to commit what it accepted. The deadline covers a single
+    /// write waiting out another connection's lock on the shared in-memory database, which is
+    /// bounded by the driver's command timeout (about 30 s), so 90 s allows roughly two such
+    /// attempts. A healthy flush takes milliseconds; a pass slower than
+    /// <see cref="SlowFlushReport"/> is written to the test output so a recurrence is visible in
+    /// the CI log rather than only as a timeout.
+    /// </summary>
     private async Task FlushWritersAsync()
     {
-        await _factory.Services.GetRequiredService<ActivityWriterHostedService>().WaitForIdleAsync(TimeSpan.FromSeconds(10));
-        await _factory.Services.GetRequiredService<DownloadCountWriterHostedService>().WaitForIdleAsync(TimeSpan.FromSeconds(10));
-        await _factory.Services.GetRequiredService<UsageEventWriterHostedService>().WaitForIdleAsync(TimeSpan.FromSeconds(10));
+        var deadline = TimeSpan.FromSeconds(90);
+        // now-ok: measures real elapsed time for a diagnostic line only; nothing branches on a clock.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var usage = _factory.Services.GetRequiredService<UsageEventWriterHostedService>();
+        try
+        {
+            await _factory.Services.GetRequiredService<ActivityWriterHostedService>().WaitForIdleAsync(deadline);
+            await _factory.Services.GetRequiredService<DownloadCountWriterHostedService>().WaitForIdleAsync(deadline);
+            await usage.WaitForIdleAsync(deadline);
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException($"{ex.Message}{Environment.NewLine}{_factory.LockReport(TimeSpan.Zero)}", ex);
+        }
+
+        if (sw.Elapsed > SlowFlushReport)
+        {
+            long enqueued = _factory.Services.GetRequiredService<UsageEventWriter>().EnqueuedCount;
+            _output.WriteLine(
+                $"slow writer flush: {sw.Elapsed.TotalSeconds:F1} s (usage enqueued={enqueued}, flushed={usage.FlushedCount})");
+            _output.WriteLine(_factory.LockReport(TimeSpan.Zero));
+        }
     }
+
+    private static readonly TimeSpan SlowFlushReport = TimeSpan.FromSeconds(10);
 
     private async Task ResetEventsAsync()
     {

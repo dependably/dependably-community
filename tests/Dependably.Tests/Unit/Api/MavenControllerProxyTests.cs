@@ -35,7 +35,7 @@ namespace Dependably.Tests.Unit.Api;
 /// WebApplicationFactory harness the Integration category uses, so they belong in the fast suite.
 /// </summary>
 [Trait("Category", "Unit")]
-public sealed class MavenControllerProxyTests : IAsyncLifetime
+public sealed partial class MavenControllerProxyTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _blobs = new();
@@ -234,8 +234,12 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
 
     private MavenController BuildController(
         IOsvSource osv, TimeProvider? clock = null, bool verifyWithUpstreamSha256 = true,
-        bool sourcePinning = false)
+        bool sourcePinning = false,
+        Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.MavenMetadataKey>? metadataCache = null,
+        ReservedNamespaceService? reservedNamespaces = null,
+        OrgRepository? orgs = null)
     {
+        var effectiveMetadataCache = metadataCache ?? _metadataCache;
         var time = clock ?? TimeProvider.System;
         var http = new DefaultHttpContext();
         http.Request.Scheme = "https";
@@ -290,15 +294,15 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
             new Dependably.Infrastructure.SourcePinRepository(_db, SourcePinConfig(sourcePinning)));
 
         var svc = new MavenControllerServices(
-            Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: _orgs,
+            Packages: _packages, Tokens: _tokens, Audit: _audit, Orgs: orgs ?? _orgs,
             Blobs: new TieredBlobStorage(_blobs, _blobs), Db: _db, Upstream: upstream, Config: config,
             ProxyFetch: proxyFetch, BlockGate: blockGate,
-            ReservedNamespaces: new ReservedNamespaceService(
+            ReservedNamespaces: reservedNamespaces ?? new ReservedNamespaceService(
                 _db, new Microsoft.Extensions.Caching.Memory.MemoryCache(
                     new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), time),
             Registries: new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, time, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured())),
-            MetadataCache: _metadataCache,
-            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.ForMaven(_metadataCache),
+            MetadataCache: effectiveMetadataCache,
+            Invalidation: Dependably.Tests.Infrastructure.TestMetadataInvalidation.ForMaven(effectiveMetadataCache),
             CacheOptions: new Dependably.Infrastructure.RenderedMetadataCacheOptions(
                 TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(5)),
             Log: NullLogger<MavenController>.Instance,
@@ -851,6 +855,275 @@ public sealed class MavenControllerProxyTests : IAsyncLifetime
     {
         public Task<UpstreamUrlBlock> CheckAsync(string url, string? orgId, CancellationToken ct = default)
             => Task.FromResult(UpstreamUrlBlock.None);
+    }
+
+    // ── group-level plugin-prefix metadata ───────────────────────────────────
+
+    // Central's group-level document for org.apache.maven.plugins, trimmed. The CRLF line endings,
+    // uneven indentation and trailing comment are deliberate: none of it survives a re-render, so a
+    // byte-for-byte match proves the upstream body was relayed rather than rebuilt.
+    private static readonly byte[] PluginGroupXml = Encoding.UTF8.GetBytes(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n" +
+        "<metadata>\r\n" +
+        "  <plugins>\r\n" +
+        "    <plugin>\r\n" +
+        "      <name>Apache Maven Help Plugin</name>\r\n" +
+        "      <prefix>help</prefix>\r\n" +
+        "        <artifactId>maven-help-plugin</artifactId>\r\n" +
+        "    </plugin>\r\n" +
+        "    <plugin><name>Apache Maven Dependency Plugin</name><prefix>dependency</prefix><artifactId>maven-dependency-plugin</artifactId></plugin>\r\n" +
+        "  </plugins>\r\n" +
+        "</metadata>\r\n" +
+        "<!-- served by upstream -->\r\n");
+
+    private const string PluginGroupPath = "org/apache/maven/plugins";
+
+    private void StubUpstreamMetadataBody(string basePath, string artifactPath, byte[] body, int status = 200)
+        => _server.Given(Request.Create().WithPath(basePath + "/" + artifactPath + "/maven-metadata.xml").UsingGet())
+                  .RespondWith(Response.Create().WithStatusCode(status).WithBody(body));
+
+    private async Task SeedMavenRegistryAtAsync(string url, int position)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO upstream_registry (id, org_id, ecosystem, url, position)
+            VALUES (@id, @org, 'maven', @url, @position)
+            """,
+            new { id = Guid.NewGuid().ToString("N"), org = _orgId, url, position });
+    }
+
+    private async Task ReserveMavenNamespaceAsync(string pattern)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO reserved_namespace (id, org_id, ecosystem, pattern, created_by)
+            VALUES (@id, @org, 'maven', @pattern, @user)
+            """,
+            new { id = Guid.NewGuid().ToString("N"), org = _orgId, pattern, user = _userId });
+    }
+
+    [Fact]
+    public async Task GroupMetadata_PluginPrefixDocument_IsServedByteForByte()
+    {
+        StubUpstreamMetadataBody("", PluginGroupPath, PluginGroupXml);
+
+        var ctl = BuildController(CleanOsv());
+        var result = await ctl.Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None);
+
+        var content = Assert.IsType<ContentResult>(result);
+        Assert.Equal("application/xml; charset=utf-8", content.ContentType);
+        Assert.Equal(PluginGroupXml, Encoding.UTF8.GetBytes(content.Content!));
+    }
+
+    [Theory]
+    [InlineData("sha1")]
+    [InlineData("md5")]
+    public async Task GroupMetadata_PluginPrefixDocument_SidecarHashesTheServedBytes(string algorithm)
+    {
+        StubUpstreamMetadataBody("", PluginGroupPath, PluginGroupXml);
+
+        var ctl1 = BuildController(CleanOsv());
+        var doc = Assert.IsType<ContentResult>(
+            await ctl1.Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+        byte[] served = Encoding.UTF8.GetBytes(doc.Content!);
+
+        var ctl2 = BuildController(CleanOsv());
+        var sidecar = Assert.IsType<ContentResult>(
+            await ctl2.Download($"{PluginGroupPath}/maven-metadata.xml.{algorithm}", CancellationToken.None));
+
+        byte[] digest = algorithm == "sha1" ? SHA1.HashData(served) : MD5.HashData(served);
+        Assert.Equal(Convert.ToHexString(digest).ToLowerInvariant(), sidecar.Content);
+        // The bytes the sidecar describes are upstream's own, not a re-render of them.
+        Assert.Equal(PluginGroupXml, served);
+    }
+
+    [Fact]
+    public async Task GroupMetadata_SecondGet_IsCacheHit_NoSecondUpstreamFetch()
+    {
+        StubUpstreamMetadataBody("", PluginGroupPath, PluginGroupXml);
+
+        var first = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+        var second = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+
+        Assert.Equal(first.Content, second.Content);
+        Assert.Equal(1, UpstreamMetadataGetCount(PluginGroupPath));
+    }
+
+    [Fact]
+    public async Task ArtifactMetadata_VersioningDocument_StillTakesTheMergePath()
+    {
+        // A document with <versioning> is artifact-level metadata: it is rebuilt from the merged
+        // version list, never relayed, even if upstream also lists plugins in it.
+        const string artifactPath = "com/example/both";
+        byte[] upstreamBody = Encoding.UTF8.GetBytes(
+            "<metadata><groupId>com.example</groupId><artifactId>both</artifactId>" +
+            "<plugins><plugin><prefix>x</prefix><artifactId>x-maven-plugin</artifactId></plugin></plugins>" +
+            "<versioning><versions><version>1.0</version><version>2.0</version></versions></versioning></metadata>");
+        StubUpstreamMetadataBody("", artifactPath, upstreamBody);
+        await PublishLocalVersionAsync("com.example", "both", "3.0");
+
+        var content = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(artifactPath + "/maven-metadata.xml", CancellationToken.None));
+
+        Assert.NotEqual(upstreamBody, Encoding.UTF8.GetBytes(content.Content!));
+        var doc = System.Xml.Linq.XDocument.Parse(content.Content!);
+        Assert.Equal(
+            new[] { "3.0", "1.0", "2.0" },
+            doc.Descendants("version").Select(v => v.Value).ToArray());
+        Assert.Empty(doc.Descendants("plugins"));
+    }
+
+    [Fact]
+    public async Task GroupPath_WithLocalVersions_ServesTheLocalVersionList_NotThePluginDocument()
+    {
+        // Mixed: this org hosts an artifact whose coordinate is the artifact-level reading of the
+        // path, and upstream answers the same path with a plugin-prefix document. The org's own
+        // version list wins, exactly as it did before the plugin-prefix reading existed.
+        StubUpstreamMetadataBody("", PluginGroupPath, PluginGroupXml);
+        await PublishLocalVersionAsync("org.apache.maven", "plugins", "1.0");
+
+        var content = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+
+        var doc = System.Xml.Linq.XDocument.Parse(content.Content!);
+        Assert.Equal("1.0", Assert.Single(doc.Descendants("version")).Value);
+        Assert.Empty(doc.Descendants("plugins"));
+    }
+
+    [Theory]
+    [InlineData("not xml at all")]
+    [InlineData("<metadata><groupId>org.apache.maven</groupId></metadata>")]
+    [InlineData("<project><plugins><plugin/></plugins></project>")]
+    [InlineData("<!DOCTYPE metadata [<!ENTITY x \"help\">]><metadata><plugins><plugin><prefix>&x;</prefix></plugin></plugins></metadata>")]
+    public async Task GroupPath_UpstreamBodyIsNeitherShape_Returns404(string body)
+    {
+        StubUpstreamMetadataBody("", PluginGroupPath, Encoding.UTF8.GetBytes(body));
+
+        var result = await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Theory]
+    [InlineData(404)]
+    [InlineData(500)]
+    public async Task GroupPath_UpstreamNonSuccess_Returns404(int status)
+    {
+        StubUpstreamMetadataBody("", PluginGroupPath, PluginGroupXml, status);
+
+        var result = await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task GroupPath_FirstUpstreamFails_SecondServesThePluginDocument()
+    {
+        // Mixed partial failure across the upstream list: the higher-priority upstream errors,
+        // the next one holds the plugin-prefix document, and that document is what is served.
+        await ClearMavenRegistriesAsync();
+        await SeedMavenRegistryAtAsync($"{_upstream}/broken", 0);
+        await SeedMavenRegistryAtAsync($"{_upstream}/good", 1);
+        StubUpstreamMetadataBody("/broken", PluginGroupPath, Encoding.UTF8.GetBytes("oops"), 500);
+        StubUpstreamMetadataBody("/good", PluginGroupPath, PluginGroupXml);
+
+        var content = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+
+        Assert.Equal(PluginGroupXml, Encoding.UTF8.GetBytes(content.Content!));
+    }
+
+    [Fact]
+    public async Task GroupPath_PluginDocumentFirst_VersionListFromALaterUpstreamWins()
+    {
+        // A version list anywhere in the upstream list keeps the artifact-level answer this path
+        // always had; the plugin-prefix document is only the fallback when nothing lists a version.
+        await ClearMavenRegistriesAsync();
+        await SeedMavenRegistryAtAsync($"{_upstream}/plugins-first", 0);
+        await SeedMavenRegistryAtAsync($"{_upstream}/versions-second", 1);
+        StubUpstreamMetadataBody("/plugins-first", PluginGroupPath, PluginGroupXml);
+        StubUpstreamMetadataBody("/versions-second", PluginGroupPath, Encoding.UTF8.GetBytes(
+            "<metadata><versioning><versions><version>7.0</version></versions></versioning></metadata>"));
+
+        var content = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+
+        var doc = System.Xml.Linq.XDocument.Parse(content.Content!);
+        Assert.Equal("7.0", Assert.Single(doc.Descendants("version")).Value);
+    }
+
+    [Fact]
+    public async Task GroupPath_ReservedGroupLevelName_NeverConsultsUpstream()
+    {
+        // The reservation covers the group-level reading (org.apache.maven.plugins) but not the
+        // artifact reading's groupId (org.apache.maven). Both readings share one upstream URL, so
+        // fetching it would disclose the reserved name: the decision is made before any request.
+        await ReserveMavenNamespaceAsync("org.apache.maven.plugins");
+        StubUpstreamMetadataBody("", PluginGroupPath, PluginGroupXml);
+
+        var result = await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None);
+        var sidecar = await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml.sha1", CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+        Assert.IsType<NotFoundResult>(sidecar);
+        Assert.Empty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task GroupPath_ReservedByWiderPattern_NeverConsultsUpstream()
+    {
+        // A wildcard reservation of a parent group covers the group-level reading on the dot
+        // boundary; the artifact reading's groupId (org.apache) sits above it and is not covered.
+        await ReserveMavenNamespaceAsync("org.apache.maven.*");
+        StubUpstreamMetadataBody("", "org/apache/maven", PluginGroupXml);
+
+        var result = await BuildController(CleanOsv())
+            .Download("org/apache/maven/maven-metadata.xml", CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+        Assert.Empty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task GroupPath_ReservedGroupLevelName_HostedVersionsStillServe_WithoutUpstream()
+    {
+        // Mixed: this org hosts org.apache.maven:plugins, the group-level reading of the same path
+        // is reserved, and upstream would add a version. The hosted list serves; upstream is never
+        // asked, so its version is not merged in.
+        await ReserveMavenNamespaceAsync("org.apache.maven.plugins");
+        await PublishLocalVersionAsync("org.apache.maven", "plugins", "1.0");
+        StubUpstreamMetadataBody("", PluginGroupPath, Encoding.UTF8.GetBytes(
+            "<metadata><versioning><versions><version>7.0</version></versions></versioning></metadata>"));
+
+        var content = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+
+        var doc = System.Xml.Linq.XDocument.Parse(content.Content!);
+        Assert.Equal("1.0", Assert.Single(doc.Descendants("version")).Value);
+        Assert.Empty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task GroupPath_ReservationBelowTheGroupLevelName_StillRelaysThePluginDocument()
+    {
+        // A reservation of a child group (org.apache.maven.plugins.internal) covers neither
+        // reading of org/apache/maven/plugins, so the plugin-prefix document is still relayed.
+        await ReserveMavenNamespaceAsync("org.apache.maven.plugins.internal");
+        StubUpstreamMetadataBody("", PluginGroupPath, PluginGroupXml);
+
+        var content = Assert.IsType<ContentResult>(await BuildController(CleanOsv())
+            .Download(PluginGroupPath + "/maven-metadata.xml", CancellationToken.None));
+
+        Assert.Equal(PluginGroupXml, Encoding.UTF8.GetBytes(content.Content!));
+        Assert.Equal(1, UpstreamMetadataGetCount(PluginGroupPath));
     }
 
     private sealed class StaticHttpClientFactory : IHttpClientFactory

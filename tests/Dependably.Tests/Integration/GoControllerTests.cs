@@ -474,6 +474,59 @@ public sealed class GoControllerTests : IClassFixture<DependablyFactory>, IAsync
         Assert.DoesNotContain("should-not-be-served", body);
     }
 
+    // ── Bang-encoding and reservations ──────────────────────────────────────────
+
+    /// <summary>
+    /// A module path whose <c>!</c> sequences are not valid Go proxy bang-encoding names no
+    /// module, so the reservation decision cannot clear it. <c>!internal!/tool</c> decoded
+    /// leniently is <c>Internal!/tool</c>, which slips past a reservation on <c>Internal</c> and
+    /// was forwarded upstream with the reserved prefix in its path. Every module route answers
+    /// 404 for it without an upstream request; the validly encoded reserved path is refused as
+    /// before, and an unreserved sibling still reaches upstream.
+    /// </summary>
+    [Fact]
+    public async Task InvalidBangEscape_OnModuleRoutes_Is404AndNeverReachesUpstream()
+    {
+        string host = $"corp-{Guid.NewGuid():N}"[..13] + ".example";
+        string reservedModule = $"{host}/Internal";
+        string publicModule = $"{host}/public";
+        await _factory.Services.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>()
+            .AddAsync(await GetDefaultOrgIdAsync(), "golang", reservedModule, createdBy: null);
+
+        _factory.MockUpstream.Given(Request.Create().WithPath(new WireMock.Matchers.WildcardMatcher($"/{host}/*")).UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody("""{"Version":"v1.0.0","Time":"2024-01-01T00:00:00Z"}"""));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        string[] refused =
+        [
+            $"/go/{host}/!internal!/tool/@latest",
+            $"/go/{host}/!internal!/tool/@v/list",
+            $"/go/{host}/!internal!/tool/@v/v1.0.0.info",
+            $"/go/{host}/!internal!/tool/@v/v1.0.0.zip",
+            $"/go/{host}/!internal/tool/@v/v1.0.0.info",
+            $"/go/{host}/!internal/tool/@latest",
+        ];
+        foreach (string url in refused)
+        {
+            var resp = await client.GetAsync(url);
+            Assert.True(resp.StatusCode == HttpStatusCode.NotFound, $"{url} answered {(int)resp.StatusCode}");
+        }
+
+        var allowed = await client.GetAsync($"/go/{publicModule}/@v/v1.0.0.info");
+        Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+
+        var upstreamPaths = _factory.MockUpstream.LogEntries
+            .Select(e => e.RequestMessage?.Path ?? "")
+            .Where(p => p.StartsWith($"/{host}/", StringComparison.Ordinal))
+            .ToList();
+        Assert.DoesNotContain(upstreamPaths, p => p.Contains("internal", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(upstreamPaths, p => p.StartsWith($"/{publicModule}/", StringComparison.Ordinal));
+    }
+
     // ── Helper ────────────────────────────────────────────────────────────────
 
     private async Task<string> GetDefaultOrgIdAsync()

@@ -266,12 +266,28 @@ public static partial class SetupRecipeCatalog
                 Verify: "uv add requests",
                 Caveats: []),
 
+            // uv tool install, uvx, and uv pip outside a project have no pyproject.toml to
+            // take an index from and never read pip.conf, so without the user-level uv.toml
+            // they fall back to pypi.org. The exports only name credentials for an index this
+            // file declares; on their own they configure nothing.
+            new(Variant: "uv", OperationInstall, ScopeGlobal, PresetPull,
+                Files:
+                [
+                    File("~/.config/uv/uv.toml", InHomeDir, "toml",
+                        $"[[index]]\nname = \"dependably\"\nurl = \"{indexUrl}\"\ndefault = true")
+                ],
+                TokenDelivery: SetupTokenDelivery.FromCommand(
+                    $"# in ~/.bashrc or ~/.zshrc\nexport UV_INDEX_DEPENDABLY_USERNAME={BasicAuthUsername}\nexport UV_INDEX_DEPENDABLY_PASSWORD=<token>"),
+                Verify: "uvx ruff --version",
+                Caveats: []),
+
             // twine reads ~/.pypirc only; there is no project-scoped publish configuration.
+            // Uploads go to the legacy upload API; /simple/ is the read-only index.
             new(Variant: "twine", OperationPublish, ScopeGlobal, PresetPush,
                 Files:
                 [
                     File("~/.pypirc", InHomeDir, "ini",
-                        $"[distutils]\nindex-servers = dependably\n\n[dependably]\nrepository = {baseUrl}/simple/\nusername = {BasicAuthUsername}\npassword = <token>",
+                        $"[distutils]\nindex-servers = dependably\n\n[dependably]\nrepository = {baseUrl}/pypi/legacy/\nusername = {BasicAuthUsername}\npassword = <token>",
                         secretBearing: true)
                 ],
                 TokenDelivery: SetupTokenDelivery.Literal(),

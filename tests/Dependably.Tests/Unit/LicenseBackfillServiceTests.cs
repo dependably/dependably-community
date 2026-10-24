@@ -245,6 +245,26 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task BackfillPass_DoesNotRunTheNpmManifestRescan()
+    {
+        var blobs = new InMemoryBlobStore();
+        string ambKey = "proxy/" + new string('f', 64);
+        const string clean = """{"name":"amb","version":"1.0.0","license":"MIT"}""";
+        const string evil = """{"name":"amb","version":"1.0.0","scripts":{"postinstall":"x"}}""";
+        await blobs.PutAsync(ambKey, new MemoryStream(
+            NpmFixtures.BuildTarballFromEntries(("package/package.json", clean), ("other/package.json", evil))));
+        string ambId = await SeedCacheArtifactAsync("npm", "amb", "1.0.0", ambKey, "amb-1.0.0.tgz");
+
+        await BuildService(blobs).RunBackfillPassAsync(CancellationToken.None);
+
+        await using var conn = await _db.OpenAsync();
+        Assert.Null(await conn.QuerySingleAsync<string?>(
+            "SELECT install_script_kind FROM cache_artifact WHERE id = @id", new { id = ambId }));
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM instance_settings WHERE key LIKE 'npm_ambiguous_manifest_rescan_v1%'"));
+    }
+
+    [Fact]
     public async Task BackfillPass_EntireBatchFails_CursorAdvancesPastIt_NewerRowStillScannedSameTick()
     {
         // Regression for progress starvation: seed exactly BatchSize (100) oldest rows whose blob
@@ -289,9 +309,80 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         Assert.All(remaining, r => Assert.StartsWith("failing-", r.Name));
     }
 
+    [Fact]
+    public async Task BackfillPass_NpmStampedEmptyUnderWrapperDir_RequeuedOnce_ThenIdempotent()
+    {
+        var blobs = new InMemoryBlobStore();
+        string key = "proxy/" + new string('d', 64);
+        await blobs.PutAsync(key, NpmTarball("json5", "0.0.29", license: "MIT", entryPath: "json5/package.json"));
+        string id = await SeedCacheArtifactAsync("npm", "@types/json5", "0.0.29", key, "json5-0.0.29.tgz");
+
+        // A legitimately licence-free npm row stamped earlier must be revisited too, and stay empty.
+        string bareKey = "proxy/" + new string('e', 64);
+        await blobs.PutAsync(bareKey, NpmTarball("bare", "1.0.0", license: null));
+        string bareId = await SeedCacheArtifactAsync("npm", "bare", "1.0.0", bareKey, "bare-1.0.0.tgz");
+
+        // Both were stamped by an earlier pass that recorded nothing.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE cache_artifact SET license_checked_at = @at",
+                new { at = TestTime.KnownNow.ToUtcIso() });
+        }
+
+        var service = BuildService(blobs);
+        await service.RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Equal(new[] { "MIT" }, await LicensesForAsync(id));
+        Assert.Empty(await LicensesForAsync(bareId));
+        Assert.NotNull(await CheckedAtAsync(bareId));
+
+        // Second pass: marker present, nothing is requeued, the stored licence is untouched.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("DELETE FROM package_version_licenses");
+        }
+        await service.RunBackfillPassAsync(CancellationToken.None);
+        Assert.Empty(await LicensesForAsync(id));
+        Assert.NotNull(await CheckedAtAsync(id));
+        Assert.Empty(await new CacheArtifactRepository(_db).ListNeedingLicenseBackfillAsync(limit: 10));
+    }
+
+    [Fact]
+    public async Task BackfillPass_AmbiguousStoredTarball_LosesItsFirstManifestLicence_AndStaysUnknown()
+    {
+        var blobs = new InMemoryBlobStore();
+        string key = "proxy/" + new string('f', 64);
+        const string clean = """{"name":"amb","version":"1.0.0","license":"MIT"}""";
+        const string evil = """{"name":"amb","version":"1.0.0","scripts":{"postinstall":"x"}}""";
+        await blobs.PutAsync(key, new MemoryStream(
+            NpmFixtures.BuildTarballFromEntries(("package/package.json", clean), ("other/package.json", evil))));
+        string id = await SeedCacheArtifactAsync("npm", "amb", "1.0.0", key, "amb-1.0.0.tgz");
+        await new LicenseRepository(_db, _clock, TestNormalizers.License(_db))
+            .SetLicensesForCacheArtifactAsync(id, ["MIT"], "upstream");
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("UPDATE cache_artifact SET license_checked_at = @at", new { at = TestTime.KnownNow.ToUtcIso() });
+        }
+
+        var tiered = new TieredBlobStorage(blobs, blobs);
+        await new NpmManifestRescan(_db, tiered, _clock, NullLogger<NpmManifestRescan>.Instance).RunOnceAsync();
+        await BuildService(blobs).RunBackfillPassAsync(CancellationToken.None);
+
+        Assert.Empty(await LicensesForAsync(id));
+        await using var check = await _db.OpenAsync();
+        var (script, kind) = await check.QuerySingleAsync<(int, string?)>(
+            "SELECT has_install_script, install_script_kind FROM cache_artifact WHERE id = @id", new { id });
+        Assert.Equal((1, "npm:ambiguous-manifest"), (script, kind));
+        Assert.NotNull(await CheckedAtAsync(id));
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private LicenseBackfillService BuildService(IBlobStore blobs, bool airGapped = false)
+    private LicenseBackfillService BuildService(IBlobStore blobs, bool airGapped = false) =>
+        BuildService(blobs, new StubAirGap(airGapped));
+
+    private LicenseBackfillService BuildService(IBlobStore blobs, IAirGapMode airGap)
     {
         var tiered = new TieredBlobStorage(blobs, blobs);
         var config = new ConfigurationBuilder().AddInMemoryCollection().Build();
@@ -299,7 +390,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
             new CacheArtifactRepository(_db),
             new LicenseRepository(_db, _clock, TestNormalizers.License(_db)),
             tiered,
-            new StubAirGap(airGapped),
+            airGap,
             config,
             NullLogger<LicenseBackfillService>.Instance,
             _clock,
@@ -355,7 +446,8 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
     }
 
     // Builds a minimal npm tarball with package/package.json carrying the given license (or none).
-    private static MemoryStream NpmTarball(string name, string version, string? license)
+    private static MemoryStream NpmTarball(
+        string name, string version, string? license, string entryPath = "package/package.json")
     {
         string pkgJson = license is null
             ? $$"""{"name":"{{name}}","version":"{{version}}"}"""
@@ -366,7 +458,7 @@ public sealed class LicenseBackfillServiceTests : IAsyncLifetime
         using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
         using (var tw = new TarWriter(gz, leaveOpen: true))
         {
-            tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
+            tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, entryPath)
             {
                 DataStream = new MemoryStream(contentBytes),
             });

@@ -30,6 +30,15 @@ public static partial class PurlNormalizer
     public static string PyPiName(string name)
         => PyPiSeparatorRegex().Replace(name, "-").ToLowerInvariant();
 
+    /// <summary>
+    /// The npm package name (<c>@scope/pkg</c> or <c>pkg</c>) behind a stored npm purl name, which
+    /// may carry the scope percent-encoded (<c>%40scope%2Fpkg</c>). This is the name an upstream
+    /// packument URL is composed from, and the name a reserved-namespace pattern is matched
+    /// against before that URL is fetched.
+    /// </summary>
+    public static string NpmPackageName(string purlName)
+        => Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
+
     public static string PyPi(string name, string version)
     {
         string normalized = PyPiName(name);
@@ -217,6 +226,30 @@ public static partial class PurlNormalizer
     /// </summary>
     public static string Apk(string name, string pkgver, string pkgrel, string arch)
         => $"pkg:apk/alpine/{name}@{pkgver}-r{pkgrel}?arch={arch}";
+
+    /// <summary>
+    /// Apk PURL for a name and full version string (<c>8.5.0-r0</c>) without a target
+    /// architecture, the form a pre-adoption lookup names a package by.
+    /// </summary>
+    public static string ApkVersion(string name, string version)
+        => $"pkg:apk/alpine/{name}@{version}";
+
+    /// <summary>
+    /// RPM PURL for a name and full EVR string (<c>1:3.0.7-24.el9</c>), carrying the OSV distro
+    /// namespace segment when the caller knows one.
+    /// </summary>
+    public static string RpmEvr(string name, string evr, string? distroNamespace)
+    {
+        string namespaceSegment = string.IsNullOrEmpty(distroNamespace) ? "" : $"{distroNamespace}/";
+        return $"pkg:rpm/{namespaceSegment}{name.ToLowerInvariant()}@{evr}";
+    }
+
+    /// <summary>
+    /// Terraform provider PURL for a <c>namespace/type</c> address with no registry host, the
+    /// form a pre-adoption lookup names a provider by.
+    /// </summary>
+    public static string TerraformAddress(string address, string version)
+        => $"pkg:terraform/{address.ToLowerInvariant()}@{version}";
 
     public static string NormalizeNuGetVersionString(string version)
     {

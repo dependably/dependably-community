@@ -132,6 +132,18 @@ public static class PersonalDataTables
                 "Metadata for an SBOM/VEX/SARIF the org uploaded about its own software; uploaded_by is an " +
                 "authorship-provenance stamp on an org-owned row. Classified explicitly even though uploaded_by " +
                 "is outside PersonalDataColumns, so the decision is recorded rather than resting on a column name.",
+            ["kev_catalog"] =
+                "The public CISA Known Exploited Vulnerabilities catalogue, keyed by CVE id. Instance-global " +
+                "public reference data with no actor, address or tenant identifier.",
+            ["epss_scores"] =
+                "FIRST.org's public EPSS model scores keyed by CVE id. Instance-global public reference " +
+                "data with no actor, address or tenant identifier.",
+            ["epss_scores_staging"] =
+                "Transient landing copy of the same public EPSS file while a refresh loads it. Instance-global " +
+                "reference data with no actor, address or tenant identifier.",
+            ["vulnerability_aliases"] =
+                "Derived (alias, advisory id) pairs from the public advisory store. Instance-global " +
+                "reference data with no actor, address or tenant identifier.",
             ["vuln_tracker_health"] =
                 "Observed health of the operator's one vulnerability-tracker connection. Instance-global " +
                 "infrastructure telemetry: counts and instants only, with no actor, no address and no tenant " +

@@ -241,6 +241,13 @@ public class OrgSettings
     /// </summary>
     public string BlockSsvcExploitation { get; set; } = "off";
     /// <summary>
+    /// OCI pull gate over the org's own image scan results: 'off' (default) / 'warn' / 'block'.
+    /// Decides whether the OCI manifest paths read vulnerability facts at all; once they do,
+    /// every arm still obeys its own mode above. An image with no complete result reads as the
+    /// <c>unscanned</c> arm. Only 'block' refuses.
+    /// </summary>
+    public string OciScanEnforcement { get; set; } = "off";
+    /// <summary>
     /// Proxy gate for artefacts that ship an install/lifecycle script
     /// (<c>package_versions.has_install_script</c>). 'off' (default) = allow through; 'warn' =
     /// surface in UI only; 'block' = deny fetch and serve. A manual per-version allow override
@@ -406,6 +413,11 @@ public class Package
     public string? Description { get; set; }
     // Author/publisher as the artifact manifest names it, captured by the same parse.
     public string? Author { get; set; }
+    // OCI packages only: the worst scan state across the images this org holds, from the org's own
+    // scan results (not package_version_vulns, which a proxied image never gets). Null for every
+    // other ecosystem, and omitted from the JSON then. Filled by the packages-list endpoint.
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public OciScan.OciScanView? OciScan { get; set; }
 }
 
 public class PackageVersion
@@ -1021,6 +1033,15 @@ public class AffectedVersionRecord
     /// publication time) and from <see cref="VulnCheckedAt"/> (the most recent scan).
     /// </summary>
     public string? FirstSeenAt { get; set; }
+    /// <summary>
+    /// The advisory's OSV aliases (other identifiers for the same flaw, for example the GHSA and
+    /// CVE ids beside a PYSEC id). Always an array, empty when the advisory declares none. Clients
+    /// de-duplicate a flaw reported under several ids by intersecting <c>{osvId} ∪ aliases</c>.
+    /// </summary>
+    public string[] Aliases { get; set; } = [];
+    /// <summary>Raw <c>vulnerabilities.aliases</c> JSON as read by the report query; parsed into <see cref="Aliases"/>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? AliasesJson { get; set; }
 }
 
 // ── Rich OSV advisory detail (lazy detail endpoint) ───────────────────────────

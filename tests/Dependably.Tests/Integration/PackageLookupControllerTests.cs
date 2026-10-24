@@ -212,6 +212,112 @@ public sealed class PackageLookupControllerTests : IClassFixture<DependablyFacto
         var resp = await client.GetAsync($"/api/v1/lookup?ecosystem=npm&name={name}");
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+        var problem = await ProblemAsync(resp);
+        Assert.False(problem.TryGetProperty("reason", out _));
+        Assert.Contains("temporarily unavailable", problem.GetProperty("detail").GetString(), StringComparison.Ordinal);
+    }
+
+    private async Task<string> DefaultOrgIdAsync()
+    {
+        var db = _factory.Services.GetRequiredService<Dependably.Infrastructure.IMetadataStore>();
+        await using var conn = await db.OpenAsync();
+        return await Dapper.SqlMapper.ExecuteScalarAsync<string>(conn,
+            "SELECT id FROM orgs WHERE slug = 'default' LIMIT 1")
+            ?? throw new InvalidOperationException("Default org not found.");
+    }
+
+    private static async Task<JsonElement> ProblemAsync(HttpResponseMessage resp)
+    {
+        Assert.Equal("application/problem+json", resp.Content.Headers.ContentType?.MediaType);
+        return await resp.Content.ReadFromJsonAsync<JsonElement>();
+    }
+
+    // A reserved name is local-only by the operator's choice: with no version there is no latest
+    // to resolve, and retrying never changes that, so it is a 422 on "version" with its own
+    // detail and machine-readable reason, not the 503 an outage gets. Upstream is never asked.
+    [Fact]
+    public async Task ReservedMavenCoordinate_NoVersion_Returns422Reserved_Not503_AndNeverReachesUpstream()
+    {
+        string group = $"com.resv{Guid.NewGuid():N}"[..20];
+        string orgId = await DefaultOrgIdAsync();
+        var reserved = _factory.Services.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>();
+        await reserved.AddAsync(orgId, "maven", group, createdBy: null);
+        using var client = await MemberClient();
+
+        var resp = await client.GetAsync($"/api/v1/lookup?ecosystem=maven&name={group}:internal-tool");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var problem = await ProblemAsync(resp);
+        Assert.Equal(422, problem.GetProperty("status").GetInt32());
+        Assert.Equal("version", problem.GetProperty("field").GetString());
+        Assert.Equal("name_reserved", problem.GetProperty("reason").GetString());
+        string detail = problem.GetProperty("detail").GetString()!;
+        Assert.Contains("reserved", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("unavailable", detail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Try again", detail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            _factory.MockUpstream.LogEntries,
+            e => e.RequestMessage?.Path?.Contains(group.Replace('.', '/'), StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public async Task ReservedName_NoVersion_DetailIsLocalized()
+    {
+        string scope = $"@resvfr{Guid.NewGuid():N}"[..16];
+        string orgId = await DefaultOrgIdAsync();
+        var reserved = _factory.Services.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>();
+        await reserved.AddAsync(orgId, "npm", $"{scope}/*", createdBy: null);
+        using var client = await MemberClient();
+        client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("fr");
+
+        var resp = await client.GetAsync(
+            $"/api/v1/lookup?ecosystem=npm&name={Uri.EscapeDataString($"{scope}/tool")}");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        var problem = await ProblemAsync(resp);
+        Assert.Equal("name_reserved", problem.GetProperty("reason").GetString());
+        Assert.Contains("réservé", problem.GetProperty("detail").GetString(), StringComparison.Ordinal);
+    }
+
+    // With a version the lookup still answers: the advisory and licence verdict, the
+    // upstream-derived checks reported unavailable, and reserved=true on the body. Removing the
+    // reservation takes effect on the next lookup, which goes upstream again.
+    [Fact]
+    public async Task ReservedNpmName_ExplicitVersion_Returns200MarkedReserved_AndUnreservingRestoresUpstream()
+    {
+        string scope = $"@resv{Guid.NewGuid():N}"[..14];
+        string name = $"{scope}/tool";
+        StubNpmPackument(name, "2.0.0");
+        string orgId = await DefaultOrgIdAsync();
+        var reserved = _factory.Services.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>();
+        var entry = await reserved.AddAsync(orgId, "npm", $"{scope}/*", createdBy: null);
+        using var client = await MemberClient();
+        string encoded = Uri.EscapeDataString(name);
+
+        var withVersion = await client.GetAsync($"/api/v1/lookup?ecosystem=npm&name={encoded}&version=1.0.0");
+        var noVersion = await client.GetAsync($"/api/v1/lookup?ecosystem=npm&name={encoded}");
+
+        Assert.Equal(HttpStatusCode.OK, withVersion.StatusCode);
+        var body = await withVersion.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(body.GetProperty("found").GetBoolean());
+        Assert.True(body.GetProperty("reserved").GetBoolean());
+        Assert.Equal("1.0.0", body.GetProperty("version").GetString());
+        var unavailable = body.GetProperty("unavailableChecks").EnumerateArray().Select(e => e.GetString()).ToList();
+        Assert.Contains("release_age", unavailable);
+        Assert.Contains("deprecated", unavailable);
+        Assert.Contains("license", unavailable);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, noVersion.StatusCode);
+        Assert.DoesNotContain(
+            _factory.MockUpstream.LogEntries,
+            e => e.RequestMessage?.Path?.Contains(scope, StringComparison.Ordinal) == true);
+
+        await reserved.DeleteAsync(orgId, entry.Id);
+        var unreserved = await client.GetAsync($"/api/v1/lookup?ecosystem=npm&name={encoded}");
+
+        Assert.Equal(HttpStatusCode.OK, unreserved.StatusCode);
+        var after = await unreserved.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(after.GetProperty("reserved").GetBoolean());
+        Assert.Equal("2.0.0", after.GetProperty("version").GetString());
     }
 
     /// <summary>
@@ -292,5 +398,40 @@ public sealed class PackageLookupControllerTests : IClassFixture<DependablyFacto
         Assert.Equal(0, negativeCacheCount);
 
         Assert.Empty(_factory.BlobStore.GetKeys());
+    }
+
+    [Theory]
+    [InlineData("ecosystem=npm&version=1.0.0", "name")]
+    [InlineData("ecosystem=npm&name=%20%20&version=1.0.0", "name")]
+    [InlineData("ecosystem=maven&name=not-a-coordinate&version=1.0.0", "name")]
+    [InlineData("ecosystem=maven&name=org.acme:../etc&version=1.0.0", "name")]
+    [InlineData("ecosystem=npm&name=left-pad&version=1.0.0%25zz", "version")]
+    [InlineData("ecosystem=apk&name=curl", "version")]
+    [InlineData("ecosystem=oci&name=team/app", "version")]
+    [InlineData("ecosystem=deb&name=curl&version=1.0.0", "ecosystem")]
+    [InlineData("name=curl&version=1.0.0", "ecosystem")]
+    public async Task InvalidInput_Returns422NamingTheField_AndNeverReachesUpstream(string query, string field)
+    {
+        using var client = await MemberClient();
+        int upstreamBefore = _factory.MockUpstream.LogEntries.Count;
+
+        var resp = await client.GetAsync($"/api/v1/lookup?{query}");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal(field, doc.RootElement.GetProperty("field").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("detail").GetString()));
+        Assert.Equal(upstreamBefore, _factory.MockUpstream.LogEntries.Count);
+    }
+
+    [Fact]
+    public async Task CallerWithoutReadPackages_IsForbidden()
+    {
+        string id = await _factory.CreateUser($"lookup-denied-{Guid.NewGuid():N}@example.com", "Password12345");
+        using var client = _factory.CreateClientWithBearer(await _factory.CreateUserJwtWithCaps(id, new[] { "read:tenant" }));
+
+        var resp = await client.GetAsync("/api/v1/lookup?ecosystem=npm&name=left-pad&version=1.0.0");
+
+        await ProblemBody.AssertForbiddenAsync(resp);
     }
 }

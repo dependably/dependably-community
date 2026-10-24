@@ -62,10 +62,22 @@ public static class ScriptDetectionService
     private const long MaxBufferedArtefactBytes = 512L * 1024 * 1024;
 
     /// <summary>
-    /// Stream overload for the ingest paths: buffers the artefact into a bounded byte[] (skipping
-    /// detection and returning <see cref="InstallScriptResult.None"/> when it exceeds
-    /// <see cref="MaxBufferedArtefactBytes"/>) and delegates to <see cref="Detect"/>. Fail-soft on
-    /// any read error.
+    /// The verdict a caller records when detection could not run to completion (blob unreadable,
+    /// read fault, detector error). npm fails closed: its manifest is the whole verdict, so an
+    /// unreadable one is reported as a scripted <c>npm:unscannable-manifest</c> rather than as
+    /// "no hook". Every other ecosystem stays fail-soft and returns <see cref="InstallScriptResult.None"/>.
+    /// </summary>
+    public static InstallScriptResult FailClosedResult(string ecosystem) =>
+        ecosystem == "npm"
+            ? new InstallScriptResult(true, "npm:unscannable-manifest")
+            : InstallScriptResult.None;
+
+    /// <summary>
+    /// Stream overload for the ingest paths. npm is scanned straight off the stream. The other
+    /// ecosystems are buffered into a bounded byte[] and delegated to <see cref="Detect"/>; one
+    /// exceeding <see cref="MaxBufferedArtefactBytes"/> is skipped as
+    /// <see cref="InstallScriptResult.None"/>. A read error is fail-soft for those ecosystems and
+    /// fails closed for npm (see <see cref="FailClosedResult"/>).
     /// </summary>
     public static async Task<InstallScriptResult> DetectAsync(
         string ecosystem, string filename, Stream artefact, CancellationToken ct = default)
@@ -77,6 +89,13 @@ public static class ScriptDetectionService
 
         try
         {
+            if (ecosystem == "npm")
+            {
+                // Scanned in place: the scanner reads the gzip stream incrementally under its own
+                // decompression budgets, so no compressed-size cap (and no overflow verdict) applies.
+                return DetectNpm(artefact, leaveOpen: true);
+            }
+
             using var buffer = new MemoryStream();
             using var limited = new LimitedReadStream(artefact, MaxBufferedArtefactBytes, "Artefact");
             await limited.CopyToAsync(buffer, ct);
@@ -84,13 +103,13 @@ public static class ScriptDetectionService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return InstallScriptResult.None;
+            return FailClosedResult(ecosystem);
         }
     }
 
     /// <summary>
     /// Routes by ecosystem and dispatches to the matching detector. Unknown ecosystems and
-    /// detector failures return <see cref="InstallScriptResult.None"/>. The buffered bytes are
+    /// non-npm detector failures return <see cref="InstallScriptResult.None"/>; an npm detector failure reports <c>npm:unscannable-manifest</c>. The buffered bytes are
     /// bounded by the caller (upload size limits + the ingest read cap), never the full stream.
     /// </summary>
     public static InstallScriptResult Detect(string ecosystem, string filename, byte[] bytes)
@@ -99,7 +118,7 @@ public static class ScriptDetectionService
         {
             return ecosystem switch
             {
-                "npm" => DetectNpm(bytes),
+                "npm" => DetectNpm(new MemoryStream(bytes), leaveOpen: false),
                 "pypi" => DetectPyPi(filename, bytes),
                 "nuget" => DetectNuGet(bytes),
                 "rpm" => DetectRpm(bytes),
@@ -108,51 +127,56 @@ public static class ScriptDetectionService
         }
         catch
         {
-            // Fail-soft: a corrupt or unexpected archive must not break ingest. The artefact
-            // still serves; the signal simply stays false until a clean re-fetch/republish.
-            return InstallScriptResult.None;
+            // Fail-soft for the non-npm ecosystems: a corrupt or unexpected archive must not break
+            // ingest, and the artefact still serves with the signal false. npm fails closed: its
+            // manifest is the whole verdict, and an unreadable one must not read as "no hook".
+            return ecosystem == "npm"
+                ? new InstallScriptResult(true, "npm:unscannable-manifest")
+                : InstallScriptResult.None;
         }
     }
 
     // npm: open the gzipped tar, read the top-level package.json, and report a script when
     // scripts contains any of preinstall/install/postinstall (the hooks npm runs automatically
     // on `npm install`). Reuses the tarball-reading shape of NpmTarballValidator.
-    private static InstallScriptResult DetectNpm(byte[] bytes)
+    private static InstallScriptResult DetectNpm(Stream gzipSource, bool leaveOpen)
     {
-        using var gzip = new LimitedReadStream(
-            new GZipStream(new MemoryStream(bytes), CompressionMode.Decompress),
-            TarScanLimits.MaxTotalDecompressedBytes, "Tarball");
-        using var tar = new TarReader(gzip, leaveOpen: false);
-
-        int entryCount = 0;
-        while (tar.GetNextEntry() is { } entry)
+        var scan = NpmTarballManifestScanner.ScanOrUnscannable(gzipSource, leaveOpen);
+        switch (scan.Outcome)
         {
-            if (++entryCount > TarScanLimits.MaxEntries)
-            {
+            case NpmManifestScanOutcome.Ambiguous:
+                // npm installs the last of several top-level manifests; which one is unknowable
+                // here, so fail closed and report an install script rather than trusting the first.
+                return new InstallScriptResult(true, "npm:ambiguous-manifest");
+            case NpmManifestScanOutcome.TooManyEntries:
+            case NpmManifestScanOutcome.Unscannable:
+                // The archive could not be read to the end, so a scripted manifest may sit past the
+                // point the scan stopped. Padding must not turn an install script into "none".
+                return new InstallScriptResult(true, "npm:unscannable-manifest");
+            case NpmManifestScanOutcome.Found:
+                break;
+            default:
                 return InstallScriptResult.None;
-            }
-
-            if (!NpmTarballValidator.IsTopLevelPackageJson(entry.Name))
-            {
-                continue;
-            }
-
-            using var entryStream = new LimitedReadStream(
-                entry.DataStream!, TarScanLimits.MaxManifestBytes, "package.json");
-            var json = JsonNode.Parse(entryStream);
-            if (json?["scripts"] is not JsonObject scripts)
-            {
-                return InstallScriptResult.None;
-            }
-
-            // Hook precedence mirrors npm's documented run order; report the first present.
-            string? firstHook = NpmInstallHooks.FirstOrDefault(h => scripts[h] is not null);
-            return firstHook is not null
-                ? new InstallScriptResult(true, $"npm:{firstHook}")
-                : InstallScriptResult.None;
         }
 
-        return InstallScriptResult.None;
+        // The scanner only reports Found for a manifest that parses strictly; a null here still
+        // fails closed rather than reading as "no scripts".
+        var json = NpmTarballManifestScanner.TryParseManifest(scan.Bytes!);
+        if (json is null)
+        {
+            return new InstallScriptResult(true, "npm:unscannable-manifest");
+        }
+
+        if (json["scripts"] is not JsonObject scripts)
+        {
+            return InstallScriptResult.None;
+        }
+
+        // Hook precedence mirrors npm's documented run order; report the first present.
+        string? firstHook = NpmInstallHooks.FirstOrDefault(h => scripts[h] is not null);
+        return firstHook is not null
+            ? new InstallScriptResult(true, $"npm:{firstHook}")
+            : InstallScriptResult.None;
     }
 
     // PyPI: a wheel (.whl) is pre-built and runs no install-time code — always false. An sdist

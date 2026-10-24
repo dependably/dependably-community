@@ -51,12 +51,16 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
     private readonly PackageRepository _packages;
     private readonly OciOrphanBlobDeleter _ociOrphanBlobs;
     private readonly IConfiguration _config;
+    private readonly IAirGapMode _airGap;
     private readonly ILogger<CacheEvictionService> _logger;
     private readonly TimeProvider _time;
 
     protected override string CronEnvKey => "CACHE_EVICT_SCHEDULE";
     protected override string DefaultCron => "0 * * * *";
-    protected override string ScopeJobName => "cache-eviction";
+    /// <summary>The <c>DISABLE_BACKGROUND_JOBS</c> name for this job.</summary>
+    public const string JobName = "cache-eviction";
+
+    protected override string ScopeJobName => JobName;
     protected override string ScopeMetricName => "cache.evict";
 
     // Deletes shared cache_artifact rows and cache-tier blobs — one replica per tick in HA mode.
@@ -80,9 +84,11 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
         IConfiguration config,
         ILogger<CacheEvictionService> logger,
         TimeProvider time,
-        IDistributedLock locks)
+        IDistributedLock locks,
+        IAirGapMode airGap)
         : base(config, logger, time, locks)
     {
+        _airGap = airGap;
         _cache = deps.Cache;
         // Eviction is cache-only. In split-tier deployments the registry tier is durable
         // and never evicted — even though cache_artifact rows refer to keys we own, we
@@ -108,6 +114,15 @@ public sealed class CacheEvictionService : ScheduledBackgroundService
         // xtenant: the proxy cache is shared across tenants; eviction sizes the whole plane and
         // releases each holder's claim.
         using var ownerScope = DbScope.CrossTenant("cache eviction");
+
+        // Only an explicit DISABLE_BACKGROUND_JOBS entry or edge mode can stop this job: AIR_GAPPED
+        // and the whole-set switch exempt it (BackgroundJobs.HousekeepingExemptFromWholeSet),
+        // because it makes no outbound call and stopping it leaves the cache unbounded.
+        if (_airGap.IsJobDisabled(JobName))
+        {
+            _logger.LogInformation("Cache eviction skipped (named in DISABLE_BACKGROUND_JOBS).");
+            return new EvictionSummary(0, 0);
+        }
 
         int? maxAgeDays = ParseInt("CACHE_MAX_AGE_DAYS");
         long? maxSizeBytes = ParseLong("CACHE_MAX_SIZE_BYTES");

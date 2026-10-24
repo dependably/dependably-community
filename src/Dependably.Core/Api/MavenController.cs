@@ -333,11 +333,24 @@ public sealed partial class MavenController : OrgScopedControllerBase
     // Checks whether the literal SNAPSHOT alias row is still current by re-resolving the
     // current timestamped filename from upstream metadata. Returns non-null when the proxy
     // should be called to fetch a newer build; returns null when the cached alias is current
-    // or when upstream metadata is unreachable (in which case the stale alias is served).
+    // or when upstream metadata is unreachable (in which case the stale alias is served). A
+    // reserved name, or an org with proxy passthrough off, never consults upstream, so its
+    // cached alias is served as-is, the same as a local-only SNAPSHOT.
     private async Task<IActionResult?> CheckSnapshotFreshnessAsync(
         string orgId, MavenCoordinates coords, System.Data.Common.DbConnection conn,
         OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
+        if (settings is not null && !settings.ProxyPassthroughEffective)
+        {
+            return null;
+        }
+
+        if (await _svc.ReservedNamespaces.IsMavenMetadataPathReservedAsync(
+                orgId, coords.GroupId, coords.ArtifactId, versionLevel: true, ct))
+        {
+            return null;
+        }
+
         string? currentTimestampedFilename = await ResolveCurrentSnapshotFilenameAsync(orgId, coords, ct);
         if (currentTimestampedFilename is null)
         {
@@ -667,6 +680,12 @@ public sealed partial class MavenController : OrgScopedControllerBase
             return NotFound();
         }
 
+        // Passthrough off (or air-gapped) means no upstream request at all: a miss is a 404.
+        if (settings is not null && !settings.ProxyPassthroughEffective)
+        {
+            return NotFound();
+        }
+
         // Resolve the org's priority-ordered upstream registries. Empty ⇒ proxying disabled.
         var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
         if (bases.Count == 0)
@@ -705,24 +724,14 @@ public sealed partial class MavenController : OrgScopedControllerBase
 
         // Walk the configured upstreams in priority order; the first that yields the
         // artifact wins. A single configured registry behaves identically to before.
-        MavenArtifactFetchResult? result = null;
-        foreach (var source in bases)
+        MavenArtifactFetchResult? result;
+        try
         {
-            try
-            {
-                result = await _svc.Upstream.FetchArtifactAsync(
-                    source.Url, upstreamPath, ct, orgId: orgId, purl: purlForLog,
-                    authorizationHeader: source.AuthorizationHeader);
-            }
-            catch (ChecksumException)
-            {
-                return StatusCode(StatusCodes.Status502BadGateway);
-            }
-
-            if (result is not null)
-            {
-                break;
-            }
+            result = await FetchFromUpstreamsAsync(orgId, bases, upstreamPath, purlForLog, ct);
+        }
+        catch (ChecksumException)
+        {
+            return StatusCode(StatusCodes.Status502BadGateway);
         }
 
         // Capture the literal filename before resolving so the literal alias can be written
@@ -760,6 +769,25 @@ public sealed partial class MavenController : OrgScopedControllerBase
             // exists upstream, we could not admit it. The bytes are staged, so a retry is cheap.
             return StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
+    }
+
+    // The first upstream, in priority order, that yields the artifact, or null when none does. A
+    // ChecksumException from any upstream propagates so the caller answers 502.
+    private async Task<MavenArtifactFetchResult?> FetchFromUpstreamsAsync(
+        string orgId, IReadOnlyList<UpstreamSource> bases, string upstreamPath, string? purlForLog, CancellationToken ct)
+    {
+        foreach (var source in bases)
+        {
+            var result = await _svc.Upstream.FetchArtifactAsync(
+                source.Url, upstreamPath, ct, orgId: orgId, purl: purlForLog,
+                authorizationHeader: source.AuthorizationHeader);
+            if (result is not null)
+            {
+                return result;
+            }
+        }
+
+        return null;
     }
 
     // Verifies the detached OpenPGP (.asc) signature for a freshly-fetched Maven artifact when the

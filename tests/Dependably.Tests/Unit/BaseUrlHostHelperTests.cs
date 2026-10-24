@@ -45,6 +45,59 @@ public sealed class BaseUrlHostHelperTests
         Assert.Null(BaseUrlHostHelper.ExtractHost(baseUrl));
     }
 
+    [Theory]
+    [InlineData("/tenants")]
+    [InlineData("?x")]
+    [InlineData("#frag")]
+    [InlineData("https://")]
+    [InlineData(":8080")]
+    [InlineData("user@")]
+    [InlineData(".")]
+    public void ExtractHost_NoHostPortion_ReturnsNullWithoutThrowing(string value)
+    {
+        Assert.Null(BaseUrlHostHelper.ExtractHost(value));
+    }
+
+    [Theory]
+    [InlineData("example.com.", "example.com")]
+    [InlineData("https://Example.com.:8443/path", "example.com")]
+    public void ExtractHost_DropsATrailingDot(string value, string expected)
+    {
+        Assert.Equal(expected, BaseUrlHostHelper.ExtractHost(value));
+    }
+
+    private static Microsoft.Extensions.Configuration.IConfiguration TenantDomainCfg(string? value) =>
+        new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["BASE_URL"] = "https://mydomain.com",
+                ["TENANT_DOMAIN"] = value,
+            })
+            .Build();
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("   ", true)]
+    [InlineData("example.org", true)]
+    [InlineData("example.org.", true)]
+    [InlineData("https://", false)]
+    [InlineData(":8080", false)]
+    [InlineData("?x", false)]
+    [InlineData("user@", false)]
+    [InlineData("/tenants", false)]
+    [InlineData("localhost", false)]
+    public void IsTenantDomainValueUsable_ValidatesTheExplicitValueNotTheApexFallback(string? value, bool expected)
+    {
+        Assert.Equal(expected, BaseUrlHostHelper.IsTenantDomainValueUsable(TenantDomainCfg(value)));
+    }
+
+    [Fact]
+    public void ResolveTenantDomain_TrailingDotIsNormalizedAway()
+    {
+        Assert.Equal("example.org", BaseUrlHostHelper.ResolveTenantDomain(TenantDomainCfg("example.org.")));
+        Assert.Equal("example.org", BaseUrlHostHelper.ResolveUsableTenantDomain(TenantDomainCfg("example.org.")));
+    }
+
     // ── IsUsableApexHost ───────────────────────────────────────────────────────
 
     [Theory]
@@ -146,5 +199,61 @@ public sealed class BaseUrlHostHelperTests
         Assert.Null(BaseUrlHostHelper.ResolveUsableApexHost(Cfg(
             ("APEX_HOST", "localhost"),
             ("BASE_URL", "https://repo.example.com"))));
+    }
+
+    // ── TENANT_DOMAIN ──────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("mydomain.com", "https://repo.example.com", "mydomain.com")]
+    [InlineData("https://MyDomain.com:8443/", "https://repo.example.com", "mydomain.com")]
+    [InlineData(null, "https://repo.example.com", "repo.example.com")]
+    [InlineData("", "https://repo.example.com", "repo.example.com")]
+    [InlineData("   ", "https://repo.example.com", "repo.example.com")]
+    [InlineData(null, null, null)]
+    public void ResolveTenantDomain_PrefersTenantDomainElseApex(string? tenantDomain, string? baseUrl, string? expected)
+    {
+        Assert.Equal(expected, BaseUrlHostHelper.ResolveTenantDomain(Cfg(("TENANT_DOMAIN", tenantDomain), ("BASE_URL", baseUrl))));
+    }
+
+    [Fact]
+    public void ResolveTenantDomain_FallsBackToApexHostOverride_NotBaseUrl()
+    {
+        Assert.Equal("tenants.example.com", BaseUrlHostHelper.ResolveTenantDomain(Cfg(
+            ("APEX_HOST", "tenants.example.com"), ("BASE_URL", "https://repo.example.com"))));
+    }
+
+    [Fact]
+    public void ResolveUsableTenantDomain_Loopback_ReturnsNull_RealHostIsKept()
+    {
+        Assert.Null(BaseUrlHostHelper.ResolveUsableTenantDomain(Cfg(
+            ("TENANT_DOMAIN", "localhost"), ("BASE_URL", "https://repo.example.com"))));
+        Assert.Equal("mydomain.com", BaseUrlHostHelper.ResolveUsableTenantDomain(Cfg(
+            ("TENANT_DOMAIN", "mydomain.com"), ("BASE_URL", "http://localhost"))));
+    }
+
+    [Theory]
+    [InlineData("mydomain.com", true)]
+    [InlineData("localhost", true)]
+    [InlineData("", false)]
+    [InlineData("  ", false)]
+    [InlineData(null, false)]
+    public void IsTenantDomainConfigured_TrueOnlyForNonBlank(string? value, bool expected)
+    {
+        Assert.Equal(expected, BaseUrlHostHelper.IsTenantDomainConfigured(Cfg(("TENANT_DOMAIN", value))));
+    }
+
+    [Theory]
+    [InlineData("master.mydomain.com", "mydomain.com", "master")]
+    [InlineData("a.b.mydomain.com", "mydomain.com", "b")]
+    [InlineData("MASTER.MyDomain.com.", "mydomain.com", "master")]
+    [InlineData("mydomain.com", "mydomain.com", null)]
+    [InlineData("mydomain.com", "t.mydomain.com", null)]
+    [InlineData("master.other.com", "mydomain.com", null)]
+    [InlineData("xmydomain.com", "mydomain.com", null)]
+    [InlineData(null, "mydomain.com", null)]
+    [InlineData("master.mydomain.com", null, null)]
+    public void ApexReservedLabel_IsTheLabelDirectlyBelowTheTenantDomain(string? apex, string? tenantDomain, string? expected)
+    {
+        Assert.Equal(expected, BaseUrlHostHelper.ApexReservedLabel(apex, tenantDomain));
     }
 }

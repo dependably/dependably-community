@@ -60,6 +60,139 @@ public static class NpmFixtures
     }
 
     /// <summary>
+    /// Builds a gzipped tar from raw (path, json) entries in the given order, so tests can
+    /// construct archives npm would accept but a first-match reader would misread (several
+    /// top-level manifests, case variants).
+    /// </summary>
+    public static byte[] BuildTarballFromEntries(params (string Path, string Json)[] entries)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+        using (var tw = new TarWriter(gz, leaveOpen: true))
+        {
+            foreach (var (path, json) in entries)
+            {
+                tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, path)
+                {
+                    DataStream = new MemoryStream(Encoding.UTF8.GetBytes(json)),
+                });
+            }
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a valid single-manifest npm tarball whose package also carries a file of
+    /// <paramref name="payloadBytes"/> random bytes, so a test can push a tarball of a realistic
+    /// size through the proxy path. Random content does not compress, so the archive is at least
+    /// that large.
+    /// </summary>
+    public static byte[] BuildTarballWithPayload(string name, string version, int payloadBytes)
+    {
+        string manifest = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["name"] = name,
+            ["version"] = version,
+            ["license"] = "MIT",
+            ["main"] = "index.js",
+        });
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+        using (var tw = new TarWriter(gz, leaveOpen: true))
+        {
+            tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "package/package.json")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes(manifest)),
+            });
+            tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "package/payload.bin")
+            {
+                DataStream = new MemoryStream(RandomNumberGenerator.GetBytes(payloadBytes)),
+            });
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a gzipped tar of <paramref name="first"/>, then exactly <paramref name="zeroBlocks"/>
+    /// all-zero 512-byte blocks, then either <paramref name="second"/> as a further entry (with its
+    /// own end marker) or <paramref name="trailingJunk"/> raw. node-tar ends the archive only at two
+    /// consecutive zero blocks, so one zero block followed by an entry hides nothing from npm.
+    /// </summary>
+    public static byte[] BuildTarballWithZeroBlocks(
+        (string Path, string Json) first, int zeroBlocks, (string Path, string Json)? second = null, byte[]? trailingJunk = null)
+    {
+        byte[] head = RawTar(first);
+        using var ms = new MemoryStream();
+        ms.Write(head, 0, head.Length - 1024);
+        ms.Write(new byte[512 * zeroBlocks]);
+        if (second is { } s)
+        {
+            ms.Write(RawTar(s));
+        }
+
+        if (trailingJunk is not null)
+        {
+            ms.Write(trailingJunk);
+        }
+
+        return Gzip(ms.ToArray());
+    }
+
+    /// <summary>
+    /// Builds a gzipped tar whose first block is a pax extended-header entry declaring a body of
+    /// about 4 GiB, followed by an ordinary manifest entry. System.Formats.Tar rejects the oversized
+    /// header with an exception type no archive-format list names; the body is never present, so the
+    /// fixture stays tiny.
+    /// </summary>
+    public static byte[] BuildTarballWithOversizedPaxHeader(string manifestJson)
+    {
+        byte[] header = new byte[512];
+        Encoding.ASCII.GetBytes("pax_header").CopyTo(header, 0);
+        Encoding.ASCII.GetBytes("0000644\0").CopyTo(header, 100);
+        Encoding.ASCII.GetBytes("0000000\0").CopyTo(header, 108);
+        Encoding.ASCII.GetBytes("0000000\0").CopyTo(header, 116);
+        Encoding.ASCII.GetBytes("37777777777\0").CopyTo(header, 124);
+        Encoding.ASCII.GetBytes("00000000000\0").CopyTo(header, 136);
+        Array.Fill(header, (byte)' ', 148, 8);
+        header[156] = (byte)'x';
+        Encoding.ASCII.GetBytes("ustar\0").CopyTo(header, 257);
+        Encoding.ASCII.GetBytes("00").CopyTo(header, 263);
+        int sum = header.Sum(b => b);
+        Encoding.ASCII.GetBytes(Convert.ToString(sum, 8).PadLeft(6, '0') + "\0 ").CopyTo(header, 148);
+
+        using var ms = new MemoryStream();
+        ms.Write(header);
+        ms.Write(RawTar(("package/package.json", manifestJson)));
+        return Gzip(ms.ToArray());
+    }
+
+    /// <summary>Gzips <paramref name="data"/>.</summary>
+    public static byte[] Gzip(byte[] data)
+    {
+        using var output = new MemoryStream();
+        using (var gz = new GZipStream(output, CompressionMode.Compress, leaveOpen: true))
+        {
+            gz.Write(data);
+        }
+
+        return output.ToArray();
+    }
+
+    private static byte[] RawTar((string Path, string Json) entry)
+    {
+        using var ms = new MemoryStream();
+        using (var tw = new TarWriter(ms, leaveOpen: true))
+        {
+            tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, entry.Path)
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes(entry.Json)),
+            });
+        }
+
+        return ms.ToArray();
+    }
+
+    /// <summary>
     /// Builds the JSON body required by npm publish PUT. Defaults reproduce the npm
     /// CLI shape circa npm ≥7: tarball package.json carries the license; the packument
     /// per-version object does not. Set <paramref name="tarballLicense"/>=null to omit
@@ -122,6 +255,42 @@ public static class NpmFixtures
             {
                 DataStream = new MemoryStream("""{"name":"bomb","version":"1.0.0"}"""u8.ToArray())
             });
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// Builds a tarball of <paramref name="before"/> manifests, <paramref name="padEntries"/> empty
+    /// entries, then <paramref name="after"/> manifests, for exercising scans that must not give up
+    /// at the entry cap.
+    /// </summary>
+    public static byte[] BuildPaddedTarball(
+        (string Path, string Json)[] before, int padEntries, (string Path, string Json)[] after)
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
+        using (var tw = new TarWriter(gz, leaveOpen: true))
+        {
+            foreach (var (path, json) in before)
+            {
+                tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, path)
+                {
+                    DataStream = new MemoryStream(Encoding.UTF8.GetBytes(json)),
+                });
+            }
+
+            for (int i = 0; i < padEntries; i++)
+            {
+                tw.WriteEntry(new UstarTarEntry(TarEntryType.RegularFile, $"package/pad{i}"));
+            }
+
+            foreach (var (path, json) in after)
+            {
+                tw.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, path)
+                {
+                    DataStream = new MemoryStream(Encoding.UTF8.GetBytes(json)),
+                });
+            }
         }
         return ms.ToArray();
     }

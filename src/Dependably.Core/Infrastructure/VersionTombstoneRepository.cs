@@ -49,6 +49,20 @@ public sealed class VersionTombstoneRepository
         string orgId, string ecosystem, string purlName, string version, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
+        if (ecosystem == "pypi")
+        {
+            // PyPI identity is the PEP 440 canonical form, which SQL cannot compute: compare the
+            // package's tombstones in C# so a respelling of a deleted version is still spent.
+            var identity = Protocol.VersionIdentity.Comparer("pypi");
+            var spent = await conn.QueryAsync<string>(
+                """
+                SELECT version FROM package_version_tombstone
+                WHERE org_id = @orgId AND ecosystem = @ecosystem AND purl_name = @purlName
+                """,
+                new { orgId, ecosystem, purlName });
+            return spent.Any(v => identity.Equals(v, version));
+        }
+
         // SQLite surfaces EXISTS as 0/1, Postgres as boolean — Dapper maps both to bool.
         return await conn.ExecuteScalarAsync<bool>(
             """

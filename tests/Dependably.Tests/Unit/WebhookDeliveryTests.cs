@@ -268,6 +268,103 @@ public sealed class WebhookDeliveryTests : IAsyncLifetime
         Assert.DoesNotContain(results, r => r.OrgId == "org2");
     }
 
+    [Fact]
+    public async Task ListEnabledForEventAsync_OneSecretDoesNotDecrypt_SkipsOnlyThatSubscriptionAndWarns()
+    {
+        using var ep = MakeProtector();
+        var logger = new RecordingLogger<WebhookSubscriptionRepository>();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock, logger);
+
+        var signed = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://signed.example.com/hook", ["package.publish"], Secret: "good-hmac", Description: null));
+        var broken = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://broken.example.com/hook", ["package.publish"], Secret: "bad-hmac", Description: null));
+        var unsigned = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://unsigned.example.com/hook", ["package.publish"], Secret: null, Description: null));
+
+        string corrupted = CorruptCiphertext.Envelope(ep, "bad-hmac");
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE webhook_subscription SET secret = @secret WHERE id = @id AND org_id = 'org1'",
+                new { secret = corrupted, id = broken.Id });
+        }
+
+        var deliveries = await repo.ListEnabledForEventAsync("org1", "package.publish");
+
+        Assert.Equal(
+            new[] { signed.Id, unsigned.Id }.Order(),
+            deliveries.Select(d => d.Id).Order());
+        Assert.Equal("good-hmac", deliveries.Single(d => d.Id == signed.Id).Secret);
+        Assert.Null(deliveries.Single(d => d.Id == unsigned.Id).Secret);
+
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains(broken.Id, warning.Message);
+        Assert.Contains("org1", warning.Message);
+        Assert.Contains(ProtectedSecretKinds.WebhookSecret, warning.Message);
+        Assert.DoesNotContain("bad-hmac", warning.AllText);
+        Assert.DoesNotContain(corrupted["enc:v1:".Length..], warning.AllText);
+    }
+
+    [Fact]
+    public async Task ListEnabledForEventAsync_SecretDoesNotDecrypt_RecordsADeliveryFailureOnlyOnThatSubscription()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        var healthy = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://healthy.example.com/hook", ["package.publish"], Secret: "good-hmac", Description: null));
+        var broken = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://broken.example.com/hook", ["package.publish"], Secret: "bad-hmac", Description: null));
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE webhook_subscription SET secret = @secret WHERE id = @id AND org_id = 'org1'",
+                new { secret = CorruptCiphertext.Envelope(ep, "bad-hmac"), id = broken.Id });
+        }
+
+        await repo.ListEnabledForEventAsync("org1", "package.publish");
+        await repo.ListEnabledForEventAsync("org1", "package.publish");
+
+        var after = (await repo.GetAsync("org1", broken.Id))!;
+        Assert.Equal(2, after.ConsecutiveFailures);
+        Assert.Equal("failed", after.LastStatus);
+        Assert.Equal(Clock.GetUtcNow().ToUtcIso(), after.FailingSince);
+        Assert.Contains("decrypt", after.LastError);
+        Assert.DoesNotContain("bad-hmac", after.LastError);
+
+        var untouched = (await repo.GetAsync("org1", healthy.Id))!;
+        Assert.Equal(0, untouched.ConsecutiveFailures);
+        Assert.Null(untouched.FailingSince);
+        Assert.Null(untouched.LastStatus);
+    }
+
+    [Fact]
+    public async Task FanOut_OneSubscriptionSecretDoesNotDecrypt_TheOrgsOtherSubscriptionsAreStillDelivered()
+    {
+        using var ep = MakeProtector();
+        var repo = new WebhookSubscriptionRepository(_db, ep, Clock);
+        await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://healthy.example.com/hook", ["package.publish"], Secret: "good-hmac", Description: null));
+        var broken = await repo.AddAsync("org1", new NewWebhookSubscription(
+            "https://broken.example.com/hook", ["package.publish"], Secret: "bad-hmac", Description: null));
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE webhook_subscription SET secret = @secret WHERE id = @id AND org_id = 'org1'",
+                new { secret = CorruptCiphertext.Envelope(ep, "bad-hmac"), id = broken.Id });
+        }
+
+        var handler = new RecordingDelegatingHandler();
+        var queue = new WebhookDispatchQueue(
+            repo, new WebhookDeliveryClient(new HttpClient(handler)), new OrgRepository(_db), Clock, BuildCfg(),
+            NullLogger<WebhookDispatchQueue>.Instance);
+
+        bool reachedConclusion = await queue.FanOutAsyncForTests(SampleEnvelope(), CancellationToken.None);
+
+        Assert.True(reachedConclusion);
+        Assert.Equal("https://healthy.example.com/hook", Assert.Single(handler.Requests).Url);
+    }
+
     // ── Secret round-trip ─────────────────────────────────────────────────────
 
     [Fact]

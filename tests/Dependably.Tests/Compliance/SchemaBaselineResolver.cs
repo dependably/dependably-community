@@ -92,9 +92,67 @@ internal static partial class SchemaBaselineResolver
             return new BaselineResolution(null, absence, log.ToString());
         }
 
-        string tag = PreviousReleaseTag(repo, tags, log);
-        log.AppendLine($"previous release tag: {tag}");
+        string? tag = PreviousReleaseTag(repo, tags, log);
+        if (tag is null)
+        {
+            log.AppendLine("every known release tag points at HEAD — this is the first release");
+            return new BaselineResolution(null, BaselineAbsence.NoReleaseTags, log.ToString());
+        }
 
+        log.AppendLine($"previous release tag: {tag}");
+        return ReadBaseline(repo, tag, log);
+    }
+
+    /// <summary>
+    /// Resolves the schema of every release from <paramref name="floorTag"/> up to, but not
+    /// including, this build. Each entry carries its own absence, so one unreadable tag is reported
+    /// rather than dropped. When the tag list itself cannot be established the result is a single
+    /// entry carrying that absence, read the same way as <see cref="Resolve"/>.
+    /// </summary>
+    public static IReadOnlyList<BaselineResolution> ResolveReleasesFrom(string floorTag, string? repoRoot = null)
+    {
+        string repo = repoRoot ?? SourceRoots.RepoRoot();
+        var log = new StringBuilder();
+
+        if (Git(repo, LocalTimeoutMs, "rev-parse", "--is-inside-work-tree") is not { Ok: true })
+        {
+            log.AppendLine("not a git work tree — no releases to compare against");
+            return [new BaselineResolution(null, BaselineAbsence.NotAGitRepository, log.ToString())];
+        }
+
+        (var tags, var absence) = KnownReleaseTags(repo, log);
+        var ownTags = TagsOnHead(repo);
+        var releases = tags
+            .Where(t => !ownTags.Contains(t) && Version(t).CompareTo(Version(floorTag)) >= 0)
+            .OrderBy(Version)
+            .ToList();
+        if (releases.Count == 0)
+        {
+            log.AppendLine(tags.Count == 0 && absence != BaselineAbsence.NoReleaseTags
+                ? "the release tag list could not be established — this is an unknown baseline, NOT a pre-first-release repository"
+                : $"no release from {floorTag} on precedes this build");
+            return [new BaselineResolution(null, tags.Count == 0 ? absence : BaselineAbsence.NoReleaseTags, log.ToString())];
+        }
+
+        return releases.Select(t =>
+        {
+            var tagLog = new StringBuilder(log.ToString());
+            return ReadBaseline(repo, t, tagLog);
+        }).ToList();
+    }
+
+    private static HashSet<string> TagsOnHead(string repo)
+    {
+        var pointsAtHead = Git(repo, LocalTimeoutMs, "tag", "--points-at", "HEAD", "--list", "v[0-9]*");
+        return pointsAtHead is { Ok: true }
+            ? pointsAtHead.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(t => ReleaseTagRegex().IsMatch(t)).ToHashSet(StringComparer.Ordinal)
+            : [];
+    }
+
+    // Reads one release's schema pair, fetching the tag first when a shallow clone lacks it.
+    private static BaselineResolution ReadBaseline(string repo, string tag, StringBuilder log)
+    {
         if (!EnsureTagAvailable(repo, tag, log))
         {
             return new BaselineResolution(null, BaselineAbsence.TagUnreadable, log.ToString());
@@ -193,17 +251,42 @@ internal static partial class SchemaBaselineResolver
     // The newest release reachable from HEAD is the release a cutover would run against. When git
     // cannot answer that (shallow history), the highest version among the known tags is the closest
     // available stand-in.
-    private static string PreviousReleaseTag(string repo, List<string> tags, StringBuilder log)
+    //
+    // A release tag on HEAD itself is this build, not the release before it: main's pipeline for a
+    // release commit can run after the tag lands, and comparing the schema with itself passes
+    // having checked nothing. Those tags are excluded from both paths. Null means every known
+    // release is this build, i.e. the first release.
+    private static string? PreviousReleaseTag(string repo, List<string> tags, StringBuilder log)
     {
-        var described = Git(repo, LocalTimeoutMs, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", "HEAD");
+        var ownTags = TagsOnHead(repo);
+        if (ownTags.Count > 0)
+        {
+            log.AppendLine($"release tag(s) on HEAD, excluded as this build: {string.Join(", ", ownTags.Order(StringComparer.Ordinal))}");
+        }
+
+        var describeArgs = new List<string> { "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*" };
+        foreach (string own in ownTags)
+        {
+            describeArgs.Add("--exclude");
+            describeArgs.Add(own);
+        }
+
+        describeArgs.Add("HEAD");
+        var described = Git(repo, LocalTimeoutMs, [.. describeArgs]);
         string? reachable = described is { Ok: true } ? described.Output.Trim() : null;
         if (reachable is not null && ReleaseTagRegex().IsMatch(reachable))
         {
             return reachable;
         }
 
+        var candidates = tags.Where(t => !ownTags.Contains(t)).ToList();
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
         log.AppendLine("no reachable tag from HEAD (shallow history) — using the highest known release tag");
-        return tags.OrderByDescending(Version).First();
+        return candidates.OrderByDescending(Version).First();
     }
 
     private static (int Major, int Minor, int Patch) Version(string tag)

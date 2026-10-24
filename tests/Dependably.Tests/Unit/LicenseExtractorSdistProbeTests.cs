@@ -55,6 +55,65 @@ public sealed class LicenseExtractorSdistProbeTests
     }
 
     [Fact]
+    public void Sdist_UnknownExtension_TarProbeSkipsDirectoriesAndOtherFilesBeforePkgInfo()
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+        using (var tar = new TarWriter(gz, leaveOpen: true))
+        {
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.Directory, "pkg-1.0/"));
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "pkg-1.0/README.md")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes("# pkg")),
+            });
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "pkg-1.0/PKG-INFO")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes(PkgInfo)),
+            });
+        }
+
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(ms.ToArray()), "pkg-1.0.sdist");
+
+        Assert.Equal(new[] { "MIT" }, result.Spdx);
+    }
+
+    [Fact]
+    public void Sdist_UnknownExtension_TarWithoutPkgInfoAndNotAZip_ReturnsEmpty()
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+        using (var tar = new TarWriter(gz, leaveOpen: true))
+        {
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "pkg-1.0/setup.py")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes("print('hi')")),
+            });
+        }
+
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(ms.ToArray()), "pkg-1.0.sdist");
+
+        Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
+    [Fact]
+    public void Sdist_TarGzExtension_WithNoPkgInfo_ReturnsEmptyWithoutTryingZip()
+    {
+        using var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+        using (var tar = new TarWriter(gz, leaveOpen: true))
+        {
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "pkg-1.0/setup.py")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes("print('hi')")),
+            });
+        }
+
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(ms.ToArray()), "pkg-1.0.tar.gz");
+
+        Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
+    [Fact]
     public void Wheel_NonSeekableStream_IsBufferedBeforeZipOpen()
     {
         // A non-seekable upstream forces OpenZipArchive's buffering branch.

@@ -56,6 +56,17 @@ public sealed class SchemaUpgradeFromPreviousReleasePostgresTests
         await using (var conn = await pg.Store.OpenAsync())
         {
             await conn.ExecuteAsync(resolution.Baseline.PostgresSql);
+
+            // That slot has booted, so its ledger holds the upgrade-floor sentinel. Only the
+            // sentinel is seeded: every other one-time migration still runs against the previous
+            // release's shape, which is the wider test.
+            await conn.ExecuteAsync(
+                """
+                CREATE TABLE IF NOT EXISTS _applied_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT (to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')));
+                INSERT INTO _applied_migrations (name) VALUES ('expand_usage_daily_meter_check_cache_storage');
+                """);
         }
 
         // The whole point: this is the boot an operator performs when they roll this build out.

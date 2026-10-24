@@ -15,6 +15,20 @@ public sealed class OciManifestParserTests
     private static byte[] Bytes(string s) => Encoding.UTF8.GetBytes(s);
 
     [Fact]
+    public void SniffManifestMediaType_ReadsAManifestPrefixedWithAUtf8ByteOrderMark()
+    {
+        byte[] manifest = Bytes("""
+            {"schemaVersion":2,"config":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+             "layers":[{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
+            """);
+        byte[] withBom = [0xEF, 0xBB, 0xBF, .. manifest];
+
+        Assert.Equal("application/vnd.oci.image.manifest.v1+json", OciManifestParser.SniffManifestMediaType(manifest));
+        Assert.Equal("application/vnd.oci.image.manifest.v1+json", OciManifestParser.SniffManifestMediaType(withBom));
+        Assert.Null(OciManifestParser.SniffManifestMediaType([0xEF, 0xBB, 0xBF, .. Bytes("[1,2]")]));
+    }
+
+    [Fact]
     public void ParseReferences_ImageManifest_CollectsConfigAndLayers()
     {
         string json = """

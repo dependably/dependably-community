@@ -67,6 +67,7 @@ internal static class ProtocolStartupExtensions
         // forking the gate logic. PackageLookupCache is its own singleton (a striped
         // single-flight + TTL cache) so it can be constructed and asserted on independently.
         builder.Services.AddSingleton<PackageLookupCache>();
+        builder.Services.AddSingleton<OsvQueryCache>();
         builder.Services.AddSingleton<PackageLookupService>();
 
         // Artefact-provenance verifiers. All ecosystems resolve trust anchors per-org at
@@ -127,6 +128,31 @@ internal static class ProtocolStartupExtensions
         builder.Services.AddSingleton<OciBlobSweepService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<OciBlobSweepService>());
 
+        // OCI image scanning: the queue the push and pull paths feed, and the per-org coverage the
+        // version status reads. Off unless OCI_SCAN_ENABLED; the scan API itself is management-only.
+        builder.Services.AddSingleton(sp => Dependably.Infrastructure.OciScan.OciScanOptions.FromConfiguration(
+            sp.GetRequiredService<IConfiguration>()));
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciScanRepository>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.IOciScanCoverage,
+            Dependably.Infrastructure.OciScan.OciScanCoverage>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciScanDetailReader>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciScanEnqueuer>();
+        // The OCI pull gate's facts read: owner resolution through the org's own catalogue and
+        // reference graph, and the org's own scan facts. Every manifest-returning OCI path uses it.
+        builder.Services.AddSingleton<OciPullGateResolver>();
+        // On an edge node: the OCI scan posture each org's master last reported.
+        builder.Services.AddSingleton<Dependably.Infrastructure.Edge.EdgeOciScanPostureStore>();
+        // Maps a scanned image's platforms to the manifests they are, from its stored index.
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciPlatformManifestReader>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciScanSweepService>();
+        // Not scheduled on an edge node: it hosts no scan API, so nothing would drain the jobs the
+        // sweep queues. (Its tick also stands down there through the edge job allowlist.)
+        if (!new EdgeMode(builder.Configuration).IsEdge)
+        {
+            builder.Services.AddHostedService(sp =>
+                sp.GetRequiredService<Dependably.Infrastructure.OciScan.OciScanSweepService>());
+        }
+
         // Upload limit resolver
         builder.Services.AddSingleton<IUploadLimitResolver, UploadLimitResolver>();
     }
@@ -165,6 +191,11 @@ internal static class ProtocolStartupExtensions
         {
             // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
             UseProxy = false,
+            // UseCookies=false: the pooled handler is shared by every org, so a session cookie an
+            // upstream issues in answer to one org's credential would ride along on another org's
+            // request to that host, and a cookie without the Secure flag would follow an http://
+            // link the upstream names. Upstream credentials travel only as the pinned header.
+            UseCookies = false,
             ConnectTimeout = TimeSpan.FromSeconds(30),
             MaxConnectionsPerServer = UpstreamMaxConnectionsPerServer,
             AllowAutoRedirect = false,
@@ -207,6 +238,9 @@ internal static class ProtocolStartupExtensions
         {
             // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
             UseProxy = false,
+            // UseCookies=false: as on the "upstream" client, a shared cookie jar would carry one
+            // org's upstream session to another org's pull.
+            UseCookies = false,
             ConnectTimeout = TimeSpan.FromSeconds(30),
             MaxConnectionsPerServer = OciUpstreamMaxConnectionsPerServer,
             AllowAutoRedirect = false,
@@ -240,6 +274,7 @@ internal static class ProtocolStartupExtensions
         {
             // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
             UseProxy = false,
+            UseCookies = false,
             AllowAutoRedirect = false,
             ConnectCallback = sp.GetRequiredService<SsrfConnectCallback>().ConnectAsync,
         });
@@ -251,6 +286,7 @@ internal static class ProtocolStartupExtensions
         {
             // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
             UseProxy = false,
+            UseCookies = false,
             AllowAutoRedirect = false,
             ConnectTimeout = TimeSpan.FromSeconds(5),
             // SSRF defense-in-depth: HEALTHCHECK_PING_URL is operator-supplied, but a

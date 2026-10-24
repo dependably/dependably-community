@@ -17,6 +17,12 @@ internal static partial class InfrastructureStartupExtensions
         // registered after this one so it runs once first-boot has written jwt_secret.
         builder.Services.AddHostedService<CoreStartupService>();
 
+        // Stored-secret verification: the on-demand verifier behind the system/instance verify
+        // endpoints, and a one-shot background run of it once the host is listening. Never blocks
+        // or fails startup; SECRETS_VERIFY_ON_STARTUP=false turns the boot run off.
+        builder.Services.AddSingleton<Dependably.Infrastructure.Identity.ProtectedSecretVerifier>();
+        builder.Services.AddHostedService<Dependably.Infrastructure.Identity.ProtectedSecretBootCheck>();
+
         // Shared-SQLite single-writer guard. CoreStartupService claims the lock before the server
         // accepts traffic (fail-fast on a live peer); this hosted service keeps the heartbeat alive
         // and releases the row on graceful shutdown. Self-skips for Postgres and in-memory stores.
@@ -38,6 +44,9 @@ internal static partial class InfrastructureStartupExtensions
         builder.Services.AddSingleton<Dependably.Infrastructure.Health.HealthService>();
         builder.Services.AddHostedService<HealthcheckPinger>();
 
+        // Read DISABLE_BACKGROUND_JOBS here, before the host is built, so an unrecognised value
+        // stops startup at once rather than whenever IAirGapMode is first resolved.
+        DisableBackgroundJobsSetting.FromConfiguration(builder.Configuration);
         builder.Services.AddSingleton<IAirGapMode, AirGapMode>();
         builder.Services.AddSingleton<IEdgeMode, EdgeMode>();
         // Passive master-reachability tracker fed at the UpstreamClient fetch boundary; read only

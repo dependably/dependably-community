@@ -44,6 +44,8 @@ public sealed class HealthService
             // Hourly job (CACHE_SIZE_ALERT_SCHEDULE default); 3h tolerates one missed occurrence,
             // matching usage-rollup-hourly's own hourly-cadence threshold.
             ["cache-size-alert"] = TimeSpan.FromHours(3),
+            // Hourly sweep (OCI_SCAN_SWEEP_SCHEDULE default); the same 3h tolerance.
+            ["oci-scan-sweep"] = TimeSpan.FromHours(3),
         };
 
     // Default staleness threshold for any registry job not in JobStalenessThresholds.
@@ -80,6 +82,7 @@ public sealed class HealthService
             "usage-storage-snapshot",
             "usage-reconcile-weekly",
             "cache-size-alert",
+            "oci-scan-sweep",
         };
 
     private readonly ReadinessAggregator _readiness;
@@ -152,6 +155,55 @@ public sealed class HealthService
         bool stagingBelowThreshold = stagingTotal > 0
             && stagingAvailable < stagingTotal / 10; // < 10% free
 
+        var (cacheSizeWarnBytes, cacheSizeLastBytes, cacheSizeLastMeasuredAt, cacheAboveThreshold) =
+            await ReadCacheSizeAsync(ct);
+
+        // ── Tenant snapshots ─────────────────────────────────────────────────
+        // xtenant: system-admin cross-tenant operator view — counting stale snapshots across all tenants.
+        int staleSnapshotCount = await CountStaleSnapshotsAsync(now, ct);
+
+        // ── Trust-anchor integrity ───────────────────────────────────────────
+        // xtenant: system-admin cross-tenant operator view — counting suspect anchors across all tenants.
+        int suspectAnchorCount = await CountSuspectTrustAnchorsAsync(ct);
+
+        // ── Overall rollup ───────────────────────────────────────────────────
+        // Only a required dependency drives "down" — the same classification /ready applies.
+        // A failing non-required dependency (blob store, Redis on a full host) is real
+        // degradation an operator must see, but the instance still serves.
+        bool anyRequiredDepError = report.Checks.Any(c => c.Required && !c.Ok);
+        bool anySoftDepError = report.Checks.Any(c => !c.Required && !c.Ok);
+        bool anyJobBad = jobs.Any(j => j.Status is "failing" or "stale" or "degraded");
+        // suspectAnchorCount is deliberately absent from this expression. A suspect trust anchor
+        // is a latent audit finding an operator resolves by hand, not a live outage — the same
+        // visible-but-non-degrading treatment Tenants.NeedAttention gets.
+        bool degraded = anySoftDepError || anyJobBad || stagingBelowThreshold || staleSnapshotCount > 0
+            || cacheAboveThreshold;
+
+        string overall = anyRequiredDepError ? "down" : degraded ? "degraded" : "healthy";
+
+        return new HealthReport(
+            Overall: overall,
+            Dependencies: dependencies,
+            Jobs: jobs,
+            Storage: new StorageStatus(
+                BlobSizesByTier: blobSizes,
+                StagingAvailableBytes: stagingAvailable,
+                StagingUsedBytes: stagingUsed,
+                StagingBelowThreshold: stagingBelowThreshold,
+                CacheSizeWarnBytes: cacheSizeWarnBytes,
+                CacheAboveThreshold: cacheAboveThreshold,
+                CacheSizeLastBytes: cacheSizeLastBytes,
+                CacheSizeLastMeasuredAt: cacheSizeLastMeasuredAt),
+            Tenants: new TenantsSummary(
+                NeedAttention: await CountTenantsNeedingAttentionAsync(ct)),
+            TrustAnchors: new TrustAnchorsSummary(SuspectCount: suspectAnchorCount),
+            StaleSnapshotCount: staleSnapshotCount,
+            CapturedAt: now);
+    }
+
+    private async Task<(long WarnBytes, long? LastBytes, DateTimeOffset? LastMeasuredAt, bool AboveThreshold)>
+        ReadCacheSizeAsync(CancellationToken ct)
+    {
         // Never re-measured here: CacheSizeAlertService is the only writer of the cache-tier
         // figure (a DB-derived sum — see its own doc comment for why that is not
         // dependably.blob_store.size_bytes{tier="cache"}), and this rollup only reads the last
@@ -189,47 +241,7 @@ public sealed class HealthService
             && cacheSizeLastBytes is long cacheBytesForThreshold
             && cacheBytesForThreshold >= cacheSizeWarnBytes;
 
-        // ── Tenant snapshots ─────────────────────────────────────────────────
-        // xtenant: system-admin cross-tenant operator view — counting stale snapshots across all tenants.
-        int staleSnapshotCount = await CountStaleSnapshotsAsync(now, ct);
-
-        // ── Trust-anchor integrity ───────────────────────────────────────────
-        // xtenant: system-admin cross-tenant operator view — counting suspect anchors across all tenants.
-        int suspectAnchorCount = await CountSuspectTrustAnchorsAsync(ct);
-
-        // ── Overall rollup ───────────────────────────────────────────────────
-        // Only a required dependency drives "down" — the same classification /ready applies.
-        // A failing non-required dependency (blob store, Redis on a full host) is real
-        // degradation an operator must see, but the instance still serves.
-        bool anyRequiredDepError = report.Checks.Any(c => c.Required && !c.Ok);
-        bool anySoftDepError = report.Checks.Any(c => !c.Required && !c.Ok);
-        bool anyJobBad = jobs.Any(j => j.Status is "failing" or "stale");
-        // suspectAnchorCount is deliberately absent from this expression. A suspect trust anchor
-        // is a latent audit finding an operator resolves by hand, not a live outage — the same
-        // visible-but-non-degrading treatment Tenants.NeedAttention gets.
-        bool degraded = anySoftDepError || anyJobBad || stagingBelowThreshold || staleSnapshotCount > 0
-            || cacheAboveThreshold;
-
-        string overall = anyRequiredDepError ? "down" : degraded ? "degraded" : "healthy";
-
-        return new HealthReport(
-            Overall: overall,
-            Dependencies: dependencies,
-            Jobs: jobs,
-            Storage: new StorageStatus(
-                BlobSizesByTier: blobSizes,
-                StagingAvailableBytes: stagingAvailable,
-                StagingUsedBytes: stagingUsed,
-                StagingBelowThreshold: stagingBelowThreshold,
-                CacheSizeWarnBytes: cacheSizeWarnBytes,
-                CacheAboveThreshold: cacheAboveThreshold,
-                CacheSizeLastBytes: cacheSizeLastBytes,
-                CacheSizeLastMeasuredAt: cacheSizeLastMeasuredAt),
-            Tenants: new TenantsSummary(
-                NeedAttention: await CountTenantsNeedingAttentionAsync(ct)),
-            TrustAnchors: new TrustAnchorsSummary(SuspectCount: suspectAnchorCount),
-            StaleSnapshotCount: staleSnapshotCount,
-            CapturedAt: now);
+        return (cacheSizeWarnBytes, cacheSizeLastBytes, cacheSizeLastMeasuredAt, cacheAboveThreshold);
     }
 
     // Derives a single job's health status from its latest run row, falling back to the most
@@ -260,6 +272,17 @@ public sealed class HealthService
             long? ageSeconds = ComputeAgeSeconds(latestRun.FinishedAt, now);
             // utcformat-ok: /health JSON wire field, not a DB write.
             return new JobStatus(Name: jobName, Status: "failing", AgeSeconds: ageSeconds,
+                LastRunAt: latestRun.FinishedAt.ToString("O"),
+                LastOutcome: latestRun.Outcome);
+        }
+
+        // latest outcome == degraded → the run completed but kept its previous data (a rejected
+        // threat feed). Reported as its own state so a green job never sits beside data that has
+        // stopped updating.
+        if (string.Equals(latestRun.Outcome, "degraded", StringComparison.OrdinalIgnoreCase))
+        {
+            // utcformat-ok: /health JSON wire field, not a DB write.
+            return new JobStatus(Name: jobName, Status: "degraded", AgeSeconds: ComputeAgeSeconds(latestRun.FinishedAt, now),
                 LastRunAt: latestRun.FinishedAt.ToString("O"),
                 LastOutcome: latestRun.Outcome);
         }
@@ -415,10 +438,10 @@ public sealed record DependencyStatus(string Name, string Status, string? Error,
 
 /// <summary>Per-job health status in the <see cref="HealthReport"/>.</summary>
 /// <param name="Name">Registered job name (e.g. "vuln-scan").</param>
-/// <param name="Status">"ok", "stale", "failing", or "disabled".</param>
+/// <param name="Status">"ok", "stale", "failing", "degraded", or "disabled".</param>
 /// <param name="AgeSeconds">Seconds since the last successful run. Null when no success run exists or the job is disabled.</param>
 /// <param name="LastRunAt">ISO 8601 UTC timestamp of the last run's finished_at. Null when no run exists or the job is disabled.</param>
-/// <param name="LastOutcome">Outcome string from the last run row ("success", "server_error", "cancelled"). Null when no run exists.</param>
+/// <param name="LastOutcome">Outcome string from the last run row ("success", "degraded", "server_error", "cancelled"). Null when no run exists.</param>
 public sealed record JobStatus(
     string Name,
     string Status,

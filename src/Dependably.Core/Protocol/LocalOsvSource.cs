@@ -37,6 +37,9 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     private volatile Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>> _index =
         new(EcosystemNameComparer.Instance);
 
+    // Index by advisory id, for TryGetAdvisoryAsync. Replaced with _index on every reload.
+    private volatile Dictionary<string, OsvAdvisory> _byId = new(StringComparer.OrdinalIgnoreCase);
+
     // Reachability signal for TryQueryAsync: true once a reload has successfully consulted
     // OSV_LOCAL_PATH (even if the resulting index is empty or individual files failed to
     // parse); false only when the configured directory itself does not exist — the
@@ -52,6 +55,11 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     // no-directory early return, so a dump that stops carrying distro feeds is reflected here
     // rather than sticking at whatever the previous reload found.
     private volatile bool _rpmDistroCoverageLoaded;
+
+    // The distinct affected-package ecosystems the current index holds, so a release-scoped query
+    // and HasCoverageFor can tell "this dump has no feed for that release or ecosystem" from "this
+    // dump has the feed and found nothing". Replaced with the index on every reload.
+    private volatile HashSet<string> _loadedEcosystems = new(StringComparer.OrdinalIgnoreCase);
 
     public LocalOsvSource(IConfiguration config, ILogger<LocalOsvSource> logger, TimeProvider time)
     {
@@ -127,6 +135,17 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         return new OsvQueryResult(advisories, Reached: _sourceReachable);
     }
 
+    /// <summary>
+    /// One advisory by id from the loaded dumps. Reached follows <see cref="TryQueryAsync"/>: false
+    /// only when the dump directory itself is missing.
+    /// </summary>
+    public async Task<OsvIdLookupResult> TryGetAdvisoryAsync(string id, CancellationToken ct = default)
+    {
+        await _initialLoad.Value;
+        return new OsvIdLookupResult(
+            _byId.TryGetValue(id, out var advisory) ? advisory : null, Reached: _sourceReachable);
+    }
+
     public async Task<List<List<OsvAdvisory>>> QueryBatchAsync(
         IReadOnlyList<string> purls, CancellationToken ct = default)
     {
@@ -145,6 +164,34 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     }
 
     /// <summary>
+    /// Release-scoped query answered from the dump: the advisories under the scope's feed whose
+    /// enumerated versions or ECOSYSTEM ranges include the version, evaluated with the distro's
+    /// own ordering. <see cref="OsvScopedQueryResult.Covered"/> is false when no loaded advisory
+    /// is filed under the release, so a dump that never carried that feed cannot read as clean.
+    /// </summary>
+    public async Task<OsvScopedQueryResult> TryQueryDistroPackageAsync(
+        DistroScope scope, string name, string version, CancellationToken ct = default)
+    {
+        await _initialLoad.Value;
+        if (!_sourceReachable)
+        {
+            return new OsvScopedQueryResult([], Reached: false, Covered: false);
+        }
+
+        if (!_loadedEcosystems.Any(e => DistroScopes.Covers(scope.OsvEcosystem, e)))
+        {
+            return new OsvScopedQueryResult([], Reached: true, Covered: false);
+        }
+
+        var bucket = (scope.IsApk ? "alpine" : "rpm", name.ToLowerInvariant());
+        return new OsvScopedQueryResult(
+            _index.TryGetValue(bucket, out var list)
+                ? list.Where(a => DistroScopes.IsAffected(a, scope, name, version)).ToList()
+                : [],
+            Reached: true);
+    }
+
+    /// <summary>
     /// Same batch query as <see cref="QueryBatchAsync"/>, but reports whether the local dump
     /// directory was actually consulted — mirroring <see cref="TryQueryAsync"/>. Reached is false
     /// only when <c>OSV_LOCAL_PATH</c> itself is missing (unavailable or misconfigured), which
@@ -160,18 +207,39 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     /// <summary>
     /// Defers to the static <see cref="OsvFeedCoverage.HasAdvisoryFeed"/> gate first — an
     /// ecosystem it already excludes (OCI, Terraform) stays excluded here regardless of what is
-    /// loaded. For every ecosystem the static gate allows other than RPM, coverage is
-    /// unconditionally true (unchanged from before this member existed): those ecosystems index
-    /// under their own name or a well-known aggregate bucket (Alpine), so "the dump loaded" has
-    /// always implied "this ecosystem could match". RPM is the one exception — see the field
-    /// doc on <see cref="_rpmDistroCoverageLoaded"/>.
+    /// loaded. Past that, coverage is what the current dump actually holds: a sideloaded dump may
+    /// carry only some ecosystems' feeds, and a query against a missing feed answers empty, which
+    /// cannot be told from a clean result. A PURL ecosystem is covered when the index holds an
+    /// advisory under its OSV ecosystem name (any <c>Alpine:*</c> release for apk); RPM, which has
+    /// no OSV ecosystem of its own, is covered when a known distro feed is loaded (see
+    /// <see cref="_rpmDistroCoverageLoaded"/>). An absent ecosystem keeps the static answer.
     /// </summary>
     public async Task<bool> HasCoverageFor(string? ecosystem)
     {
         await _initialLoad.Value;
 
-        return OsvFeedCoverage.HasAdvisoryFeed(ecosystem)
-            && (!string.Equals(ecosystem, "rpm", StringComparison.OrdinalIgnoreCase) || _rpmDistroCoverageLoaded);
+        if (!OsvFeedCoverage.HasAdvisoryFeed(ecosystem))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(ecosystem))
+        {
+            return true;
+        }
+
+        if (string.Equals(ecosystem, "rpm", StringComparison.OrdinalIgnoreCase))
+        {
+            return _rpmDistroCoverageLoaded;
+        }
+
+        // Stored rows name Go "go" while its purl type is "golang"; both map to OSV's "Go".
+        string osvEcosystem = NormalizeEcosystem(
+            string.Equals(ecosystem, "go", StringComparison.OrdinalIgnoreCase) ? "golang" : ecosystem);
+        var loaded = _loadedEcosystems;
+        return string.Equals(osvEcosystem, "Alpine", StringComparison.OrdinalIgnoreCase)
+            ? loaded.Any(e => e.StartsWith("alpine", StringComparison.OrdinalIgnoreCase))
+            : loaded.Contains(osvEcosystem);
     }
 
     /// <summary>
@@ -184,12 +252,15 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         {
             _logger.LogWarning("OSV local path not found: {Path}", _path);
             _index = new Dictionary<(string, string), List<OsvAdvisory>>(EcosystemNameComparer.Instance);
+            _byId = new Dictionary<string, OsvAdvisory>(StringComparer.OrdinalIgnoreCase);
             _sourceReachable = false;
             _rpmDistroCoverageLoaded = false;
+            _loadedEcosystems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             return;
         }
 
         var newIndex = new Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>>(EcosystemNameComparer.Instance);
+        var newById = new Dictionary<string, OsvAdvisory>(StringComparer.OrdinalIgnoreCase);
         int loaded = 0;
         int errors = 0;
         bool rpmDistroCoverageFound = false;
@@ -201,7 +272,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
                 break;
             }
 
-            var result = await TryIndexFileAsync(file, newIndex, ct);
+            var result = await TryIndexFileAsync(file, newIndex, newById, ct);
             if (result.Success)
             {
                 loaded++;
@@ -214,6 +285,8 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
         }
 
         _index = newIndex;
+        _byId = newById;
+        _loadedEcosystems = newIndex.Keys.Select(k => k.Ecosystem).ToHashSet(StringComparer.OrdinalIgnoreCase);
         _sourceReachable = true;
         _rpmDistroCoverageLoaded = rpmDistroCoverageFound;
         _logger.LogInformation(
@@ -233,6 +306,7 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
     private async Task<FileIndexResult> TryIndexFileAsync(
         string file,
         Dictionary<(string Ecosystem, string Name), List<OsvAdvisory>> index,
+        Dictionary<string, OsvAdvisory> byId,
         CancellationToken ct)
     {
         try
@@ -247,6 +321,11 @@ public sealed class LocalOsvSource : IOsvSource, IDisposable
             }
 
             var advisory = BuildAdvisory(raw, content);
+            if (advisory.Id.Length > 0)
+            {
+                byId.TryAdd(advisory.Id, advisory);
+            }
+
             bool foundRpmDistroCoverage = false;
             foreach (var pkg in advisory.AffectedPackages)
             {

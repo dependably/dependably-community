@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Infrastructure;
 
@@ -93,5 +94,29 @@ public static class ReservedSlugs
             envValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Select(s => s.ToLowerInvariant()),
             StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The reserved set every caller shares: <c>RESERVED_SUBDOMAINS</c> plus the label of the
+    /// system-admin host directly below the tenant domain, in multi mode only (see
+    /// <c>BaseUrlHostHelper.ApexReservedLabel</c>). Resolution and tenant creation both use it so
+    /// a slug is accepted or refused identically in both places.
+    /// </summary>
+    public static IReadOnlySet<string> ForConfig(IConfiguration config)
+    {
+        var set = new HashSet<string>(ParseExtra(config["RESERVED_SUBDOMAINS"]), StringComparer.Ordinal);
+        // Only multi mode routes tenants by subdomain, so only multi mode has a host a slug could shadow.
+        bool multi = string.Equals((config["DEPLOYMENT_MODE"] ?? "single").Trim(), "multi", StringComparison.OrdinalIgnoreCase);
+        string? label = multi
+            ? BaseUrlHostHelper.ApexReservedLabel(
+                BaseUrlHostHelper.ResolveApexHost(config),
+                BaseUrlHostHelper.ResolveTenantDomain(config))
+            : null;
+        if (label is not null)
+        {
+            set.Add(label);
+        }
+
+        return set;
     }
 }

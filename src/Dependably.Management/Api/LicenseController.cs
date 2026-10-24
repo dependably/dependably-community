@@ -23,7 +23,8 @@ namespace Dependably.Api;
 ///
 /// The allowlist carries both non-denied dispositions: 'allowed' is a blanket yes and
 /// 'conditional' means the licence is acceptable only in some contexts, with the condition
-/// recorded in the entry's note. Both serve and publish; only the blocklist refuses.
+/// recorded in the entry's note. Both serve and publish. The blocklist always refuses; under
+/// block mode a licence on neither list is refused too, so an empty allowlist refuses everything.
 /// </summary>
 [ApiController]
 [Authorize]
@@ -34,19 +35,22 @@ public sealed class LicenseController : ControllerBase
     private readonly OrgAccessGuard _guard;
     private readonly ProblemResults _problems;
     private readonly AuditRepository _audit;
+    private readonly Dependably.Infrastructure.Caching.MetadataInvalidationCoordinator _invalidation;
 
     public LicenseController(
         LicenseRepository licenses,
         OrgRepository orgs,
         OrgAccessGuard guard,
         ProblemResults problems,
-        AuditRepository audit)
+        AuditRepository audit,
+        Dependably.Infrastructure.Caching.MetadataInvalidationCoordinator invalidation)
     {
         _licenses = licenses;
         _orgs = orgs;
         _guard = guard;
         _problems = problems;
         _audit = audit;
+        _invalidation = invalidation;
     }
 
     private string? GetUserId() =>
@@ -67,7 +71,7 @@ public sealed class LicenseController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         var allowlist = await _licenses.GetAllowlistAsync(orgId, ct);
@@ -97,7 +101,7 @@ public sealed class LicenseController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
         var entries = await _licenses.GetReviewQueueAsync(orgId, includeDeprecated, ct);
         return Ok(entries);
     }
@@ -129,9 +133,14 @@ public sealed class LicenseController : ControllerBase
             return _problems.ValidationErrorActionKey("publish_mode", "error.license.publishModeInvalid");
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         await _orgs.UpsertLicensePolicyModeAsync(orgId, req.Mode, req.PublishMode, ct);
+
+        // The serve-path licence gate and every cached package-lookup verdict read this mode.
+        // Expire what this org has cached from its settings, here and on every peer replica,
+        // so neither keeps answering under the previous mode until its TTL.
+        _invalidation.InvalidateOrg(orgId);
 
         await _audit.LogAsync("license_policy_mode_changed", orgId, GetUserId(),
             actorKind: ActorKinds.User,
@@ -156,7 +165,7 @@ public sealed class LicenseController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         var entries = await _licenses.GetAllowlistAsync(orgId, ct);
         return Ok(entries);
@@ -189,7 +198,7 @@ public sealed class LicenseController : ControllerBase
             return _problems.ValidationErrorActionKey("note", "error.license.noteTooLong");
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
         string? note = NormalizeNote(req.Note);
         string? userId = GetUserId();
 
@@ -199,6 +208,11 @@ public sealed class LicenseController : ControllerBase
         {
             return _problems.ConflictActionKeyFormat("error.license.allowlistDuplicate", req.LicenseSpdx);
         }
+
+        // Every cached package-lookup verdict was decided against the previous lists. Expire
+        // what this org has cached, here and on every peer replica, so the next lookup is
+        // decided against the list as it now stands rather than waiting out its TTL.
+        _invalidation.InvalidateOrg(orgId);
 
         await _audit.LogAsync("license_allowlist_added", orgId, userId,
             actorKind: ActorKinds.User,
@@ -232,7 +246,7 @@ public sealed class LicenseController : ControllerBase
             return _problems.ValidationErrorActionKey("note", "error.license.noteTooLong");
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         var entry = await _licenses.UpdateAllowlistAsync(
             orgId, spdx, req.Disposition, req.Note.IsPresent, NormalizeNote(req.Note.Value), ct);
@@ -240,6 +254,8 @@ public sealed class LicenseController : ControllerBase
         {
             return NotFound();
         }
+
+        _invalidation.InvalidateOrg(orgId);
 
         await _audit.LogAsync("license_allowlist_updated", orgId, GetUserId(),
             actorKind: ActorKinds.User,
@@ -262,13 +278,15 @@ public sealed class LicenseController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         bool removed = await _licenses.RemoveAllowlistAsync(orgId, spdx, ct);
         if (!removed)
         {
             return NotFound();
         }
+
+        _invalidation.InvalidateOrg(orgId);
 
         await _audit.LogAsync("license_allowlist_removed", orgId, GetUserId(),
             actorKind: ActorKinds.User,
@@ -292,7 +310,7 @@ public sealed class LicenseController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         var entries = await _licenses.GetBlocklistAsync(orgId, ct);
         return Ok(entries);
@@ -319,7 +337,7 @@ public sealed class LicenseController : ControllerBase
             return _problems.ValidationErrorActionKey("note", "error.license.noteTooLong");
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
         string? note = NormalizeNote(req.Note);
         string? userId = GetUserId();
 
@@ -328,6 +346,8 @@ public sealed class LicenseController : ControllerBase
         {
             return _problems.ConflictActionKeyFormat("error.license.blocklistDuplicate", req.LicenseSpdx);
         }
+
+        _invalidation.InvalidateOrg(orgId);
 
         await _audit.LogAsync("license_blocklist_added", orgId, userId,
             actorKind: ActorKinds.User,
@@ -354,7 +374,7 @@ public sealed class LicenseController : ControllerBase
             return _problems.ValidationErrorActionKey("note", "error.license.noteTooLong");
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         var entry = await _licenses.UpdateBlocklistAsync(
             orgId, spdx, req.Note.IsPresent, NormalizeNote(req.Note.Value), ct);
@@ -362,6 +382,8 @@ public sealed class LicenseController : ControllerBase
         {
             return NotFound();
         }
+
+        _invalidation.InvalidateOrg(orgId);
 
         await _audit.LogAsync("license_blocklist_updated", orgId, GetUserId(),
             actorKind: ActorKinds.User,
@@ -382,13 +404,15 @@ public sealed class LicenseController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         bool removed = await _licenses.RemoveBlocklistAsync(orgId, spdx, ct);
         if (!removed)
         {
             return NotFound();
         }
+
+        _invalidation.InvalidateOrg(orgId);
 
         await _audit.LogAsync("license_blocklist_removed", orgId, GetUserId(),
             actorKind: ActorKinds.User,

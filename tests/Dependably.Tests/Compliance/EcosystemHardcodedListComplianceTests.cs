@@ -137,7 +137,12 @@ public sealed partial class EcosystemHardcodedListComplianceTests
             "opaque black — instead of var(--eco-{eco}). Add \".slice-{eco} { fill: var(--eco-{eco}); }\".");
     }
 
-    private static HashSet<string> ParseEcosystemVocabulary()
+    /// <summary>
+    /// The shared ecosystem vocabulary, parsed from <c>ECOSYSTEMS</c> in
+    /// <c>web/src/lib/ecosystems.js</c>. Other gates that pin a value set to the vocabulary read
+    /// it through here rather than restating the list.
+    /// </summary>
+    internal static HashSet<string> ParseEcosystemVocabulary()
     {
         string source = ReadWebFile(Path.Combine("lib", "ecosystems.js"));
         var match = EcosystemVocabularyRegex().Match(source);

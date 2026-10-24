@@ -402,13 +402,25 @@ public sealed class CacheArtifactRepository
     }
 
     /// <summary>
-    /// Returns distinct (ecosystem, name, org_id) groups in <c>cache_artifact</c> whose
-    /// <c>deprecation_checked_at</c> is stale — never checked or checked more than
-    /// <paramref name="ageHours"/> ago. Ordered oldest-first so a partial run still makes
-    /// progress on the most stale packages. Excludes tenants in soft-delete state.
-    /// npm/PyPI groups are refreshed for deprecation + upstream-latest; NuGet/Maven groups have no
-    /// per-version deprecation signal and are refreshed for upstream-latest only (the same
-    /// <c>deprecation_checked_at</c> column stamps "we did an upstream pass" for both).
+    /// Returns distinct (ecosystem, name, org_id) groups whose refresh is due for that org — any of
+    /// the org's <c>tenant_artifact_access</c> rows under the name carries a
+    /// <c>refresh_checked_at</c> that is NULL or older than <paramref name="ageHours"/>. Groups with
+    /// a never-processed row come first, then the rest oldest-first, so a partial run still makes
+    /// progress on the most stale groups; ties break on (ecosystem, name, org_id) so the cut-off is
+    /// the same on SQLite and Postgres. Excludes tenants in soft-delete state.
+    /// The ecosystem list is <see cref="DeprecationRefreshEcosystems.All"/>. npm/PyPI groups are
+    /// refreshed for deprecation + upstream-latest; Hex groups read both from the signed upstream
+    /// package resource (a retirement is Hex's deprecation), and an upstream with no configured
+    /// public key is skipped rather than read; NuGet/Maven groups have no per-version deprecation
+    /// signal and are refreshed for upstream-latest only.
+    ///
+    /// Staleness is per org, not read from the shared <c>cache_artifact.deprecation_checked_at</c>.
+    /// Orgs that cache the same name share those rows but each has its own group, and a pass over
+    /// one org's group stamps the shared rows. Selecting on the shared stamp would let a group
+    /// admitted at the batch boundary make every other org's group for the name read as fresh,
+    /// deferring that org's upstream-latest and versions-behind refresh — which depend on its own
+    /// upstream sources — by a full age window. The per-org stamp is written by
+    /// <see cref="StampRefreshCheckedAtForOrgAsync"/> only for the group that was processed.
     /// </summary>
     // xtenant: cross-tenant enumeration for the deprecation-refresh background pass; caller
     // processes each (ecosystem, name, orgId) group independently.
@@ -420,6 +432,8 @@ public sealed class CacheArtifactRepository
         // A suspended/archived/deleting org (see TenantLifecycle) is excluded the same way a
         // soft-deleted/air-gapped one already is — this pass fetches upstream metadata (npm
         // packument / PyPI project JSON) on the org's behalf.
+        // NULLs are ordered explicitly rather than left to the provider: SQLite sorts NULL first
+        // under ASC, Postgres last, and a never-processed group must lead on both.
         var rows = await conn.QueryAsync<(string Ecosystem, string Name, string OrgId)>(
             """
             SELECT ca.ecosystem AS Ecosystem, ca.name AS Name, taa.org_id AS OrgId
@@ -427,17 +441,67 @@ public sealed class CacheArtifactRepository
             JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
             JOIN orgs o ON o.id = taa.org_id
             LEFT JOIN org_settings os ON os.org_id = taa.org_id
-            WHERE ca.ecosystem IN ('npm', 'pypi', 'nuget', 'maven')
-              AND (ca.deprecation_checked_at IS NULL OR ca.deprecation_checked_at < @threshold)
+            WHERE ca.ecosystem IN ('npm', 'pypi', 'nuget', 'maven', 'hex')
+              AND (taa.refresh_checked_at IS NULL OR taa.refresh_checked_at < @threshold)
               AND o.deleted_at IS NULL
               AND o.status = 'active'
               AND COALESCE(os.air_gapped, 0) = 0
+              AND COALESCE(os.proxy_passthrough_enabled, 1) = 1
             GROUP BY ca.ecosystem, ca.name, taa.org_id
-            ORDER BY MIN(ca.deprecation_checked_at) ASC
+            ORDER BY MAX(CASE WHEN taa.refresh_checked_at IS NULL THEN 1 ELSE 0 END) DESC,
+                     MIN(taa.refresh_checked_at) ASC,
+                     ca.ecosystem ASC, ca.name ASC, taa.org_id ASC
             LIMIT @limit
             """,
             new { threshold, limit });
         return rows.ToList();
+    }
+
+    /// <summary>
+    /// Stamps <c>tenant_artifact_access.refresh_checked_at</c> on one org's rows for an
+    /// (ecosystem, name) group, marking that org's group as processed by the refresh pass. Called
+    /// once per processed group whatever the outcome — refreshed, upstream fetch failed, no
+    /// upstream configured, or name reserved — because
+    /// <see cref="ListGroupsNeedingDeprecationRefreshAsync"/> orders by this stamp with
+    /// never-processed groups first: a group left unstamped after a failure would be re-selected
+    /// at the head of every pass and, once enough of them fill the batch, starve every other group.
+    /// Only this org's access rows move; another org caching the same name keeps its own stamp and
+    /// its own place in the queue.
+    /// </summary>
+    // xtenant: called from the cross-tenant refresh pass, but the write is filtered to the
+    // group's own org_id; cache_artifact is global and only resolves the (ecosystem, name) ids.
+    public async Task<int> StampRefreshCheckedAtForOrgAsync(
+        string orgId, string ecosystem, string name, TimeProvider time, CancellationToken ct = default)
+    {
+        string now = time.GetUtcNow().ToUtcIso();
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteAsync(
+            """
+            UPDATE tenant_artifact_access SET refresh_checked_at = @now
+            WHERE org_id = @orgId
+              AND cache_artifact_id IN (SELECT ca.id FROM cache_artifact ca
+                                        WHERE ca.ecosystem = @ecosystem AND ca.name = @name)
+            """,
+            new { orgId, ecosystem, name, now });
+    }
+
+    /// <summary>
+    /// True when the org may consult upstream: proxy passthrough is on and the org is not
+    /// air-gapped. An org with no <c>org_settings</c> row takes the column defaults (passthrough
+    /// on, not air-gapped). The deprecation refresh re-checks this per group, beneath the
+    /// enumeration filters, so an org that turned passthrough off between enumeration and
+    /// processing is never sent upstream.
+    /// </summary>
+    public async Task<bool> IsUpstreamAccessAllowedForOrgAsync(string orgId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var row = await conn.QuerySingleOrDefaultAsync<(int Passthrough, int AirGapped)?>(
+            """
+            SELECT proxy_passthrough_enabled AS Passthrough, air_gapped AS AirGapped
+            FROM org_settings WHERE org_id = @orgId
+            """,
+            new { orgId });
+        return row is null || (row.Value.Passthrough != 0 && row.Value.AirGapped == 0);
     }
 
     /// <summary>
@@ -493,6 +557,101 @@ public sealed class CacheArtifactRepository
         return rows.ToList();
     }
 
+    /// <summary>Marker in <c>instance_settings</c> recording that the npm empty-licence requeue has run.</summary>
+    internal const string NpmEmptyLicenceRequeueMarkerKey = "npm_empty_licence_requeue_v1";
+
+    internal const int RequeueStartRows = 100;
+    internal const int RequeueMinRows = 10;
+    internal const int RequeueMaxRows = 500;
+
+    /// <summary>
+    /// One-shot repair for npm artifacts whose licence extraction was stamped as done but recorded
+    /// nothing because the extractor did not read tarballs whose manifest sits under a wrapper
+    /// directory other than <c>package/</c>. Reads the ids of every npm <c>cache_artifact</c> row
+    /// that is stamped and carries no licence row one page at a time, keyset-paged in id order so only
+    /// one batch of ids is ever held in memory, and clears <c>license_checked_at</c> on each page.
+    /// Pages are sized by <see cref="WriteLockBudget"/> from how long the previous batch held the
+    /// write lock, pausing for that hold between batches. The keyset also means a row re-stamped by
+    /// a concurrent backfill pass is not picked up again by the same run. The normal backfill
+    /// queue then re-extracts the cleared rows. A marker in <c>instance_settings</c>, written
+    /// last, stops the reset repeating. Returns the number of rows requeued, or -1 when the marker
+    /// was already present. Crash-safe: an interrupted run leaves no marker and repeats a reset
+    /// that only touches rows still stamped. Writes no schema, and the previous release treats a
+    /// NULL <c>license_checked_at</c> as an ordinary unscanned row.
+    /// </summary>
+    // xtenant: cache_artifact and instance_settings are global tables (no org_id).
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "An IN list built by DapperInClause.Expand: only generated @name placeholders are spliced, every "
+                        + "value is bound; the rest is constant SQL text.")]
+    public async Task<int> RequeueEmptyNpmLicenceChecksOnceAsync(
+        TimeProvider time, int? batchRows = null, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        int done = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(*) FROM instance_settings WHERE key = @key",
+            new { key = NpmEmptyLicenceRequeueMarkerKey }, cancellationToken: ct));
+        if (done > 0)
+        {
+            return -1;
+        }
+
+        var budget = batchRows is int n
+            ? new WriteLockBudget(n, n, n)
+            : new WriteLockBudget(RequeueStartRows, RequeueMinRows, RequeueMaxRows);
+        int requeued = 0;
+        string after = "";
+        var pause = TimeSpan.Zero;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // xtenant: licence rows of a proxy cache_artifact are keyed by cache_artifact_id, a global id.
+            string[] batch = (await conn.QueryAsync<string>(new CommandDefinition(
+                """
+                SELECT ca.id FROM cache_artifact ca
+                WHERE ca.ecosystem = 'npm'
+                  AND ca.license_checked_at IS NOT NULL
+                  AND ca.id > @after
+                  AND NOT EXISTS (
+                        SELECT 1 FROM package_version_licenses pvl
+                        WHERE pvl.cache_artifact_id = ca.id
+                          AND pvl.owner_kind = 'cache_artifact')
+                ORDER BY ca.id
+                LIMIT @rows
+                """,
+                new { after, rows = budget.Rows }, commandTimeout: 600, cancellationToken: ct))).ToArray();
+            if (batch.Length == 0)
+            {
+                break;
+            }
+
+            if (pause > TimeSpan.Zero)
+            {
+                await Task.Delay(pause, time, ct);
+            }
+
+            after = batch[^1];
+            var (clause, parameters) = DapperInClause.Expand("o", batch);
+            long start = time.GetTimestamp();
+            // rawsql: clause is a parameterized IN (@o0, …) list built in C# by DapperInClause.
+            // xtenant: UPDATE keyed by cache_artifact PK (global); no org_id needed.
+            requeued += await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE cache_artifact SET license_checked_at = NULL WHERE license_checked_at IS NOT NULL AND id IN " + clause,
+                parameters, commandTimeout: 600, cancellationToken: ct));
+            var held = time.GetElapsedTime(start);
+            budget.Record(held);
+            pause = held < TimeSpan.FromMilliseconds(1) ? TimeSpan.FromMilliseconds(1) : held;
+        }
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO instance_settings (key, value) VALUES (@key, @value)
+            ON CONFLICT (key) DO NOTHING
+            """,
+            new { key = NpmEmptyLicenceRequeueMarkerKey, value = "1" }, cancellationToken: ct));
+        return requeued;
+    }
+
     /// <summary>
     /// Stamps <c>license_checked_at</c> on a <c>cache_artifact</c> row. Called after every
     /// license-backfill attempt — whether a license was found, none was present, or the blob was
@@ -545,27 +704,6 @@ public sealed class CacheArtifactRepository
         await conn.ExecuteAsync(
             "UPDATE cache_artifact SET deprecated = @deprecated, deprecation_checked_at = @now WHERE id = @id",
             new { id, deprecated, now });
-    }
-
-    /// <summary>
-    /// Stamps <c>deprecation_checked_at</c> on every <c>cache_artifact</c> row for an
-    /// (ecosystem, name) pair without touching <c>deprecated</c>. Called when the group's upstream
-    /// metadata fetch threw: the refresh enumeration orders by this column ascending with NULLs
-    /// first, so a group left unstamped is re-selected at the head of every subsequent pass and —
-    /// once enough of them accumulate to fill the batch — starves every other group indefinitely.
-    /// Stamping records "an upstream pass was attempted", which is what the ordering needs; the
-    /// <c>deprecated</c> value is deliberately left as-is because the fetch produced no verdict.
-    /// </summary>
-    // xtenant: cache_artifact is global (no org_id); scoped by (ecosystem, name) coordinate, the
-    // same set ProcessVersionsAsync stamps row-by-row on the success path.
-    public async Task<int> TouchDeprecationCheckedAtForNameAsync(
-        string ecosystem, string name, TimeProvider time, CancellationToken ct = default)
-    {
-        string now = time.GetUtcNow().ToUtcIso();
-        await using var conn = await _db.OpenAsync(ct);
-        return await conn.ExecuteAsync(
-            "UPDATE cache_artifact SET deprecation_checked_at = @now WHERE ecosystem = @ecosystem AND name = @name",
-            new { ecosystem, name, now });
     }
 
     /// <summary>

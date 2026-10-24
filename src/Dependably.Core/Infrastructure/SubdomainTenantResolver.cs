@@ -7,10 +7,12 @@ namespace Dependably.Infrastructure;
 
 /// <summary>
 /// Eviction hook for the subdomain tenant cache. Implemented by
-/// <see cref="SubdomainTenantResolver"/> and consumed by tenant-lifecycle endpoints in
-/// <c>SystemController</c> (soft-delete / restore / status / hard-delete) so the subdomain
-/// reflects the new state immediately. Optional so single-tenant deployments — where the
-/// concrete resolver isn't registered — compile against the same controller.
+/// <see cref="SubdomainTenantResolver"/> and called after every committed write to a column the
+/// resolver caches: the tenant-lifecycle endpoints in <c>SystemController</c> (create /
+/// soft-delete / restore / status / usage limits), <c>OrgRepository.CreateOrgAsync</c>, and the
+/// hourly usage-posture sweep, so the subdomain reflects the new state immediately. Optional so
+/// single-tenant deployments — where the concrete resolver isn't registered — compile against the
+/// same callers.
 /// </summary>
 public interface ITenantSlugCacheInvalidator
 {
@@ -20,11 +22,15 @@ public interface ITenantSlugCacheInvalidator
 /// <summary>
 /// Resolver for <c>DEPLOYMENT_MODE=multi</c> deployments. Reads <c>Request.Host</c> (already
 /// rewritten from <c>X-Forwarded-Host</c> by <c>ForwardedHeadersMiddleware</c> when the request
-/// arrives from a trusted proxy), strips the apex suffix, and looks up the tenant by slug.
+/// arrives from a trusted proxy), strips the tenant-domain suffix, and looks up the tenant by slug. The tenant domain is
+/// <c>TENANT_DOMAIN</c> when set and the apex otherwise, so the system-admin host (the apex) can
+/// sit beside the tenants (<c>master.example.com</c> beside <c>acme.example.com</c>) or above them.
 ///
-/// Apex hits (host == apex) → <see cref="TenantContext.Apex"/>.
-/// Subdomain hits with a known, non-reserved slug → <see cref="TenantContext.ForTenant"/>.
-/// Anything else → <see cref="TenantContext.Uninitialized"/> (translated to 404 by the middleware).
+/// Apex hits (host == apex, checked first) → <see cref="TenantContext.Apex"/>.
+/// Single-label hits under the tenant domain with a known, non-reserved slug → <see cref="TenantContext.ForTenant"/>.
+/// Anything else → <see cref="TenantContext.Uninitialized"/>. Neither apex nor uninitialized names
+/// a tenant, so <c>TenantStatusEnforcementMiddleware</c> answers a protocol request under either
+/// with 404.
 ///
 /// Registered Singleton (<c>AuthStartupExtensions.AddDependablyTenantResolution</c>): every
 /// dependency (<c>IMetadataStore</c>, <c>IConfiguration</c>, <c>IMemoryCache</c>) is itself
@@ -42,6 +48,7 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
 
     private readonly IMetadataStore _db;
     private readonly string _apexHost;
+    private readonly string _tenantDomain;
     private readonly IReadOnlySet<string> _extraReserved;
     private readonly IMemoryCache? _cache;
 
@@ -60,13 +67,15 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
         _db = db;
         _cache = cache;
 
-        // APEX_HOST when set, otherwise the host portion of BASE_URL.
-        string? apex = BaseUrlHostHelper.ResolveApexHost(config);
+        // APEX_HOST when set, otherwise the host portion of BASE_URL. The non-"usable" variants are
+        // deliberate: the local *.localhost dev loop pins the apex to localhost and must keep
+        // resolving tenants.
+        _apexHost = (BaseUrlHostHelper.ResolveApexHost(config) ?? "").TrimEnd('.');
 
-        _apexHost = (apex ?? "")
-            .TrimEnd('.');
+        // TENANT_DOMAIN when set, otherwise the apex.
+        _tenantDomain = (BaseUrlHostHelper.ResolveTenantDomain(config) ?? "").TrimEnd('.');
 
-        _extraReserved = ReservedSlugs.ParseExtra(config["RESERVED_SUBDOMAINS"]);
+        _extraReserved = ReservedSlugs.ForConfig(config);
     }
 
     private static string CacheKey(string slug) => "tenant-resolve:" + slug;
@@ -81,8 +90,9 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
     /// <summary>
     /// Evicts the cached resolution for <paramref name="slug"/> and cancels the current
     /// generation token so an in-flight fill that read the pre-lifecycle-change row cannot cache
-    /// it. Called by tenant-lifecycle endpoints (soft-delete, restore, status flip, hard-delete)
-    /// so the subdomain reflects the new state immediately instead of waiting up to
+    /// it. Called after every committed write to a cached <c>orgs</c> column (creation,
+    /// soft-delete, restore, status flip, usage posture) so the subdomain reflects the new state
+    /// immediately instead of waiting up to
     /// <see cref="TenantCacheTtl"/>.
     /// </summary>
     public void InvalidateSlug(string slug)
@@ -101,7 +111,7 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
 
     public async Task<TenantContext> ResolveAsync(HttpContext context, CancellationToken ct = default)
     {
-        if (string.IsNullOrEmpty(_apexHost))
+        if (string.IsNullOrEmpty(_tenantDomain))
         {
             return TenantContext.Uninitialized;
         }
@@ -125,12 +135,14 @@ public sealed class SubdomainTenantResolver : ITenantResolver, ITenantSlugCacheI
             host = host[..colonIdx];
         }
 
-        if (host == _apexHost)
+        // The apex comparison comes first so the system-admin host never resolves as a tenant,
+        // even when a tenant row carries the slug of its leftmost label.
+        if (_apexHost.Length > 0 && host == _apexHost)
         {
             return TenantContext.Apex;
         }
 
-        string suffix = "." + _apexHost;
+        string suffix = "." + _tenantDomain;
         if (!host.EndsWith(suffix, StringComparison.Ordinal))
         {
             return TenantContext.Uninitialized;

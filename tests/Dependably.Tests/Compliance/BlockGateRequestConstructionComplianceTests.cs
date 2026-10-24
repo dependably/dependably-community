@@ -107,6 +107,7 @@ public sealed partial class BlockGateRequestConstructionComplianceTests
                      "BlockGateRequest ForProxyFirstFetch(",
                      "BlockGateRequest ForFirstFetchDeprecation(",
                      "BlockGateRequest ForFirstFetchProvenance(",
+                     "BlockGateRequest ForOciImage(",
                  })
         {
             Assert.Contains(factory, source, StringComparison.Ordinal);
@@ -176,6 +177,30 @@ public sealed partial class BlockGateRequestConstructionComplianceTests
     /// tokens inside one factory's body — from its declaration up to the next
     /// <c>public static BlockGateRequest</c> declaration (or end of file).
     /// </summary>
+    /// <summary>
+    /// The OCI image factory joins the policy-symmetry set: every mode and tolerance a proxy
+    /// cache-hit request threads must reach an OCI image request too, so a policy an org set for
+    /// its other ecosystems applies to images unchanged. A field missing here would read as
+    /// "policy off" on the OCI pull path only, with nothing failing to compile.
+    /// </summary>
+    [Fact]
+    public void TheOciImageFactory_SetsEveryModeAndToleranceTheProxyFactoriesSet()
+    {
+        string factoryPath = SourceRoots.AllCSharpFiles()
+            .First(f => Path.GetFileName(f).Equals(FactoryFile, StringComparison.Ordinal));
+        string source = File.ReadAllText(factoryPath);
+
+        var cacheFactsFields = ExtractModeAndToleranceFields(source, "ForProxyCacheFacts(");
+        var ociFields = ExtractModeAndToleranceFields(source, "ForOciImage(");
+
+        var missing = cacheFactsFields.Except(ociFields).OrderBy(f => f, StringComparer.Ordinal).ToList();
+        Assert.True(ociFields.Count > 0, "ForOciImage body yielded no *Mode/*Tolerance fields — extraction likely broken.");
+        Assert.True(missing.Count == 0,
+            "ForOciImage does not set these policy fields ForProxyCacheFacts sets, so the OCI pull gate "
+            + $"would read them as off: {string.Join(", ", missing)}");
+        Assert.Contains("OciScanEnforcementMode", ociFields);
+    }
+
     private static HashSet<string> ExtractModeAndToleranceFields(string source, string factoryMarker)
     {
         int start = source.IndexOf("public static BlockGateRequest " + factoryMarker, StringComparison.Ordinal);

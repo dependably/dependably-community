@@ -287,6 +287,180 @@ public sealed class InstanceControllerTests : IClassFixture<DependablyFactory>, 
         Assert.Single(warnings);
         Assert.Contains("0.0.0.0/0", warnings[0]!);
     }
+
+    // ── Capability denials, env locks, and the email test send ───────────────
+
+    [Theory]
+    [InlineData("GET", "/api/v1/instance/settings", null)]
+    [InlineData("PUT", "/api/v1/instance/settings", """{"max_upload_bytes":"1"}""")]
+    [InlineData("GET", "/api/v1/instance/metrics-access", null)]
+    [InlineData("PUT", "/api/v1/instance/metrics-access", """{"enabled":true}""")]
+    [InlineData("GET", "/api/v1/instance/email-config", null)]
+    [InlineData("PUT", "/api/v1/instance/email-config", """{"enabled":false}""")]
+    [InlineData("POST", "/api/v1/instance/email-config/test", null)]
+    [InlineData("GET", "/api/v1/instance/email-health", null)]
+    [InlineData("GET", "/api/v1/instance/background-jobs", null)]
+    [InlineData("GET", "/api/v1/instance/vuln-tracker-config", null)]
+    [InlineData("PUT", "/api/v1/instance/vuln-tracker-config", """{"enabled":false,"baseUrl":""}""")]
+    [InlineData("POST", "/api/v1/instance/vuln-tracker-config/test", null)]
+    [InlineData("GET", "/api/v1/instance/vuln-tracker-health", null)]
+    [InlineData("POST", "/api/v1/instance/secrets/verify", null)]
+    public async Task Member_EveryInstanceRoute_IsForbidden(string method, string path, string? json)
+    {
+        string memberId = await _factory.CreateUser($"inst-member-{Guid.NewGuid():N}@example.com", "Password12345");
+        using var member = _factory.CreateClientWithBearer(await _factory.CreateUserJwt(memberId, "member"));
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (json is not null)
+        {
+            request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        }
+
+        var resp = await member.SendAsync(request);
+
+        await ProblemBody.AssertForbiddenAsync(resp);
+    }
+
+    [Fact]
+    public async Task Admin_GetEmailHealth_ReportsTheRelayAggregateWithoutTenantIdentifiers()
+    {
+        using var admin = await AdminClient();
+
+        var resp = await admin.GetAsync("/api/v1/instance/email-health");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await ProblemBody.ReadAsync(resp);
+        Assert.Equal(JsonValueKind.Object, body.ValueKind);
+        Assert.DoesNotContain("orgId", body.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("org_id", body.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Member_UpdateSettings_ChangesNothing()
+    {
+        using var admin = await AdminClient();
+        string memberId = await _factory.CreateUser($"inst-member-{Guid.NewGuid():N}@example.com", "Password12345");
+        using var member = _factory.CreateClientWithBearer(await _factory.CreateUserJwt(memberId, "member"));
+        var before = await admin.GetFromJsonAsync<JsonElement>("/api/v1/instance/settings");
+
+        await ProblemBody.AssertForbiddenAsync(
+            await member.PutAsJsonAsync("/api/v1/instance/settings", new Dictionary<string, string> { ["max_upload_bytes"] = "1" }));
+
+        var after = await admin.GetFromJsonAsync<JsonElement>("/api/v1/instance/settings");
+        Assert.Equal(before.GetRawText(), after.GetRawText());
+    }
+
+    [Fact]
+    public async Task UpdateSettings_OversizedCacheWarnThreshold_IsRejected_AndNothingIsWritten()
+    {
+        using var admin = await AdminClient();
+
+        var bad = await admin.PutAsJsonAsync("/api/v1/instance/settings", new Dictionary<string, string>
+        {
+            ["cache_size_warn_bytes"] = "-1",
+        });
+        var notANumber = await admin.PutAsJsonAsync("/api/v1/instance/settings", new Dictionary<string, string>
+        {
+            ["cache_size_warn_bytes"] = "lots",
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, notANumber.StatusCode);
+        var ok = await admin.PutAsJsonAsync("/api/v1/instance/settings", new Dictionary<string, string>
+        {
+            ["cache_size_warn_bytes"] = "",
+        });
+        Assert.Equal(HttpStatusCode.NoContent, ok.StatusCode);
+    }
+
+    [Fact]
+    public async Task PutMetricsAccess_WhenEnvPinsTheKnob_Conflicts_AndTheUnpinnedKnobStillSaves()
+    {
+        await using var factory = new DependablyFactory
+        {
+            ExtraSettings = new Dictionary<string, string?> { ["METRICS_ENABLED"] = "false" },
+        };
+        await factory.InitializeAsync();
+        using var c = factory.CreateClientWithBearer(await factory.CreateAdminJwt());
+
+        var pinned = await c.PutAsJsonAsync("/api/v1/instance/metrics-access", new { enabled = true });
+        Assert.Equal(HttpStatusCode.Conflict, pinned.StatusCode);
+        Assert.Contains("METRICS_ENABLED", await pinned.Content.ReadAsStringAsync());
+
+        var free = await c.PutAsJsonAsync("/api/v1/instance/metrics-access", new { allowedIps = new[] { "10.0.0.0/8" } });
+        Assert.Equal(HttpStatusCode.OK, free.StatusCode);
+
+        await using var allowlistPinned = new DependablyFactory
+        {
+            ExtraSettings = new Dictionary<string, string?> { ["METRICS_ALLOWED_IPS"] = "127.0.0.1" },
+        };
+        await allowlistPinned.InitializeAsync();
+        using var c2 = allowlistPinned.CreateClientWithBearer(await allowlistPinned.CreateAdminJwt());
+        var conflict = await c2.PutAsJsonAsync("/api/v1/instance/metrics-access", new { allowedIps = new[] { "10.0.0.0/8" } });
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Contains("METRICS_ALLOWED_IPS", await conflict.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task PutEmailConfig_SecurityNoneWithCredentials_IsSavedAndFlaggedCleartext()
+    {
+        await using var factory = new DependablyFactory
+        {
+            MasterKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)),
+        };
+        await factory.InitializeAsync();
+        using var c = factory.CreateClientWithBearer(await factory.CreateAdminJwt());
+
+        var put = await c.PutAsJsonAsync("/api/v1/instance/email-config", new
+        {
+            enabled = true,
+            host = "smtp.example.com",
+            port = 25,
+            security = "none",
+            username = "relay",
+            password = "relay-secret",
+            fromAddress = "noreply@example.com",
+        });
+
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+        Assert.True(JsonDocument.Parse(await put.Content.ReadAsStringAsync()).RootElement
+            .GetProperty("cleartextCredentials").GetBoolean());
+        await using var conn = await factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string>(
+            "SELECT detail FROM audit_log WHERE action = 'instance_email_config_updated' ORDER BY created_at DESC LIMIT 1");
+        Assert.NotNull(detail);
+        Assert.DoesNotContain("relay-secret", detail);
+        Assert.True(JsonDocument.Parse(detail!).RootElement.GetProperty("cleartextCredentials").GetBoolean());
+    }
+
+    [Fact]
+    public async Task TestEmail_SendsToTheConfiguredFromAddress_AndReportsATransportFailureAsAValidationProblem()
+    {
+        var sender = new CapturingMailSender();
+        await using var factory = new DependablyFactory { MailSenderOverride = sender };
+        await factory.InitializeAsync();
+        using var c = factory.CreateClientWithBearer(await factory.CreateAdminJwt());
+        var put = await c.PutAsJsonAsync("/api/v1/instance/email-config", new
+        {
+            enabled = true,
+            host = "smtp.example.com",
+            port = 25,
+            security = "none",
+            fromAddress = "noreply@example.com",
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+        int before = sender.Sent.Count;
+
+        var ok = await c.PostAsync("/api/v1/instance/email-config/test", null);
+
+        Assert.True(ok.StatusCode == HttpStatusCode.NoContent, await ok.Content.ReadAsStringAsync());
+        var sent = Assert.Single(sender.Sent.Skip(before));
+        Assert.Equal(new[] { "noreply@example.com" }, sent.Recipients);
+
+        sender.Failure = () => new InvalidOperationException("relay refused");
+        var failed = await c.PostAsync("/api/v1/instance/email-config/test", null);
+        await ProblemBody.AssertValidationAsync(failed, "email");
+        Assert.DoesNotContain("relay refused", await failed.Content.ReadAsStringAsync());
+    }
 }
 
 /// <summary>
@@ -407,6 +581,34 @@ public sealed class InstanceControllerMultiModeTests
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
 
         var resp = await client.PutAsJsonAsync("/api/v1/instance/metrics-access", new { enabled = true });
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/v1/instance/email-config")]
+    [InlineData("PUT", "/api/v1/instance/email-config")]
+    [InlineData("POST", "/api/v1/instance/email-config/test")]
+    [InlineData("GET", "/api/v1/instance/email-health")]
+    [InlineData("GET", "/api/v1/instance/vuln-tracker-config")]
+    [InlineData("PUT", "/api/v1/instance/vuln-tracker-config")]
+    [InlineData("POST", "/api/v1/instance/vuln-tracker-config/test")]
+    [InlineData("GET", "/api/v1/instance/vuln-tracker-health")]
+    [InlineData("POST", "/api/v1/instance/secrets/verify")]
+    public async Task MultiMode_TenantOwner_EveryRemainingInstanceRoute_Returns404(string method, string path)
+    {
+        var (jwt, host) = await CreateTenantOwnerAsync();
+        using var client = _factory.CreateClientForHost(host);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (method == "PUT")
+        {
+            request.Content = path.Contains("vuln-tracker", StringComparison.Ordinal)
+                ? JsonContent.Create(new { enabled = false, baseUrl = "" })
+                : JsonContent.Create(new { enabled = false });
+        }
+
+        var resp = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }

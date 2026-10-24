@@ -190,7 +190,7 @@ public sealed class SbomController : ControllerBase
 
         try
         {
-            return await IngestSbomAsync(orgId!, actorId, query, staged!, ct);
+            return await IngestSbomAsync(orgId, actorId, query, staged!, ct);
         }
         catch (SbomParseException ex)
         {
@@ -233,7 +233,7 @@ public sealed class SbomController : ControllerBase
 
         try
         {
-            return await IngestVexAsync(orgId!, actorId, query, staged!, ct);
+            return await IngestVexAsync(orgId, actorId, query, staged!, ct);
         }
         catch (SbomParseException ex)
         {
@@ -276,7 +276,7 @@ public sealed class SbomController : ControllerBase
 
         try
         {
-            return await IngestSarifAsync(orgId!, actorId, query, staged!, ct);
+            return await IngestSarifAsync(orgId, actorId, query, staged!, ct);
         }
         catch (SbomParseException ex)
         {
@@ -506,17 +506,16 @@ public sealed class SbomController : ControllerBase
 
     // ── Shared pipeline steps ────────────────────────────────────────────────────────────────
 
-    private async Task<(IActionResult? Error, string? OrgId, string? ActorId)> AuthorizeAsync(CancellationToken ct)
+    private async Task<(IActionResult? Error, string OrgId, string? ActorId)> AuthorizeAsync(CancellationToken ct)
     {
         var deny = await _svc.Guard.AuthorizeCapAsync(User, HttpContext, Capabilities.SbomUpload, ct);
         if (deny is not null)
         {
-            return (deny, null, null);
+            return (deny, null!, null);
         }
 
-        var ctx = (TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!;
         string? actorId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
-        return (null, ctx.TenantId, actorId);
+        return (null, HttpContext.RequireTenantId(), actorId);
     }
 
     // Both required query fields are checked here rather than by DataAnnotations because the

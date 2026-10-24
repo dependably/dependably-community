@@ -82,7 +82,10 @@ public static class PolicySummaryBuilder
         // the shared KEV/EPSS columns is running. False does not mean kev/kev_ransomware/epss/
         // epss_percentile stop enforcing — they act on whatever the table last recorded.
         bool threatFeedActive,
-        ProvenanceAnchorStatus anchors)
+        ProvenanceAnchorStatus anchors,
+        // OciScanOptions.Enabled: true while the instance runs image scanning at all. False does
+        // not stop the unscanned arm enforcing — under 'block' it then refuses every image.
+        bool ociScanActive = false)
     {
         bool allowlistMode = settings?.AllowlistMode ?? false;
         bool proxyPassthroughEnabled = settings?.ProxyPassthroughEnabled ?? true;
@@ -105,6 +108,7 @@ public static class PolicySummaryBuilder
         string verifyMavenSignatures = settings?.VerifyMavenSignatures ?? "off";
         string verifyTerraformSignatures = settings?.VerifyTerraformSignatures ?? "off";
         string licenseMode = settings?.LicenseEnforcementMode ?? "off";
+        string ociScanEnforcement = settings?.OciScanEnforcement ?? "off";
 
         var controls = new Dictionary<string, object>
         {
@@ -122,6 +126,8 @@ public static class PolicySummaryBuilder
                 blockInstallScripts, TriStateEffect(blockInstallScripts), true),
             ["ssvc_exploitation"] = new TriStateControl(
                 blockSsvcExploitation, TriStateEffect(blockSsvcExploitation), vulnTrackerActive),
+            ["unscanned"] = new TriStateControl(
+                ociScanEnforcement, TriStateEffect(ociScanEnforcement), ociScanActive),
             ["release_age"] = new ReleaseAgeControl(
                 minReleaseAgeHours, ReleaseAgeEffect(minReleaseAgeHours), true),
             ["vuln_score"] = new VulnScoreControl(

@@ -34,11 +34,55 @@ public sealed partial class OciController
 
         string orgId = CurrentTenantId();
 
+        // An edge node never answers a manifest from its own cache for an org its master gates
+        // (or whose posture it has never seen): the master decides every such manifest.
+        bool throughMaster = await MustAskMasterAsync(orgId, ct);
+
         // Local cache first; on a miss (unknown reference or evicted blob), fall through
         // to the upstream proxy.
-        var local = await TryServeLocalManifestAsync(orgId, name, coords, headOnly, auth.Token, ct);
-        return local ?? await ServeUpstreamManifestAsync(orgId, name, reference, coords.IsDigest, headOnly, auth.Token, ct);
+        var local = throughMaster ? null : await TryServeLocalManifestAsync(orgId, name, coords, headOnly, auth.Token, ct);
+        return local ?? await ServeUpstreamManifestAsync(
+            orgId, name, reference, coords.IsDigest, headOnly, auth.Token, ct, throughMaster);
     }
+
+    /// <summary>
+    /// True on an edge node for an org whose master-reported OCI scan posture is not <c>off</c>,
+    /// or has never been reported, or whose <c>off</c> is older than the freshness bound (so the
+    /// master is asked again). Always false off an edge.
+    /// </summary>
+    private async Task<bool> MustAskMasterAsync(string orgId, CancellationToken ct) =>
+        _svc.EdgeGuard.IsEdge && _svc.EdgePostures is { } postures
+        && !await postures.MayServeFromCacheAsync(orgId, ct);
+
+    /// <summary>
+    /// On an edge node whose master cannot be reached, the org's last-known posture when it is
+    /// <c>warn</c> or <c>block</c>: the edge holds no scan results to answer such an org from, so
+    /// the request is refused. Null for an org at <c>off</c>, or whose posture the master never
+    /// stated, which the edge answers from its own cache, and always null off an edge.
+    /// </summary>
+    private async Task<string?> MasterOutageGatedPostureAsync(string orgId, CancellationToken ct) =>
+        _svc.EdgeGuard.IsEdge && _svc.EdgePostures is { } postures
+            ? await postures.LastKnownGatedPostureAsync(orgId, ct)
+            : null;
+
+    // The edge's answer for an org its master gates while that master is unreachable.
+    private ObjectResult MasterOutageRefusal(string posture, string name, string reference, Exception ex)
+    {
+        _logger.LogWarning(
+            "OCI master unreachable for {Repository}:{Reference} ({ExceptionType}); refusing, as the org's last-known "
+            + "master posture is {Posture}.",
+            name, reference, ex.GetType().Name, posture);
+        return OciGateRefusal(BlockArm.Unscanned,
+            $"Image is blocked by the organization's vulnerability policy (unscanned): the organization's OCI scan "
+            + $"enforcement is {posture} and the master that scans it is unreachable.");
+    }
+
+    // The edge's answer when its master refused a manifest by policy: the master's verdict, the
+    // same arm on the same 403, rather than a miss.
+    private ObjectResult MasterRefusal(OciUpstreamRefusedException ex) =>
+        OciGateRefusal(
+            Enum.GetValues<BlockArm>().FirstOrDefault(a => new BlockOutcome(BlockDecision.Blocked, a).ReasonToken == ex.Reason, BlockArm.Unscanned),
+            $"Image is blocked by the organization's policy ({ex.Reason}).");
 
     /// <summary>
     /// Serves a manifest from the local DB / blob store. Returns <c>null</c> when the
@@ -96,7 +140,12 @@ public sealed partial class OciController
         // Which tags it applies to is the tag's own stamp, not the blob row's origin — see
         // IsTagDueForUpstreamRevalidation. A pushed manifest keeps origin = 'proxy' whenever the
         // same bytes were proxied first, so origin would send a hosted tag upstream.
-        if (!coords.IsDigest && _svc.Upstream.IsTagDueForUpstreamRevalidation(localRef.LastRevalidated))
+        //
+        // With upstream fetching off for the org (instance or org air-gap, passthrough off) there
+        // is nobody to revalidate against, so the held digest is the answer: reporting a miss would
+        // turn an image this registry holds into a 404.
+        if (!coords.IsDigest && _svc.Upstream.IsTagDueForUpstreamRevalidation(localRef.LastRevalidated)
+            && !await _svc.Upstream.IsUpstreamOffAsync(orgId, ct))
         {
             return null;
         }
@@ -116,7 +165,7 @@ public sealed partial class OciController
         // for it. Catalogue writers qualify by tag because their rows ARE per-tag versions.
         string purl = PurlNormalizer.Oci(name, resolved);
 
-        if (await EvaluateLicenseBlockAsync(orgId, purl, LicenseSpdx, token, ct) is { } blocked)
+        if (await EvaluateOciPullGateAsync(orgId, name, resolved, LicenseSpdx, token, ct) is { } blocked)
         {
             return blocked;
         }
@@ -159,6 +208,37 @@ public sealed partial class OciController
     }
 
     /// <summary>
+    /// Under scan enforcement, fetches <paramref name="digest"/> by digest so the manifest is
+    /// cached locally (and so catalogued and queued by the pull gate) before a HEAD answers.
+    /// A no-op with the org's posture at <c>off</c>, where a HEAD stays a headers-only upstream
+    /// call. A failed fetch is logged and left to the gate, which reads the image as unscanned.
+    /// </summary>
+    private async Task AcquireManifestForScanAsync(string orgId, string name, string digest, CancellationToken ct)
+    {
+        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
+        if (settings is null || settings.OciScanEnforcement == "off")
+        {
+            return;
+        }
+
+        try
+        {
+            var acquired = await _svc.Upstream.FetchManifestAsync(orgId, name, digest, isDigest: true, ct);
+            if (acquired is not null)
+            {
+                await acquired.Content.DisposeAsync();
+            }
+        }
+        catch (Exception ex) when (IsUpstreamFailure(ex, ct)
+            || ex is OciBlobRefusedException and not OciManifestTooLargeException)
+        {
+            _logger.LogWarning(ex,
+                "OCI HEAD could not acquire {Repository}@{Digest} for scanning ({ExceptionType}); the pull gate reads it as unscanned.",
+                name, digest, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
     /// Reads the SPDX expression stamped on a manifest's <c>oci_blobs</c> row, or null when the
     /// row carries none (no label on the image, or the config blob had not landed when the
     /// recorder ran). Null is the empty-licence case OCI passes through, not a block.
@@ -177,32 +257,19 @@ public sealed partial class OciController
     /// caches it so subsequent requests are served locally. On HEAD, only the manifest
     /// metadata (digest, size, media type) is fetched — no body is downloaded.
     /// </summary>
+#pragma warning disable S107 // the request coordinates plus whether an edge must ask its master
     private async Task<IActionResult> ServeUpstreamManifestAsync(
-        string orgId, string name, string reference, bool isDigest, bool headOnly, TokenRecord? token, CancellationToken ct)
+        string orgId, string name, string reference, bool isDigest, bool headOnly, TokenRecord? token, CancellationToken ct,
+        bool throughMaster = false)
+#pragma warning restore S107
     {
         if (headOnly)
         {
-            // HEAD: fetch only response headers from upstream to avoid downloading the full
-            // manifest body. The resolver issues a HEAD request; the response headers carry
-            // Docker-Content-Digest and Content-Length which are sufficient to satisfy the
-            // OCI spec HEAD contract.
-            OciManifestMetadata? meta;
-            try
+            var (meta, headFailure) = await FetchUpstreamManifestMetadataAsync(
+                orgId, name, reference, isDigest, token, throughMaster, ct);
+            if (headFailure is not null)
             {
-                meta = await _svc.Upstream.FetchManifestMetadataAsync(orgId, name, reference, isDigest, ct);
-            }
-            catch (AirGappedException)
-            {
-                return AirGappedManifestMiss(name, reference);
-            }
-            catch (Exception ex) when (IsUpstreamFailure(ex, ct))
-            {
-                return await ServeStaleOrUpstreamErrorAsync(orgId, name, reference, isDigest, headOnly: true, token, ex, ct);
-            }
-
-            if (meta is null)
-            {
-                return await ManifestUnknownAsync(orgId, name, reference, isDigest, token, ct);
+                return headFailure;
             }
 
             // HEAD answers the licence arm exactly as GET does. A HEAD that revalidates a stale
@@ -211,8 +278,20 @@ public sealed partial class OciController
             // available. Only a digest already stamped here can be judged — an upstream HEAD
             // downloads no config blob — and an unstamped digest is the empty-licence case OCI
             // passes through, the same answer it gets on the GET path.
-            if (await EvaluateLicenseBlockAsync(
-                    orgId, PurlNormalizer.Oci(name, meta.Digest),
+            //
+            // Under scan enforcement a HEAD miss also acquires the manifest by digest first, so it
+            // is cached, catalogued and queued for scanning by the HEAD itself: a HEAD-first client
+            // (containerd, BuildKit) refused here would otherwise never issue the GET that does.
+            // A manifest too large to accept is refused the way the GET refuses it.
+            // A push probe is not a pull and acquires nothing (see IsPushProbe).
+            if (!IsPushProbe(token)
+                && await AcquireManifestOrRefuseAsync(orgId, name, reference, meta!.Digest, token, ct) is { } tooLarge)
+            {
+                return tooLarge;
+            }
+
+            if (await EvaluateOciPullGateAsync(
+                    orgId, name, meta!.Digest,
                     await ReadStampedLicenseAsync(orgId, meta.Digest, ct), token, ct) is { } headBlocked)
             {
                 return headBlocked;
@@ -222,23 +301,11 @@ public sealed partial class OciController
             return Ok();
         }
 
-        OciManifestResult? upstreamResult;
-        try
+        var (upstreamResult, failure) = await FetchUpstreamManifestAsync(
+            orgId, name, reference, isDigest, token, throughMaster, ct);
+        if (failure is not null)
         {
-            upstreamResult = await _svc.Upstream.FetchManifestAsync(orgId, name, reference, isDigest, ct);
-        }
-        catch (AirGappedException)
-        {
-            return AirGappedManifestMiss(name, reference);
-        }
-        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
-        {
-            return await ServeStaleOrUpstreamErrorAsync(orgId, name, reference, isDigest, headOnly: false, token, ex, ct);
-        }
-
-        if (upstreamResult is null)
-        {
-            return await ManifestUnknownAsync(orgId, name, reference, isDigest, token, ct);
+            return failure;
         }
 
         // The fetch above catalogued the manifest and stamped its license facts
@@ -250,10 +317,10 @@ public sealed partial class OciController
         // guaranteed miss, and deferring the decision would serve the new image unenforced each
         // time it changed. A label-less image still stamps NULL and still passes — OCI keeps the
         // empty-licence pass-through, so this denies only an expression the tenant blocks.
-        string? upstreamLicense = await ReadStampedLicenseAsync(orgId, upstreamResult.Digest, ct);
+        string? upstreamLicense = await ReadStampedLicenseAsync(orgId, upstreamResult!.Digest, ct);
         string upstreamPurl = PurlNormalizer.Oci(name, upstreamResult.Digest);
-        if (await EvaluateLicenseBlockAsync(
-                orgId, upstreamPurl, upstreamLicense, token, ct) is { } blocked)
+        if (await EvaluateOciPullGateAsync(
+                orgId, name, upstreamResult.Digest, upstreamLicense, token, ct) is { } blocked)
         {
             await upstreamResult.Content.DisposeAsync();
             return blocked;
@@ -263,6 +330,99 @@ public sealed partial class OciController
         await _svc.Audit.LogActivityAsync(orgId, "oci", upstreamPurl, "download",
             actorId: token?.AuditActorId, actorKind: token?.ActorKind, actorLabel: token?.AuditActorLabel, sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
         return File(upstreamResult.Content, upstreamResult.MediaType);
+    }
+
+    // HEAD: fetch only response headers from upstream to avoid downloading the full manifest body.
+    // The resolver issues a HEAD request; the response headers carry Docker-Content-Digest and
+    // Content-Length which are sufficient to satisfy the OCI spec HEAD contract.
+    private async Task<(OciManifestMetadata? Meta, IActionResult? Failure)> FetchUpstreamManifestMetadataAsync(
+        string orgId, string name, string reference, bool isDigest, TokenRecord? token, bool throughMaster,
+        CancellationToken ct)
+    {
+        OciManifestMetadata? meta;
+        try
+        {
+            meta = throughMaster
+                ? await _svc.Upstream.FetchManifestMetadataThroughMasterAsync(orgId, name, reference, ct)
+                : await _svc.Upstream.FetchManifestMetadataAsync(orgId, name, reference, isDigest, ct);
+        }
+        catch (AirGappedException)
+        {
+            return (null, AirGappedManifestMiss(name, reference));
+        }
+        catch (OciPassthroughOffException)
+        {
+            return (null, PassthroughOffManifestMiss(name, reference));
+        }
+        catch (OciUpstreamRefusedException ex)
+        {
+            return (null, MasterRefusal(ex));
+        }
+        catch (OciBlobRefusedException ex)
+        {
+            return (null, BlobRefused(ex, name, reference, token, "Manifest"));
+        }
+        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
+        {
+            return (null, await ServeStaleOrUpstreamErrorAsync(
+                orgId, name, reference, isDigest, headOnly: true, token, ex, throughMaster, ct));
+        }
+
+        return meta is null
+            ? (null, await ManifestUnknownAsync(orgId, name, reference, isDigest, token, ct))
+            : (meta, null);
+    }
+
+    private async Task<(OciManifestResult? Result, IActionResult? Failure)> FetchUpstreamManifestAsync(
+        string orgId, string name, string reference, bool isDigest, TokenRecord? token, bool throughMaster,
+        CancellationToken ct)
+    {
+        OciManifestResult? result;
+        try
+        {
+            result = throughMaster
+                ? await _svc.Upstream.FetchManifestThroughMasterAsync(orgId, name, reference, ct)
+                : await _svc.Upstream.FetchManifestAsync(orgId, name, reference, isDigest, ct);
+        }
+        catch (AirGappedException)
+        {
+            return (null, AirGappedManifestMiss(name, reference));
+        }
+        catch (OciPassthroughOffException)
+        {
+            return (null, PassthroughOffManifestMiss(name, reference));
+        }
+        catch (OciUpstreamRefusedException ex)
+        {
+            return (null, MasterRefusal(ex));
+        }
+        catch (OciBlobRefusedException ex)
+        {
+            return (null, BlobRefused(ex, name, reference, token, "Manifest"));
+        }
+        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
+        {
+            return (null, await ServeStaleOrUpstreamErrorAsync(
+                orgId, name, reference, isDigest, headOnly: false, token, ex, throughMaster, ct));
+        }
+
+        return result is null
+            ? (null, await ManifestUnknownAsync(orgId, name, reference, isDigest, token, ct))
+            : (result, null);
+    }
+
+    private async Task<IActionResult?> AcquireManifestOrRefuseAsync(
+        string orgId, string name, string reference, string digest, TokenRecord? token, CancellationToken ct)
+    {
+        try
+        {
+            await AcquireManifestForScanAsync(orgId, name, digest, ct);
+            return null;
+        }
+        catch (OciManifestTooLargeException ex)
+        {
+            return BlobRefused(ex, name, reference, token, "Manifest");
+        }
     }
 
     /// <summary>
@@ -379,6 +539,16 @@ public sealed partial class OciController
             + "fetched from an upstream registry; only locally held images are available.");
 
     /// <summary>
+    /// The answer for a manifest that is not held locally for an org with upstream fetching off:
+    /// proxy passthrough disabled, or the org air-gapped. A 404 for the reason
+    /// <see cref="AirGappedManifestMiss"/> gives, with the message naming the org setting.
+    /// </summary>
+    private static ObjectResult PassthroughOffManifestMiss(string name, string reference) =>
+        OciError(StatusCodes.Status404NotFound, OciErrorCode.MANIFEST_UNKNOWN,
+            $"Manifest unknown: {reference}. Proxy passthrough is off for this organization, so {name} "
+            + "was not fetched from an upstream registry; only locally held images are available.");
+
+    /// <summary>
     /// The answer when the upstream failed while a tag needed revalidation: the last accepted
     /// digest, served for as long as the bounded stale grace allows, then 502.
     ///
@@ -391,13 +561,37 @@ public sealed partial class OciController
     /// stale: they are content-addressed, so there is no "previously accepted" mapping to fall
     /// back to — a digest miss with a dead upstream is simply unreachable content.
     /// </para>
+    ///
+    /// <para>
+    /// On an edge whose master is unreachable, an org whose last-known posture is <c>warn</c> or
+    /// <c>block</c> is refused. Any other org is answered as it would be with no gate at all: when
+    /// the request went to the master without trying the local cache
+    /// (<paramref name="throughMaster"/>, a stale or never-stated posture), the local cache is
+    /// tried now, digests included, before the stale tag.
+    /// </para>
     /// </summary>
 #pragma warning disable S107 // Threads the request coordinates plus the failure through to the stale decision
     private async Task<IActionResult> ServeStaleOrUpstreamErrorAsync(
         string orgId, string name, string reference, bool isDigest, bool headOnly,
-        TokenRecord? token, Exception ex, CancellationToken ct)
+        TokenRecord? token, Exception ex, bool throughMaster, CancellationToken ct)
 #pragma warning restore S107
     {
+        if (await MasterOutageGatedPostureAsync(orgId, ct) is { } gated)
+        {
+            return MasterOutageRefusal(gated, name, reference, ex);
+        }
+
+        if (throughMaster
+            && OciCoordinatesParser.Parse(name, reference) is { } coords
+            && await TryServeLocalManifestAsync(orgId, name, coords, headOnly, token, ct) is { } local)
+        {
+            _logger.LogWarning(
+                "OCI master unreachable for {Repository}:{Reference} ({ExceptionType}); served from the edge cache, as "
+                + "the org's last-known master posture does not gate it.",
+                name, reference, ex.GetType().Name);
+            return local;
+        }
+
         if (!isDigest)
         {
             var stale = await TryServeStaleTagManifestAsync(orgId, name, reference, headOnly, token, ct);
@@ -451,7 +645,7 @@ public sealed partial class OciController
 
         string stalePurl = PurlNormalizer.Oci(name, Digest);
 
-        if (await EvaluateLicenseBlockAsync(orgId, stalePurl, LicenseSpdx, token, ct) is { } blocked)
+        if (await EvaluateOciPullGateAsync(orgId, name, Digest, LicenseSpdx, token, ct) is { } blocked)
         {
             return blocked;
         }

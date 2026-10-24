@@ -192,6 +192,153 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         Assert.Contains("MISS", resp.Headers.GetValues("X-Cache").FirstOrDefault() ?? "");
     }
 
+    // ── Tarball cache MISS with several top-level manifests → refused, not cached ──
+
+    [Theory]
+    [InlineData("package/package.json", "other/package.json")]
+    [InlineData("package/package.json", "package/./package.json")]
+    [InlineData("package/package.json", "package/C:package.json")]
+    [InlineData("package/package.json", "package/C:/package.json")]
+    public async Task GetTarball_CacheMiss_AmbiguousManifests_RefusedAndNotCached(string first, string second)
+    {
+        string name = $"tarambig{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string filename = $"{name}-1.0.0.tgz";
+        string clean = $$$"""{"name":"{{{name}}}","version":"1.0.0","license":"MIT"}""";
+        string evil = $$$"""{"name":"{{{name}}}","version":"1.0.0","scripts":{"postinstall":"x"}}""";
+        byte[] bytes = NpmFixtures.BuildTarballFromEntries((first, clean), (second, evil));
+
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var first502 = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
+        var second502 = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
+
+        Assert.Equal(HttpStatusCode.BadGateway, first502.StatusCode);
+        Assert.Equal(HttpStatusCode.BadGateway, second502.StatusCode);
+        Assert.NotEqual(bytes.Length, (await first502.Content.ReadAsByteArrayAsync()).Length);
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        int rows = await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'npm' AND name = @name", new { name });
+        Assert.Equal(0, rows);
+    }
+
+    [Fact]
+    public async Task GetTarball_CacheMiss_DuplicateKeyManifest_RefusedAndNotCached_CleanTwinServed()
+    {
+        string name = $"tardupkey{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string filename = $"{name}-1.0.0.tgz";
+        string dup = $$$"""{"name":"{{{name}}}","version":"1.0.0","scripts":{},"scripts":{"postinstall":"x"}}""";
+        byte[] bytes = NpmFixtures.BuildTarballFromEntries(("package/package.json", dup));
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
+
+        string cleanName = $"tarclean{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string cleanFile = $"{cleanName}-1.0.0.tgz";
+        byte[] cleanBytes = NpmFixtures.BuildTarballFromEntries(
+            ("package/package.json", $$$"""{"name":"{{{cleanName}}}","version":"1.0.0","scripts":{"test":"jest"}}"""));
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/{cleanName}/-/{cleanFile}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(cleanBytes));
+
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var refused = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
+        var served = await client.GetAsync($"/npm/tarballs/{cleanName}/{cleanFile}");
+
+        Assert.Equal(HttpStatusCode.BadGateway, refused.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'npm' AND name = @name", new { name }));
+    }
+
+    [Fact]
+    public async Task GetTarball_CacheMiss_TarballWithoutManifest_RefusedAndNotCached()
+    {
+        string name = $"tarnoman{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string filename = $"{name}-1.0.0.tgz";
+        byte[] bytes = NpmFixtures.BuildTarballFromEntries(("package/index.js", "module.exports = 1;"));
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/{name}/-/{filename}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/octet-stream").WithBody(bytes));
+        string token = await _factory.CreateToken("pull");
+        using var client = _factory.CreateClientWithBearer(token);
+
+        var resp = await client.GetAsync($"/npm/tarballs/{name}/{filename}");
+
+        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using var conn = await store.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'npm' AND name = @name", new { name }));
+    }
+
+    // A hosted version stored before ambiguity was rejected at publish is not re-read on download;
+    // the one-shot background rescan flags it with the facts the install-script gate reads.
+    [Fact]
+    public async Task Rescan_HostedVersionWithAmbiguousStoredBytes_IsFlagged_AndRunsOnce()
+    {
+        string name = $"hostambig{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        string cleanName = $"hostclean{Guid.NewGuid():N}"[..18].ToLowerInvariant();
+        await _factory.PushNpmPackage(name, "1.0.0");
+        await _factory.PushNpmPackage(cleanName, "1.0.0");
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        async Task<string> BlobKeyOf(string n)
+        {
+            await using var c = await store.OpenAsync();
+            return await c.QuerySingleAsync<string>(
+                """
+                SELECT pv.blob_key FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.name = @n AND p.ecosystem = 'npm'
+                """, new { n });
+        }
+
+        async Task<(int Script, string? Kind)> FlagsOf(string n)
+        {
+            await using var c = await store.OpenAsync();
+            return await c.QuerySingleAsync<(int, string?)>(
+                """
+                SELECT pv.has_install_script, pv.install_script_kind FROM package_versions pv
+                JOIN packages p ON p.id = pv.package_id
+                WHERE p.name = @n AND p.ecosystem = 'npm'
+                """, new { n });
+        }
+
+        // Swap the stored bytes for an ambiguous tarball, as a row published before the rejection
+        // existed would hold.
+        string blobKey = await BlobKeyOf(name);
+        byte[] ambiguous = NpmFixtures.BuildTarballFromEntries(
+            ("package/package.json", $$$"""{"name":"{{{name}}}","version":"1.0.0"}"""),
+            ("other/package.json", $$$"""{"name":"{{{name}}}","version":"1.0.0","scripts":{"postinstall":"x"}}"""));
+        await _factory.Services.GetRequiredService<Dependably.Storage.TieredBlobStorage>().Registry
+            .PutAsync(Dependably.Storage.BlobKeys.StoreKey(blobKey), new MemoryStream(ambiguous));
+
+        var rescan = _factory.Services.GetRequiredService<Dependably.Infrastructure.NpmManifestRescan>();
+        await using (var c = await store.OpenAsync())
+        {
+            // The host's own backfill tick may already have finished a pass over the empty store, so
+            // the plane cursors are reset along with the marker.
+            await c.ExecuteAsync("DELETE FROM instance_settings WHERE key LIKE 'npm_ambiguous_manifest_rescan_v1%'");
+        }
+
+        Assert.True(await rescan.RunOnceAsync() >= 1);
+
+        Assert.Equal((1, (string?)Dependably.Infrastructure.NpmManifestRescan.AmbiguousKind), await FlagsOf(name));
+        Assert.Equal((0, (string?)null), await FlagsOf(cleanName));
+        Assert.Equal(-1, await rescan.RunOnceAsync());
+    }
+
     // ── Tarball upstream 404 → 404 ───────────────────────────────────────────
 
     [Fact]
@@ -524,6 +671,44 @@ public sealed class NpmControllerExtendedTests : IClassFixture<DependablyFactory
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
 
         var resp = await client.PutAsync("/npm/ver-mismatch", content);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    // ── Publish — several top-level manifests → 422 ──────────────────────────
+
+    [Theory]
+    [InlineData("package/package.json", "package/package.json")]
+    [InlineData("package/package.json", "other/package.json")]
+    [InlineData("package/package.json", "package/PACKAGE.JSON")]
+    public async Task Publish_TarballWithMultipleTopLevelManifests_Returns422(string first, string second)
+    {
+        string token = await _factory.CreateToken("push");
+        string clean = """{"name":"ambig-pkg","version":"1.0.0","license":"MIT"}""";
+        string evil = """{"name":"ambig-pkg","version":"1.0.0","license":"GPL-3.0-only","scripts":{"postinstall":"x"}}""";
+        byte[] tarball = NpmFixtures.BuildTarballFromEntries((first, clean), (second, evil));
+
+        string body = JsonSerializer.Serialize(new
+        {
+            name = "ambig-pkg",
+            versions = new Dictionary<string, object>
+            {
+                ["1.0.0"] = new { name = "ambig-pkg", version = "1.0.0" }
+            },
+            _attachments = new Dictionary<string, object>
+            {
+                ["ambig-pkg-1.0.0.tgz"] = new
+                {
+                    content_type = "application/octet-stream",
+                    data = Convert.ToBase64String(tarball),
+                    length = tarball.Length
+                }
+            }
+        });
+
+        using var client = _factory.CreateClientWithBearer(token);
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var resp = await client.PutAsync("/npm/ambig-pkg", content);
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
     }
 

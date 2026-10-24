@@ -64,6 +64,55 @@ public sealed partial class SetupRecipeCatalogTests
         Assert.Equal(armIds, SetupRecipeCatalog.Ecosystems);
     }
 
+    /// <summary>
+    /// uv never reads pip.conf, and <c>uv tool install</c> / <c>uvx</c> outside a project have
+    /// no pyproject.toml index, so a machine with only the pip recipe applied still resolves
+    /// against pypi.org. The global uv recipe is what closes that, and its file uses uv.toml's
+    /// top-level <c>[[index]]</c> table — the pyproject form <c>[[tool.uv.index]]</c> is
+    /// silently ignored there. The index name must match the one the credential exports key on.
+    /// </summary>
+    [Fact]
+    public void PyPi_GlobalUvRecipe_DeclaresTheIndexInUserLevelUvToml()
+    {
+        var recipe = Assert.Single(
+            SetupRecipeCatalog.Build("pypi", BaseUrl)!.Recipes,
+            r => r.Variant == "uv" && r.Operation == "install" && r.Scope == "global");
+
+        var file = Assert.Single(recipe.Files);
+        Assert.Equal("~/.config/uv/uv.toml", file.Path);
+        Assert.StartsWith("[[index]]\n", file.Body);
+        Assert.DoesNotContain("tool.uv", file.Body);
+        Assert.Contains("name = \"dependably\"", file.Body);
+        Assert.Contains($"url = \"{BaseUrl}/simple/\"", file.Body);
+        Assert.Contains("default = true", file.Body);
+        Assert.False(file.SecretBearing);
+
+        Assert.Contains("UV_INDEX_DEPENDABLY_PASSWORD=<token>", recipe.TokenDelivery.Command);
+    }
+
+    /// <summary>
+    /// twine POSTs to the <c>repository</c> URL in ~/.pypirc. The upload route is read off
+    /// <see cref="Dependably.Api.PyPiController"/>'s own <c>[HttpPost]</c> attribute rather than
+    /// restated, so the recipe cannot drift from it — pointing it at the GET-only <c>/simple/</c>
+    /// index renders a config whose every <c>twine upload</c> fails with 405.
+    /// </summary>
+    [Fact]
+    public void PyPi_TwineRecipe_PointsAtTheUploadRoute()
+    {
+        string uploadRoute = Assert.Single(
+            typeof(Dependably.Api.PyPiController).GetMethods()
+                .SelectMany(m => m.GetCustomAttributes(typeof(Microsoft.AspNetCore.Mvc.HttpPostAttribute), inherit: false))
+                .Cast<Microsoft.AspNetCore.Mvc.HttpPostAttribute>()
+                .Select(a => a.Template!));
+
+        var recipe = Assert.Single(
+            SetupRecipeCatalog.Build("pypi", BaseUrl)!.Recipes,
+            r => r.Variant == "twine" && r.Operation == "publish");
+
+        var pypirc = Assert.Single(recipe.Files);
+        Assert.Contains($"repository = {BaseUrl}{uploadRoute}\n", pypirc.Body);
+    }
+
     // ecosystem switch { "npm" => Npm(baseUrl), … _ => null }
     [GeneratedRegex(@"ecosystem\s+switch\s*\{(?<body>.*?)_\s*=>\s*null", RegexOptions.Singleline)]
     private static partial Regex BuildSwitchBodyRegex();

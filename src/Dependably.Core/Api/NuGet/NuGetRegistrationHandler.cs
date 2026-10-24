@@ -262,7 +262,13 @@ public sealed class NuGetRegistrationHandler(
     private async Task<IActionResult> ServeProxyMergedRegistrationAsync(
         HttpContext httpContext, string orgId, string id, string normalizedId, Package? pkg, bool semVer2, CancellationToken ct)
     {
-        var proxyCacheKey = new NuGetRegistrationKey(orgId, normalizedId, semVer2) { IsProxy = true };
+        // Keyed by the request's public base as well: the registration and package-content URLs
+        // inside are built from it, so another authority's document must never answer here.
+        var proxyCacheKey = new NuGetRegistrationKey(orgId, normalizedId, semVer2)
+        {
+            IsProxy = true,
+            PublicBase = urls.BaseUrl(httpContext),
+        };
         if (cache.TryGet(proxyCacheKey, out byte[]? proxyHit) && proxyHit is not null)
         {
             // This request made no upstream call, so it reports neither ok nor error. The
@@ -315,7 +321,7 @@ public sealed class NuGetRegistrationHandler(
     private async Task<IActionResult> ServeLocalRegistrationAsync(
         HttpContext httpContext, string orgId, string id, string normalizedId, Package pkg, bool semVer2, CancellationToken ct)
     {
-        var localCacheKey = new NuGetRegistrationKey(orgId, normalizedId, semVer2);
+        var localCacheKey = new NuGetRegistrationKey(orgId, normalizedId, semVer2) { PublicBase = urls.BaseUrl(httpContext) };
 
         // Capture the invalidation generation AND the org policy epoch token before reading any
         // policy-dependent state below — mirroring RenderedResponseCache.GetOrRebuildAsync. A
@@ -391,7 +397,7 @@ public sealed class NuGetRegistrationHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string normalizedId, CancellationToken ct)
     {
-        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct);
+        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct: ct);
         return ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions);
     }
 
@@ -547,26 +553,30 @@ public sealed class NuGetRegistrationHandler(
     // 64 leaves each, so even a thousand-version package externalizes well under this; the cap is
     // a backstop against a hostile or malformed index listing pages without end, not a limit any
     // real package reaches. A page past the cap keeps its upstream @id and stays dereferenceable.
-    private const int MaxExternalizedPagesPerIndex = 32;
+    // The deprecation refresh's listing read (NuGetUpstreamListingFetcher) uses the same bound.
+    internal const int MaxExternalizedPagesPerIndex = 32;
 
     // Fetches one externalized registration page document, or returns null when it must not be
     // fetched.
     //
-    // The page @id is upstream-controlled, so it is host-pinned to one of the org's configured
-    // nuget upstreams before any request is made: a compromised or hostile index could otherwise
-    // name any host and turn this into a server-side request forgery with the upstream's
-    // credentials attached. The credential is only threaded for the upstream whose host matched,
-    // never carried to a host named by the document.
+    // The page @id is upstream-controlled, so it is pinned to the origin (scheme, host and port)
+    // of one of the org's configured nuget upstreams before any request is made: a compromised or
+    // hostile index could otherwise name any host and turn this into a server-side request forgery
+    // with the upstream's credentials attached, or name http:// on the configured https:// host and
+    // pull the credential over plaintext. A page off every configured origin is refused rather than
+    // fetched anonymously, so the client keeps the upstream's own refusal semantics. The credential
+    // is only threaded for the upstream whose origin matched, never carried to one the document
+    // named.
     private async Task<string?> FetchUpstreamRegistrationPageAsync(
         string orgId, string pageUrl, CancellationToken ct)
     {
         var bases = await registries.ResolveAsync(orgId, "nuget", ct);
-        var source = bases.FirstOrDefault(b => UpstreamHostPin.IsSameHost(b.Url, pageUrl));
+        var source = bases.FirstOrDefault(b => UpstreamHostPin.IsSameOrigin(b.Url, pageUrl));
         if (source is null)
         {
             // RenderedCompactJsonFormatter JSON-encodes {Url}.
             logger.LogWarning(
-                "NuGet upstream registration page {Url} is not on a configured upstream host; " +
+                "NuGet upstream registration page {Url} is not on a configured upstream origin; " +
                 "leaving the page externalized.", pageUrl);
             return null;
         }

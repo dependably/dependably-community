@@ -16,6 +16,49 @@ public sealed class MetadataResponseCacheTests
     private static MemoryCache NewCache() =>
         new(new MemoryCacheOptions { SizeLimit = 50 * 1024 * 1024 });
 
+    // ── Public-base variants ───────────────────────────────────────────────────
+
+    [Fact]
+    public void PublicBaseVariants_AreSeparateEntries_AndOneFamilyEvictRetiresThemAll()
+    {
+        var cache = new RenderedResponseCache<NpmPackumentKey>(NewCache(), MetadataCacheKeys.NpmPackument);
+        var a = new NpmPackumentKey("org1", "pkg") { PublicBase = "https://a.example.test" };
+        var b = new NpmPackumentKey("org1", "pkg") { PublicBase = "https://a.example.test:1" };
+        var otherPackage = new NpmPackumentKey("org1", "other") { PublicBase = "https://a.example.test" };
+        cache.Set(a, [1], TimeSpan.FromMinutes(5));
+        cache.Set(b, [2], TimeSpan.FromMinutes(5));
+        cache.Set(otherPackage, [3], TimeSpan.FromMinutes(5));
+
+        Assert.True(cache.TryGet(a, out byte[]? fromA));
+        Assert.Equal(new byte[] { 1 }, fromA);
+        Assert.True(cache.TryGet(b, out byte[]? fromB));
+        Assert.Equal(new byte[] { 2 }, fromB);
+
+        // The eviction site names the package only, never a host.
+        cache.Evict(new NpmPackumentKey("org1", "pkg"));
+
+        Assert.False(cache.TryGet(a, out _));
+        Assert.False(cache.TryGet(b, out _));
+        Assert.True(cache.TryGet(otherPackage, out _));
+    }
+
+    [Fact]
+    public void PublicBaseVariant_FillCapturedBeforeFamilyEvict_IsDiscarded_FreshFillIsKept()
+    {
+        var cache = new RenderedResponseCache<NpmPackumentKey>(NewCache(), MetadataCacheKeys.NpmPackument);
+        var a = new NpmPackumentKey("org1", "pkg") { PublicBase = "https://a.example.test" };
+
+        long stale = cache.GetGeneration(a);
+        cache.Evict(new NpmPackumentKey("org1", "pkg"));
+        Assert.False(cache.SetIfGenerationUnchanged(a, [1], TimeSpan.FromMinutes(5), stale));
+        Assert.False(cache.TryGet(a, out _));
+
+        long fresh = cache.GetGeneration(a);
+        Assert.True(cache.SetIfGenerationUnchanged(a, [2], TimeSpan.FromMinutes(5), fresh));
+        Assert.True(cache.TryGet(a, out byte[]? kept));
+        Assert.Equal(new byte[] { 2 }, kept);
+    }
+
     // ── Consistency guarantee ──────────────────────────────────────────────────
 
     [Fact]
@@ -452,6 +495,101 @@ public sealed class MetadataResponseCacheTests
         Assert.Equal(new byte[] { 9 }, postFlip);
         Assert.True(cache.TryGet(keyA, out byte[]? cached));
         Assert.Equal(new byte[] { 9 }, cached);
+    }
+
+    [Fact]
+    public async Task OrgPolicyEpoch_PreCapturedToken_ExpiresAWriteWhoseDecisionPredatesTheFlip()
+    {
+        // Mixed scenario: a handler captures the org epoch for two orgs, reads their policy state,
+        // and only then reaches the cache. Org A's epoch is bumped in that gap (a settings PUT or
+        // a reservation add); org B's is not. A's rebuild still answers its own request but must
+        // leave nothing behind; B's caches as normal.
+        var epochStore = new OrgCacheEpochStore();
+        var cache = new RenderedResponseCache<MavenMetadataKey>(
+            NewCache(), MetadataCacheKeys.MavenMetadata, epochStore);
+        var keyA = new MavenMetadataKey("org-a", "com.acme", "lib") { IsProxy = true };
+        var keyB = new MavenMetadataKey("org-b", "com.acme", "lib") { IsProxy = true };
+
+        var tokenA = cache.CaptureOrgEpochToken("org-a");
+        var tokenB = cache.CaptureOrgEpochToken("org-b");
+        epochStore.Invalidate("org-a");
+
+        byte[]? a = await cache.GetOrRebuildAsync(
+            keyA, TimeSpan.FromMinutes(5), _ => Task.FromResult<byte[]?>([1]), CancellationToken.None, tokenA);
+        byte[]? b = await cache.GetOrRebuildAsync(
+            keyB, TimeSpan.FromMinutes(5), _ => Task.FromResult<byte[]?>([2]), CancellationToken.None, tokenB);
+
+        Assert.Equal(new byte[] { 1 }, a);
+        Assert.Equal(new byte[] { 2 }, b);
+        Assert.False(cache.TryGet(keyA, out _));
+        Assert.True(cache.TryGet(keyB, out _));
+    }
+
+    [Fact]
+    public async Task OrgPolicyEpoch_WithoutPreCapturedToken_BindsToTheEpochLiveAtTheCacheCall()
+    {
+        // The twin of the test above, pinning why a handler must pass its token: with none, the
+        // rebuild captures on entry, after the flip, and the pre-flip decision is cached.
+        var epochStore = new OrgCacheEpochStore();
+        var cache = new RenderedResponseCache<MavenMetadataKey>(
+            NewCache(), MetadataCacheKeys.MavenMetadata, epochStore);
+        var key = new MavenMetadataKey("org-a", "com.acme", "lib") { IsProxy = true };
+
+        _ = cache.CaptureOrgEpochToken("org-a");
+        epochStore.Invalidate("org-a");
+
+        _ = await cache.GetOrRebuildAsync(
+            key, TimeSpan.FromMinutes(5), _ => Task.FromResult<byte[]?>([1]), CancellationToken.None);
+
+        Assert.True(cache.TryGet(key, out _));
+    }
+
+    [Fact]
+    public void CaptureOrgEpochToken_IsNullWhenTheCacheHasNoEpochStore()
+    {
+        var cache = new RenderedResponseCache<MavenMetadataKey>(NewCache(), MetadataCacheKeys.MavenMetadata);
+
+        Assert.Null(cache.CaptureOrgEpochToken("org-a"));
+    }
+
+    [Fact]
+    public void Maven_ProxyAndLocalVariants_AreDistinctEntries()
+    {
+        var cache = new RenderedResponseCache<MavenMetadataKey>(NewCache(), MetadataCacheKeys.MavenMetadata);
+        var local = new MavenMetadataKey("org1", "com.acme", "lib");
+        var proxy = new MavenMetadataKey("org1", "com.acme", "lib") { IsProxy = true };
+
+        cache.Set(proxy, [1], TimeSpan.FromMinutes(5));
+
+        Assert.False(cache.TryGet(local, out _));
+        Assert.True(cache.TryGet(proxy, out _));
+    }
+
+    [Theory]
+    [InlineData("proxy")]
+    [InlineData("1.0-SNAPSHOT:proxy")]
+    [InlineData("local")]
+    public void Maven_VersionTextNeverAliasesAnotherVariantOrFlavour(string version)
+    {
+        // A Maven version is free text, so no spelling of it may turn a local version-level key
+        // into the proxy variant of a neighbouring key (or the other way round). Every key in
+        // this set must format to a distinct string.
+        MavenMetadataKey[] keys =
+        [
+            new("org1", "com.acme", "lib"),
+            new("org1", "com.acme", "lib") { IsProxy = true },
+            new("org1", "com.acme", "lib", version),
+            new("org1", "com.acme", "lib", version) { IsProxy = true },
+            new("org1", "com.acme", "lib", "1.0-SNAPSHOT"),
+            new("org1", "com.acme", "lib", "1.0-SNAPSHOT") { IsProxy = true },
+        ];
+
+        string[] formatted = keys.Select(MetadataCacheKeys.MavenMetadata).ToArray();
+        Assert.Equal(formatted.Length, formatted.Distinct(StringComparer.Ordinal).Count());
+
+        var cache = new RenderedResponseCache<MavenMetadataKey>(NewCache(), MetadataCacheKeys.MavenMetadata);
+        cache.Set(new MavenMetadataKey("org1", "com.acme", "lib") { IsProxy = true }, [1], TimeSpan.FromMinutes(5));
+        Assert.False(cache.TryGet(new MavenMetadataKey("org1", "com.acme", "lib", version), out _));
     }
 
     // ── MetadataConcurrencyGate integration ──────────────────────────────────────

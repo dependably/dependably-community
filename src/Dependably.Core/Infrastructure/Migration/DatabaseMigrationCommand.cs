@@ -59,6 +59,15 @@ public static class DatabaseMigrationCommand
         return RunCoreAsync(args, configuration, loggerFactory, time, ct);
     }
 
+    /// <summary>
+    /// The schema initializer the command applies to the target, built with the command's own
+    /// configuration so the settings the initializer reads (<c>UPGRADE_FLOOR_OVERRIDE</c> among them)
+    /// work from the command as they do from a server boot.
+    /// </summary>
+    internal static SchemaInitializer CreateTargetInitializer(
+        IMetadataStore target, IConfiguration configuration, ILoggerFactory loggerFactory, TimeProvider time) =>
+        new(target, loggerFactory.CreateLogger<SchemaInitializer>(), config: configuration, time: time);
+
     private static async Task<int> RunCoreAsync(
         string[] args,
         IConfiguration configuration,
@@ -91,7 +100,8 @@ public static class DatabaseMigrationCommand
         var source = new SqliteMetadataStore(SourceConnectionString(parsed.SourcePath));
         var target = new NpgsqlMetadataStore(parsed.TargetConnectionString);
         var migrator = new SqliteToPostgresMigrator(
-            source, target, loggerFactory.CreateLogger<SqliteToPostgresMigrator>());
+            source, target, loggerFactory.CreateLogger<SqliteToPostgresMigrator>(),
+            CreateTargetInitializer(target, configuration, loggerFactory, time));
 
         try
         {

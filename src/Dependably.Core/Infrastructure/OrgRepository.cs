@@ -1,6 +1,9 @@
+using System.Collections.Concurrent;
+using System.Data.Common;
 using Dapper;
 using Dependably.Infrastructure.Identity;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Infrastructure;
 
@@ -26,6 +29,7 @@ public sealed class OrgRepository
     private readonly TimeProvider _time;
     private readonly UserTokenVersionStore? _tokenVersions;
     private readonly EnvelopeProtector? _envelope;
+    private readonly ITenantSlugCacheInvalidator? _tenantCache;
 
     // In-flight quota reservations for this process. Owned here rather than injected because
     // OrgRepository is the single gate every write path goes through (hosted publish, OCI push,
@@ -33,24 +37,53 @@ public sealed class OrgRepository
     // repository instance is one ledger is one view of a tenant's uncommitted bytes.
     private readonly StorageQuotaLedger _storageLedger = new();
 
-    public OrgRepository(IMetadataStore db, IMemoryCache? cache = null, TimeProvider? time = null, UserTokenVersionStore? tokenVersions = null, EnvelopeProtector? envelope = null)
+    // Per-org generation token for the settings cache, bound to each settings entry as an
+    // expiration trigger. InvalidateSettingsCache retires it, so a fill that read the row before
+    // a settings write and stores after the write's invalidation installs an already-expired
+    // entry instead of re-caching the pre-change settings.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _settingsFillGuards =
+        new(StringComparer.Ordinal);
+
+    public OrgRepository(
+        IMetadataStore db,
+        IMemoryCache? cache = null,
+        TimeProvider? time = null,
+        UserTokenVersionStore? tokenVersions = null,
+        EnvelopeProtector? envelope = null,
+        ITenantSlugCacheInvalidator? tenantCache = null)
     {
         _db = db;
         _cache = cache;
         _time = time ?? TimeProvider.System;
         _tokenVersions = tokenVersions;
         _envelope = envelope;
+        _tenantCache = tenantCache;
     }
 
     private static string SettingsCacheKey(string orgId) => "org-settings:" + orgId;
 
+    // Test seam (InternalsVisibleTo Dependably.Tests): the live settings generation-guard count,
+    // asserted to drain when a fill throws so the map cannot grow unbounded.
+    internal int SettingsFillGuardCount => _settingsFillGuards.Count;
+
+    private CancellationTokenSource GuardFor(string orgId) =>
+        _settingsFillGuards.GetOrAdd(orgId, static _ => new CancellationTokenSource());
+
     /// <summary>
-    /// Invalidates the in-memory cache for <paramref name="orgId"/>'s settings. Called by
-    /// settings-update endpoints so policy changes take effect immediately for the next
-    /// request rather than waiting for the TTL.
+    /// Invalidates the in-memory cache for <paramref name="orgId"/>'s settings and retires its
+    /// fill generation, so a <see cref="GetSettingsAsync"/> read already in flight from before
+    /// this call cannot cache what it read. Called after every settings write, and by
+    /// <see cref="Caching.OrgWideCacheEviction"/> before it moves the org's rendered-metadata
+    /// epoch, so a render on the fresh epoch never reads settings cached from the pre-change row.
     /// </summary>
     public void InvalidateSettingsCache(string orgId)
-        => _cache?.Remove(SettingsCacheKey(orgId));
+    {
+        _cache?.Remove(SettingsCacheKey(orgId));
+        if (_settingsFillGuards.TryRemove(orgId, out var retired))
+        {
+            retired.Cancel();
+        }
+    }
 
     /// <summary>
     /// Look up a tenant by slug. By default returns active tenants only; set
@@ -103,6 +136,7 @@ public sealed class OrgRepository
                COALESCE(block_kev, 'off') as BlockKev,
                COALESCE(block_kev_ransomware, 'off') as BlockKevRansomware,
                COALESCE(block_ssvc_exploitation, 'off') as BlockSsvcExploitation,
+               COALESCE(oci_scan_enforcement, 'off') as OciScanEnforcement,
                max_epss_percentile_tolerance as MaxEpssPercentileTolerance,
                max_epss_tolerance as MaxEpssTolerance,
                COALESCE(block_install_scripts, 'off') as BlockInstallScripts,
@@ -125,21 +159,51 @@ public sealed class OrgRepository
             return cached;
         }
 
+        if (_cache is null)
+        {
+            return await ReadSettingsAsync(orgId, ct);
+        }
+
+        // The generation is snapshotted before the read, so a read that overlaps an
+        // InvalidateSettingsCache stores an entry that is already expired. From here on the guard
+        // MUST end up either tied to a cache entry or retired in the finally; the map lives as long
+        // as this singleton, so a read that throws would otherwise leak it.
+        var guardSource = GuardFor(orgId);
+        bool tied = false;
+        try
+        {
+            var result = await ReadSettingsAsync(orgId, ct);
+
+            // Cache both hit and miss so a non-existent org_id doesn't repeatedly hit the DB.
+            // Size = 1 counts as one logical slot against the global SizeLimit; the actual
+            // OrgSettings record is small (<1 KB) compared to the byte-array metadata entries.
+            var options = new MemoryCacheEntryOptions
+            {
+                SlidingExpiration = SettingsCacheTtl,
+                AbsoluteExpirationRelativeToNow = SettingsCacheTtl,
+                Size = 1,
+            };
+            options.AddExpirationToken(new CancellationChangeToken(guardSource.Token));
+            CacheFillGuard.TieToEntryLifetime(options, _settingsFillGuards, orgId, guardSource);
+            _cache.Set(key, result, options);
+            tied = true;
+            return result;
+        }
+        finally
+        {
+            if (!tied)
+            {
+                CacheFillGuard.RetireUnbound(_settingsFillGuards, orgId, guardSource);
+            }
+        }
+    }
+
+    private async Task<OrgSettings?> ReadSettingsAsync(string orgId, CancellationToken ct)
+    {
         await using var conn = await _db.OpenAsync(ct);
-        var result = await conn.QuerySingleOrDefaultAsync<OrgSettings>(
+        return await conn.QuerySingleOrDefaultAsync<OrgSettings>(
             OrgSettingsSelect,
             new { orgId });
-
-        // Cache both hit and miss so a non-existent org_id doesn't repeatedly hit the DB.
-        // Size = 1 counts as one logical slot against the global SizeLimit; the actual
-        // OrgSettings record is small (<1 KB) compared to the byte-array metadata entries.
-        _cache?.Set(key, result, new MemoryCacheEntryOptions
-        {
-            SlidingExpiration = SettingsCacheTtl,
-            AbsoluteExpirationRelativeToNow = SettingsCacheTtl,
-            Size = 1,
-        });
-        return result;
     }
 
     public async Task<Org?> GetByIdAsync(string id, CancellationToken ct = default)
@@ -242,40 +306,265 @@ public sealed class OrgRepository
     /// <summary>
     /// Toggle the tenant lifecycle gate between <c>'active'</c>, <c>'suspended'</c>, and
     /// <c>'read_only'</c>. Other states (<c>'archived'</c>, <c>'deleting'</c>) are enterprise-only
-    /// and rejected. Soft-deleted tenants are not updated — use restore first. Returns true when a
-    /// row was changed.
+    /// and rejected. Soft-deleted tenants are not updated — use restore first. The result says
+    /// whether a row was changed and what the write revoked.
+    ///
+    /// Suspending a tenant is how an operator contains an incident, so it ends the tenant's
+    /// access for good rather than only while the tenant stays suspended: in the same transaction
+    /// as the status write it revokes every credential the tenant's members and integrations hold
+    /// (<see cref="RevokeTenantAccessAsync"/>) — sessions, remembered devices, personal access
+    /// tokens, service tokens, pending password-reset and email-change links, and pending invites
+    /// — so restoring the tenant later never revives one that existed before or during the
+    /// suspension. Revoked tokens are deleted, as a single-token revoke deletes them, and are
+    /// re-issued after the restore. Revoking on entry is the containment guarantee: the old
+    /// credentials are dead from the moment of suspension, whatever the request gate does
+    /// afterwards, and none can be minted while the tenant is locked out, because
+    /// <see cref="TenantStatusEnforcementMiddleware"/> refuses login and the whole management
+    /// plane too. A transition out of a lockout status revokes again, so a lockout status written
+    /// by any other path (an enterprise <c>'archived'</c> or <c>'deleting'</c>, a direct database
+    /// edit) cannot revive old credentials either. Nothing can be issued while the tenant is
+    /// locked out, so everything still present on the way out predates the lockout or was written
+    /// around the application, and all of it is revoked.
+    ///
+    /// The lockout statuses are every status other than <c>'active'</c> and <c>'read_only'</c>,
+    /// matching the middleware. <c>'read_only'</c> is not one: its members keep using the
+    /// management plane, keep signing in and keep pulling with their tokens, so moving a tenant
+    /// into or out of it revokes nothing.
     /// </summary>
-    public async Task<bool> UpdateOrgStatusAsync(string orgId, string status, CancellationToken ct = default)
+    public async Task<TenantLifecycleResult> UpdateOrgStatusAsync(string orgId, string status, CancellationToken ct = default)
     {
         if (status is not ("active" or "suspended" or "read_only"))
         {
-            return false;
+            return TenantLifecycleResult.NotApplied;
         }
 
-        await using var conn = await _db.OpenAsync(ct);
-        int rows = await conn.ExecuteAsync(
-            "UPDATE orgs SET status = @status WHERE id = @orgId AND deleted_at IS NULL",
-            new { orgId, status });
-        return rows > 0;
+        var revoked = RevokedAccess.Nothing;
+        await using (var conn = await OpenLifecycleConnectionAsync(ct))
+        {
+            await using var tx = await conn.BeginTransactionAsync(ct);
+
+            // Lock the org row before deciding, so a concurrent status write cannot land between
+            // this read and the update below: on Postgres FOR UPDATE makes the other writer wait
+            // for this commit (or this read wait for its commit, then read what it wrote). SQLite
+            // has no row locks and needs none: its transactions begin IMMEDIATE, so writers are
+            // already serialized. A missing or soft-deleted tenant reads null and is not updated.
+            string? prior = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+                _db.Provider == DbProvider.Postgres
+                    ? "SELECT status FROM orgs WHERE id = @orgId AND deleted_at IS NULL FOR UPDATE"
+                    : "SELECT status FROM orgs WHERE id = @orgId AND deleted_at IS NULL",
+                new { orgId }, transaction: tx, cancellationToken: ct));
+            if (prior is null)
+            {
+                await tx.RollbackAsync(ct);
+                return TenantLifecycleResult.NotApplied;
+            }
+
+            if (RevokesAccess(prior, status))
+            {
+                revoked = await RevokeTenantAccessAsync(conn, tx, orgId, ct);
+            }
+
+            await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE orgs SET status = @status WHERE id = @orgId AND deleted_at IS NULL",
+                new { orgId, status }, transaction: tx, cancellationToken: ct));
+            await tx.CommitAsync(ct);
+        }
+
+        EvictRevoked(revoked);
+        return new TenantLifecycleResult(true, revoked.Counts);
     }
 
-    /// <summary>Soft-delete: set deleted_at = now. Idempotent (re-deleting just refreshes the timestamp).</summary>
-    public async Task SoftDeleteOrgAsync(string orgId, CancellationToken ct = default)
+    /// <summary>
+    /// The statuses <see cref="TenantStatusEnforcementMiddleware"/> refuses every request for:
+    /// every status except <c>'active'</c> and <c>'read_only'</c>.
+    /// </summary>
+    internal static bool IsLockoutStatus(string status) => status is not ("active" or "read_only");
+
+    /// <summary>
+    /// A status write revokes the tenant's credentials when the tenant enters a lockout status or
+    /// leaves one. <paramref name="prior"/> is the status read under the row lock.
+    /// </summary>
+    internal static bool RevokesAccess(string prior, string next) =>
+        IsLockoutStatus(next) || IsLockoutStatus(prior);
+
+    /// <summary>
+    /// Soft-delete: set deleted_at = now. Idempotent (re-deleting just refreshes the timestamp).
+    /// A soft-deleted tenant is locked out like a suspended one, so the same transaction revokes
+    /// every credential of the tenant (see <see cref="UpdateOrgStatusAsync"/>), and a restore
+    /// within the grace window never revives one.
+    /// </summary>
+    public async Task<TenantLifecycleResult> SoftDeleteOrgAsync(string orgId, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
-            "UPDATE orgs SET deleted_at = @now WHERE id = @orgId",
-            new { orgId, now = _time.GetUtcNow().ToUtcIso() });
+        RevokedAccess revoked;
+        await using (var conn = await OpenLifecycleConnectionAsync(ct))
+        {
+            await using var tx = await conn.BeginTransactionAsync(ct);
+            int rows = await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE orgs SET deleted_at = @now WHERE id = @orgId",
+                new { orgId, now = _time.GetUtcNow().ToUtcIso() }, transaction: tx, cancellationToken: ct));
+            if (rows == 0)
+            {
+                await tx.RollbackAsync(ct);
+                return TenantLifecycleResult.NotApplied;
+            }
+
+            revoked = await RevokeTenantAccessAsync(conn, tx, orgId, ct);
+            await tx.CommitAsync(ct);
+        }
+
+        EvictRevoked(revoked);
+        return new TenantLifecycleResult(true, revoked.Counts);
     }
 
-    /// <summary>Restore: clear deleted_at. Returns true if a row was restored.</summary>
-    public async Task<bool> RestoreOrgAsync(string orgId, CancellationToken ct = default)
+    /// <summary>
+    /// Restore: clear deleted_at. The result is not applied when the tenant was not soft-deleted.
+    /// Revokes every credential of the tenant again in the same transaction, for the same reason a
+    /// transition out of a lockout status does (see <see cref="UpdateOrgStatusAsync"/>). Tokens
+    /// revoked by the deletion stay revoked: the tenant's integrations need new ones.
+    /// </summary>
+    public async Task<TenantLifecycleResult> RestoreOrgAsync(string orgId, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        int rows = await conn.ExecuteAsync(
-            "UPDATE orgs SET deleted_at = NULL WHERE id = @orgId AND deleted_at IS NOT NULL",
-            new { orgId });
-        return rows > 0;
+        RevokedAccess revoked;
+        await using (var conn = await OpenLifecycleConnectionAsync(ct))
+        {
+            await using var tx = await conn.BeginTransactionAsync(ct);
+            int rows = await conn.ExecuteAsync(new CommandDefinition(
+                "UPDATE orgs SET deleted_at = NULL WHERE id = @orgId AND deleted_at IS NOT NULL",
+                new { orgId }, transaction: tx, cancellationToken: ct));
+            if (rows == 0)
+            {
+                await tx.RollbackAsync(ct);
+                return TenantLifecycleResult.NotApplied;
+            }
+
+            revoked = await RevokeTenantAccessAsync(conn, tx, orgId, ct);
+            await tx.CommitAsync(ct);
+        }
+
+        EvictRevoked(revoked);
+        return new TenantLifecycleResult(true, revoked.Counts);
+    }
+
+    /// <summary>
+    /// The connection a tenant lifecycle write runs on. It must see every member and token of the
+    /// target tenant whatever scope the caller declared: under row-level security a connection
+    /// bound to another tenant would see none of them, and the <c>orgs</c> write (no tenant
+    /// column) would still succeed, flipping the status with nothing revoked.
+    /// </summary>
+    private Task<DbConnection> OpenLifecycleConnectionAsync(CancellationToken ct) =>
+        // xtenant: an operator's tenant lifecycle write revokes every member of the target tenant,
+        // whichever tenant scope the caller runs under; each statement filters on that tenant.
+        _db.OpenCrossTenantAsync("tenant lifecycle write revokes the target tenant's members", ct);
+
+    /// <summary>What <see cref="RevokeTenantAccessAsync"/> removed, plus what to evict after the commit.</summary>
+    private sealed record RevokedAccess(
+        IReadOnlyList<string> UserIds, IReadOnlyList<string> TokenHashes, TenantAccessRevocation Counts)
+    {
+        public static readonly RevokedAccess Nothing = new([], [], TenantAccessRevocation.None);
+    }
+
+    /// <summary>
+    /// Revokes every credential that lets someone act as <paramref name="orgId"/>, inside the
+    /// caller's transaction, every statement scoped by the tenant id:
+    /// <list type="bullet">
+    /// <item>sessions and remembered devices (<see cref="RevokeTenantSessionsAsync"/>);</item>
+    /// <item>personal access tokens and service tokens, deleted the way a single-token revoke
+    /// deletes them. That includes the reader token an edge node pulls with, so edge sync stops
+    /// until the tenant issues the edge a new one;</item>
+    /// <item>pending password-reset and email-change links. A reset link mailed before the lockout
+    /// would otherwise set a password after it, and an email-change link would repoint the
+    /// account's recovery address;</item>
+    /// <item>pending invites, which would otherwise mint a new member after the restore on the
+    /// strength of an invite sent before or during the incident.</item>
+    /// </list>
+    /// Consumed links and accepted invites are history and stay.
+    /// </summary>
+    private static async Task<RevokedAccess> RevokeTenantAccessAsync(
+        DbConnection conn, DbTransaction tx, string orgId, CancellationToken ct)
+    {
+        var (userIds, devices) = await RevokeTenantSessionsAsync(conn, tx, orgId, ct);
+
+        var userTokenHashes = (await conn.QueryAsync<string>(new CommandDefinition(
+            "DELETE FROM user_tokens WHERE org_id = @orgId RETURNING token_hash",
+            new { orgId }, transaction: tx, cancellationToken: ct))).AsList();
+        var serviceTokenHashes = (await conn.QueryAsync<string>(new CommandDefinition(
+            "DELETE FROM service_tokens WHERE org_id = @orgId RETURNING token_hash",
+            new { orgId }, transaction: tx, cancellationToken: ct))).AsList();
+        int resetLinks = await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM password_reset_tokens WHERE org_id = @orgId AND consumed_at IS NULL",
+            new { orgId }, transaction: tx, cancellationToken: ct));
+        int emailChangeLinks = await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM email_change_tokens WHERE org_id = @orgId AND consumed_at IS NULL",
+            new { orgId }, transaction: tx, cancellationToken: ct));
+        int invites = await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM invites WHERE org_id = @orgId AND accepted_at IS NULL",
+            new { orgId }, transaction: tx, cancellationToken: ct));
+
+        return new RevokedAccess(
+            userIds,
+            [.. userTokenHashes, .. serviceTokenHashes],
+            new TenantAccessRevocation(
+                Members: userIds.Count,
+                TrustedDevices: devices,
+                UserTokens: userTokenHashes.Count,
+                ServiceTokens: serviceTokenHashes.Count,
+                PasswordResetLinks: resetLinks,
+                EmailChangeLinks: emailChangeLinks,
+                PendingInvites: invites));
+    }
+
+    /// <summary>
+    /// Ends every session and remembered device held by a member of <paramref name="orgId"/>,
+    /// inside the caller's transaction: bumps <c>users.token_version</c> (so each outstanding
+    /// session JWT carries a stale <c>tver</c>), rotates <c>security_stamp</c> alongside it, and
+    /// deletes the tenant-realm trusted devices. Returns the affected user ids, whose cached
+    /// versions the caller evicts after the commit, and the number of devices deleted.
+    /// </summary>
+    private static async Task<(List<string> UserIds, int Devices)> RevokeTenantSessionsAsync(
+        DbConnection conn, DbTransaction tx, string orgId, CancellationToken ct)
+    {
+        var revoked = (await conn.QueryAsync<string>(new CommandDefinition(
+            """
+            UPDATE users
+            SET token_version = token_version + 1, security_stamp = @stamp
+            WHERE tenant_id = @orgId
+            RETURNING id
+            """,
+            new { orgId, stamp = Guid.NewGuid().ToString() }, transaction: tx, cancellationToken: ct))).AsList();
+        int devices = revoked.Count > 0
+            ? await DeleteTenantTrustedDevicesAsync(conn, tx, orgId, ct)
+            : 0;
+
+        return (revoked, devices);
+    }
+
+    private static Task<int> DeleteTenantTrustedDevicesAsync(
+        DbConnection conn, DbTransaction tx, string orgId, CancellationToken ct) =>
+        conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM mfa_trusted_devices WHERE tenant_id = @orgId AND realm = 'tenant'",
+            new { orgId }, transaction: tx, cancellationToken: ct));
+
+    // After the commit, per the cache fill guard's invalidate-after-write rule: a version fill
+    // that read the pre-change row holds a generation this call cancels. A cached token
+    // resolution is dropped here too, so a revoked token is refused on its next request rather
+    // than when the resolve cache's one-second entry lapses.
+    private void EvictRevoked(RevokedAccess revoked)
+    {
+        if (_tokenVersions is not null)
+        {
+            foreach (string userId in revoked.UserIds)
+            {
+                _tokenVersions.Invalidate(userId);
+            }
+        }
+
+        if (_cache is not null)
+        {
+            foreach (string tokenHash in revoked.TokenHashes)
+            {
+                TokenRepository.EvictResolution(_cache, tokenHash);
+            }
+        }
     }
 
     /// <summary>List org IDs that have been soft-deleted longer than <paramref name="graceDays"/>.</summary>
@@ -289,26 +578,30 @@ public sealed class OrgRepository
         return rows.ToList();
     }
 
+    /// <summary>
+    /// Creates an org with its settings row and the standard public upstreams. The operator's
+    /// tenant-create endpoint does the same inside one transaction and also creates the owner;
+    /// this is the bare form. Either way the subdomain resolver's cached "no such tenant" for the
+    /// slug is evicted once the rows are committed.
+    /// </summary>
     public async Task<Org> CreateOrgAsync(string slug, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
         string id = Guid.NewGuid().ToString("N");
-        await conn.ExecuteAsync(
-            "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
-            new { id, slug });
-        await conn.ExecuteAsync(
-            "INSERT INTO org_settings (org_id) VALUES (@id)",
-            new { id });
-        // Seed the standard public upstreams so a new org proxies out of the box. No IConfiguration
-        // here, so config overrides aren't visible — falls back to the hard-coded public defaults.
-        await UpstreamRegistrySeeder.SeedForOrgAsync(conn, id, config: null, ct: ct);
-        return new Org { Id = id, Slug = slug, CreatedAt = _time.GetUtcNow() };
-    }
+        await using (var conn = await _db.OpenAsync(ct))
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO orgs (id, slug) VALUES (@id, @slug)",
+                new { id, slug });
+            await conn.ExecuteAsync(
+                "INSERT INTO org_settings (org_id) VALUES (@id)",
+                new { id });
+            // Seed the standard public upstreams so a new org proxies out of the box. No IConfiguration
+            // here, so config overrides aren't visible — falls back to the hard-coded public defaults.
+            await UpstreamRegistrySeeder.SeedForOrgAsync(conn, id, config: null, ct: ct);
+        }
 
-    public async Task DeleteOrgAsync(string orgId, CancellationToken ct = default)
-    {
-        await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync("DELETE FROM orgs WHERE id = @orgId", new { orgId });
+        _tenantCache?.InvalidateSlug(slug);
+        return new Org { Id = id, Slug = slug, CreatedAt = _time.GetUtcNow() };
     }
 
     /// <summary>
@@ -340,7 +633,9 @@ public sealed class OrgRepository
         string? raw = await conn.ExecuteScalarAsync<string?>(
             "SELECT value FROM instance_settings WHERE key = @key",
             new { key });
-        return raw is null ? null : (_envelope?.Unprotect(raw) ?? raw);
+        return raw is null
+            ? null
+            : (_envelope?.Unprotect(raw, new ProtectedSecretRow(key, "instance_settings", key, null)) ?? raw);
     }
 
     /// <summary>
@@ -435,11 +730,22 @@ public sealed class OrgRepository
 
     /// <summary>
     /// system_admin support flow: locks/unlocks/disables a tenant user account. Returns false
-    /// if the (email, tenantSlug) pair doesn't resolve. Idempotent on the same target status.
-    /// When locking or disabling, bumps <c>users.token_version</c> to invalidate every active
-    /// session JWT for the affected user (the same mechanism as a password change). The
-    /// in-memory token-version cache is evicted immediately so the next request re-reads the
-    /// new version rather than serving from a stale cache entry.
+    /// if the (email, tenantSlug) pair doesn't resolve.
+    ///
+    /// Locking or disabling a user is how an operator cuts them off, so it ends their access at
+    /// once rather than when their session expires: the same UPDATE bumps
+    /// <c>users.token_version</c> (rotating <c>security_stamp</c> alongside), so every
+    /// outstanding session JWT carries a stale <c>tver</c>; the cached version is evicted after
+    /// the commit; and the user's tenant-realm remembered devices are dropped in the same
+    /// transaction.
+    ///
+    /// Re-activating bumps too. A lock or disable through this method has already staled the old
+    /// sessions, but a status written by any other path may not have, and a non-active user holds
+    /// no working session to lose (<see cref="UserTokenVersionStore"/> answers null for one), so
+    /// the extra bump guarantees re-activation never revives a pre-lock session. Every transition
+    /// that bumps also drops the remembered devices, re-activation included, so a device row
+    /// written while the user was not active cannot skip the second factor afterwards. Setting
+    /// an active user to active changes nothing.
     /// </summary>
     public async Task<bool> SetUserAccountStatusAsync(
         string email, string tenantSlug, string accountStatus, CancellationToken ct = default)
@@ -449,54 +755,83 @@ public sealed class OrgRepository
             return false;
         }
 
-        await using var conn = await _db.OpenAsync(ct);
-
-        // Resolving to locked/disabled kills active sessions by bumping token_version.
-        // Restoring to active does not bump — the user has no live sessions while locked.
-        bool bumpVersion = accountStatus is "locked" or "disabled";
-
-        // xtenant: system_admin flow that resolves a user by email + org slug across tenants.
-        IEnumerable<string>? affectedIds = null;
-        if (bumpVersion && _tokenVersions is not null)
+        string stamp = Guid.NewGuid().ToString();
+        List<(string Id, string? Stamp)> updated;
+        await using (var conn = await _db.OpenAsync(ct))
         {
-            affectedIds = await conn.QueryAsync<string>(
+            await using var tx = await conn.BeginTransactionAsync(ct);
+
+            // SET expressions read the pre-update row on both providers, so the CASE compares the
+            // previous status with the new one. RETURNING reads the post-update row, so a returned
+            // stamp equals the fresh one exactly when this write bumped that user.
+            // xtenant: system_admin flow that resolves a user by email + org slug across tenants.
+            updated = (await conn.QueryAsync<(string Id, string? Stamp)>(new CommandDefinition(
                 """
-                SELECT u.id FROM users u
-                JOIN orgs o ON o.id = u.tenant_id
-                WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
+                UPDATE users
+                SET token_version = CASE WHEN account_status = 'active' AND @status = 'active'
+                                         THEN token_version ELSE token_version + 1 END,
+                    security_stamp = CASE WHEN account_status = 'active' AND @status = 'active'
+                                          THEN security_stamp ELSE @stamp END,
+                    account_status = @status
+                WHERE id IN (
+                    SELECT u.id FROM users u
+                    JOIN orgs o ON o.id = u.tenant_id
+                    WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
+                )
+                RETURNING id, security_stamp
                 """,
-                new { email, tenantSlug });
+                new { status = accountStatus, stamp, email, tenantSlug },
+                transaction: tx, cancellationToken: ct))).AsList();
+
+            foreach (var (userId, returnedStamp) in updated)
+            {
+                if (!string.Equals(returnedStamp, stamp, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // xtenant: user_id is FK-bound to the user the UPDATE above just resolved; realm
+                // pins the tenant realm (system-realm rows reference system_admins, not users).
+                await conn.ExecuteAsync(new CommandDefinition(
+                    "DELETE FROM mfa_trusted_devices WHERE user_id = @userId AND realm = 'tenant'",
+                    new { userId }, transaction: tx, cancellationToken: ct));
+            }
+
+            await tx.CommitAsync(ct);
         }
 
-        string sql = bumpVersion
-            ? """
-              UPDATE users SET account_status = @status, token_version = token_version + 1
-              WHERE id IN (
-                  SELECT u.id FROM users u
-                  JOIN orgs o ON o.id = u.tenant_id
-                  WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
-              )
-              """
-            : """
-              UPDATE users SET account_status = @status
-              WHERE id IN (
-                  SELECT u.id FROM users u
-                  JOIN orgs o ON o.id = u.tenant_id
-                  WHERE lower(u.email) = lower(@email) AND o.slug = @tenantSlug
-              )
-              """;
-
-        int rows = await conn.ExecuteAsync(sql, new { status = accountStatus, email, tenantSlug });
-
-        if (rows > 0 && affectedIds is not null)
+        // After the commit, per the cache fill guard's invalidate-after-write rule: a fill that
+        // read the pre-change row holds a generation this call cancels.
+        if (_tokenVersions is not null)
         {
-            foreach (string userId in affectedIds)
+            foreach (var (userId, _) in updated)
             {
-                _tokenVersions!.Invalidate(userId);
+                _tokenVersions.Invalidate(userId);
             }
         }
 
-        return rows > 0;
+        return updated.Count > 0;
+    }
+
+    /// <summary>
+    /// True when the user belongs to <paramref name="tenantId"/>, is <c>active</c>, and their
+    /// <c>token_version</c> still equals <paramref name="tokenVersion"/>. Read live, not through
+    /// the cached version store: the tenant second-factor step uses it to refuse a challenge
+    /// issued before a lock, disable, re-activation, role change or credential change, before it
+    /// mints a session or remembers a device.
+    /// </summary>
+    public async Task<bool> IsUserActiveAtVersionAsync(
+        string userId, string tenantId, long tokenVersion, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        int matches = await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*) FROM users
+            WHERE id = @userId AND tenant_id = @tenantId
+              AND account_status = 'active' AND token_version = @tokenVersion
+            """,
+            new { userId, tenantId, tokenVersion });
+        return matches > 0;
     }
 
     /// <summary>
@@ -631,10 +966,10 @@ public sealed class OrgRepository
 
     /// <summary>
     /// Erases a user from a tenant. With 1:1 user:tenant, "remove member" is a full account erasure.
-    /// A bare <c>DELETE FROM users</c> is neither complete nor reliable: seven columns across other
+    /// A bare <c>DELETE FROM users</c> is neither complete nor reliable: ten columns across other
     /// tables carry a restrict FK to <c>users(id)</c>, so deleting a user who ever invited a
     /// colleague, reserved a namespace, decided a quarantine, dismissed an alert, created a claim,
-    /// or allowlisted an install script would throw a foreign-key violation (an unhandled 500 during
+    /// allowlisted an install script, a licence, or a package name grant would throw a foreign-key violation (an unhandled 500 during
     /// routine offboarding); and several tables with no FK (audit_log, audit_event, activity,
     /// mfa_trusted_devices, login_attempts) would otherwise retain the person's IPs, device
     /// fingerprints, a still-valid trusted-device credential, and email-derived hashes after the
@@ -643,8 +978,9 @@ public sealed class OrgRepository
     /// This runs the whole erasure in one transaction:
     ///   * deletes invites the user created (created_by is NOT NULL + restrict, so it cannot be
     ///     nulled — the attribution goes with the invite);
-    ///   * nulls the six nullable attribution columns (reserved_namespace / quarantine / alert /
-    ///     claim / claim_history / install_script_allowlist) — the audit value is the action, not
+    ///   * nulls the nine nullable attribution columns (reserved_namespace / quarantine / alert /
+    ///     claim / claim_history / install_script_allowlist / license_allowlist / license_blocklist /
+    ///     package_name_grant) — the audit value is the action, not
     ///     the actor's continued existence;
     ///   * revokes the user's trusted-device rows (a remembered-device cookie is a separate live
     ///     credential that must not outlive the account — Art. 32);
@@ -679,7 +1015,8 @@ public sealed class OrgRepository
             "DELETE FROM invites WHERE org_id = @orgId AND created_by = @userId",
             new { orgId, userId }, transaction: tx, cancellationToken: ct));
 
-        // Six nullable attribution columns carry a restrict FK: null them so the row (the action's
+        // Nine nullable attribution columns carry a restrict FK (RemoveOrgMemberRestrictFkComplianceTests
+        // derives the set from both schema files and fails when one is missing here): null them so the row (the action's
         // forensic record) survives while the actor reference is removed.
         foreach (string sql in new[]
         {
@@ -689,6 +1026,9 @@ public sealed class OrgRepository
             "UPDATE claim                SET created_by  = NULL WHERE org_id = @orgId AND created_by  = @userId",
             "UPDATE claim_history        SET actor_id    = NULL WHERE org_id = @orgId AND actor_id    = @userId",
             "UPDATE install_script_allowlist SET created_by = NULL WHERE org_id = @orgId AND created_by = @userId",
+            "UPDATE license_allowlist    SET created_by  = NULL WHERE org_id = @orgId AND created_by  = @userId",
+            "UPDATE license_blocklist    SET created_by  = NULL WHERE org_id = @orgId AND created_by  = @userId",
+            "UPDATE package_name_grant   SET created_by  = NULL WHERE org_id = @orgId AND created_by  = @userId",
         })
         {
             await conn.ExecuteAsync(new CommandDefinition(sql, new { orgId, userId }, transaction: tx, cancellationToken: ct));
@@ -929,3 +1269,29 @@ public sealed record OrgSettingsUpdate(
     // IANA zone name used to render stored instants for tenant users who have not chosen one.
     // null = leave unchanged. Display only — instants are stored in UTC regardless.
     string? DefaultTimezone = null);
+
+/// <summary>
+/// The outcome of a tenant lifecycle write (<see cref="OrgRepository.UpdateOrgStatusAsync"/>,
+/// <see cref="OrgRepository.SoftDeleteOrgAsync"/>, <see cref="OrgRepository.RestoreOrgAsync"/>):
+/// whether a row was changed, and what the write revoked.
+/// </summary>
+public sealed record TenantLifecycleResult(bool Applied, TenantAccessRevocation Revoked)
+{
+    public static readonly TenantLifecycleResult NotApplied = new(false, TenantAccessRevocation.None);
+}
+
+/// <summary>
+/// Counts of what a tenant lifecycle write revoked, recorded on the operator's audit entry for
+/// the write. <see cref="Members"/> is the number of members whose sessions were ended.
+/// </summary>
+public sealed record TenantAccessRevocation(
+    int Members,
+    int TrustedDevices,
+    int UserTokens,
+    int ServiceTokens,
+    int PasswordResetLinks,
+    int EmailChangeLinks,
+    int PendingInvites)
+{
+    public static readonly TenantAccessRevocation None = new(0, 0, 0, 0, 0, 0, 0);
+}

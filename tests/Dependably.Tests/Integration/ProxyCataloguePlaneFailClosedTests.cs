@@ -362,29 +362,29 @@ public sealed class ProxyCataloguePlaneFailClosedTests
 
     /// <summary>
     /// A filename that does not parse as {pkgname}-{pkgver}-r{pkgrel} has no coordinate to record
-    /// or gate on — the controller's documented "never fail on an unparsable filename" contract
-    /// skips both. It must therefore keep serving through an outage: refusing it would trade a
-    /// bypass that does not exist for an availability loss that does.
+    /// or gate on, and no name to check against the reserved namespaces, so it is never fetched
+    /// upstream: the answer is a 404 whether or not the cache plane is healthy, and the stubbed
+    /// upstream is never asked.
     /// </summary>
     [Fact]
-    public async Task Apk_UnparsableFilename_KeepsServingDuringOutage()
+    public async Task Apk_UnparsableFilename_IsRefusedNotFetched_DuringOutage()
     {
         const string release = "v3.93";
         const string repo = "main";
         const string arch = "x86_64";
         const string file = "no-release-suffix.apk";
-        byte[] apkBytes = "unparsable-apk-bytes"u8.ToArray();
 
         await using var factory = new DependablyFactory();
-        StubApk(factory, release, repo, arch, file, apkBytes);
+        StubApk(factory, release, repo, arch, file, "unparsable-apk-bytes"u8.ToArray());
 
         await BreakCachePlaneAsync(factory);
 
         using var client = factory.CreateClientWithBearer(await factory.CreateToken("pull"));
         var resp = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{file}");
 
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal(apkBytes, await resp.Content.ReadAsByteArrayAsync());
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.DoesNotContain(factory.MockUpstream.LogEntries,
+            e => e.RequestMessage?.Path?.EndsWith(file, StringComparison.Ordinal) == true);
     }
 
     // ── Cache-plane outage ────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ namespace Dependably.Tests.Unit.Identity;
 
 /// <summary>
 /// Unit tests for <see cref="SystemAdminTokenVersionStore"/>. Exercises the null-for-missing,
-/// cached-read, and post-Invalidate re-read paths.
+/// null-for-non-active, cached-read, and post-Invalidate re-read paths.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class SystemAdminTokenVersionStoreTests : IAsyncLifetime
@@ -57,6 +57,29 @@ public sealed class SystemAdminTokenVersionStoreTests : IAsyncLifetime
 
         // Synchronous retire on the terminal branch — no cache entry, so no eviction callback to
         // await. On the pre-fix code the guard leaks and this reads 1.
+        Assert.Equal(0, store.FillGuardCount);
+    }
+
+    // ── non-active admin: no current version ──────────────────────────────────
+
+    [Theory]
+    [InlineData("locked")]
+    [InlineData("disabled")]
+    public async Task GetCurrentVersionAsync_NonActiveAdmin_ReturnsNull_AndRetiresItsFillGuard(string status)
+    {
+        // Defence in depth behind the version bump on a status change: a locked or disabled admin
+        // has no current version, so even a status write that forgot to bump token_version fails
+        // the admin's sessions on the next uncached read. The answer is never cached, so its guard
+        // is retired on the not-cached path like a missing row's.
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE system_admins SET account_status = @status WHERE id = 'sa1'", new { status });
+        }
+
+        var store = Store();
+
+        Assert.Null(await store.GetCurrentVersionAsync("sa1"));
         Assert.Equal(0, store.FillGuardCount);
     }
 

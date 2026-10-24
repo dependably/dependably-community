@@ -65,19 +65,24 @@ public sealed class OciStagingJanitorTests : IAsyncLifetime
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private OciStagingJanitorService BuildJanitor(int ttlMinutes = 60, string? schedule = "0 0 1 1 0")
+    private OciStagingJanitorService BuildJanitor(
+        int ttlMinutes = 60, string? schedule = "0 0 1 1 0", IDictionary<string, string?>? extra = null)
     {
-        var cfg = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["PROXY_STAGING_PATH"] = _stagingDir,
-                ["OCI_UPLOAD_TTL_MINUTES"] = ttlMinutes.ToString(),
-                ["OCI_STAGING_TTL_SCHEDULE"] = schedule,
-            })
-            .Build();
+        var values = new Dictionary<string, string?>
+        {
+            ["PROXY_STAGING_PATH"] = _stagingDir,
+            ["OCI_UPLOAD_TTL_MINUTES"] = ttlMinutes.ToString(),
+            ["OCI_STAGING_TTL_SCHEDULE"] = schedule,
+        };
+        foreach (var kv in extra ?? new Dictionary<string, string?>())
+        {
+            values[kv.Key] = kv.Value;
+        }
+
+        var cfg = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
         return new OciStagingJanitorService(
             _db, cfg, NullLogger<OciStagingJanitorService>.Instance, _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock), new AirGapMode(cfg));
     }
 
     private OciUploadService BuildUploadService(IStagingDiskInfo? disk = null)
@@ -162,6 +167,59 @@ public sealed class OciStagingJanitorTests : IAsyncLifetime
         Assert.Equal(0, await CountAllSessionsAsync());
         Assert.False(File.Exists(stagingFile), "staging file should be deleted after sweep");
     }
+
+    // ── Job switches: the pass gate agrees with the instance report ──────────
+
+    // AIR_GAPPED and the whole-set switch exempt the janitor (local disk reclaim, no egress), so
+    // the pass still sweeps and the report says it runs; edge mode keeps it too.
+    [Theory]
+    [InlineData("DISABLE_BACKGROUND_JOBS", "true")]
+    [InlineData("DISABLE_BACKGROUND_JOBS", "all")]
+    [InlineData("AIR_GAPPED", "true")]
+    [InlineData("DEPLOYMENT_MODE", "edge")]
+    [InlineData("DISABLE_BACKGROUND_JOBS", "vuln-scan,cache-eviction")]
+    public async Task SwitchThatExemptsTheJanitor_PassStillSweeps(string key, string value)
+    {
+        string uploadId = Guid.NewGuid().ToString("N");
+        await SeedSessionAsync(_orgId, uploadId, _clock.GetUtcNow().AddMinutes(-120));
+        var extra = new Dictionary<string, string?> { [key] = value };
+
+        var summary = await BuildJanitor(ttlMinutes: 60, extra: extra).RunOnceAsync();
+
+        Assert.Equal(1, summary.SessionsSwept);
+        Assert.Equal(0, await CountAllSessionsAsync());
+        Assert.Null(BackgroundJobDisabledReason.For(AirGap(extra), OciStagingJanitorService.JobName));
+    }
+
+    // Naming the janitor is an explicit decision about it, and it is real: the pass sweeps
+    // nothing, and the report attributes the stop to the list. Mixed with the other names.
+    [Theory]
+    [InlineData("oci-staging-janitor", null)]
+    [InlineData("vuln-scan, OCI-STAGING-JANITOR ,threat-feed", null)]
+    [InlineData("oci-staging-janitor", "true")]
+    public async Task JanitorNamedInList_PassSkips(string disableJobs, string? airGapped)
+    {
+        string uploadId = Guid.NewGuid().ToString("N");
+        await SeedSessionAsync(_orgId, uploadId, _clock.GetUtcNow().AddMinutes(-120));
+        string stagingFile = Path.Combine(_stagingDir, $"oci-upload-{uploadId}");
+        var extra = new Dictionary<string, string?>
+        {
+            ["DISABLE_BACKGROUND_JOBS"] = disableJobs,
+            ["AIR_GAPPED"] = airGapped,
+        };
+
+        var summary = await BuildJanitor(ttlMinutes: 60, extra: extra).RunOnceAsync();
+
+        Assert.Equal(default, summary);
+        Assert.Equal(1, await CountAllSessionsAsync());
+        Assert.True(File.Exists(stagingFile), "a named-disabled janitor must not delete staging files");
+        Assert.Equal(
+            BackgroundJobDisabledReason.Named,
+            BackgroundJobDisabledReason.For(AirGap(extra), OciStagingJanitorService.JobName));
+    }
+
+    private static AirGapMode AirGap(IDictionary<string, string?> values) =>
+        new(new ConfigurationBuilder().AddInMemoryCollection(values).Build());
 
     [Fact]
     public async Task FreshSession_IsNotSwept()

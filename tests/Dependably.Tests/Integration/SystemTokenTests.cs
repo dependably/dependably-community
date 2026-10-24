@@ -251,6 +251,30 @@ public sealed class SystemTokenTests : IClassFixture<DependablyMultiFactory>, IA
         Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
+    /// <summary>
+    /// The owner-bound invalidation holds for every non-active status, set through the operator
+    /// API rather than the repository, and the token is proven live first so the 401 cannot come
+    /// from a token that never authenticated.
+    /// </summary>
+    [Theory]
+    [InlineData("disabled")]
+    [InlineData("locked")]
+    public async Task OwnerSetNonActiveThroughTheApi_TokenStopsResolving(string status)
+    {
+        var (adminId, adminClient) = await CreateSecondAdminAsync();
+        var (token, _) = await MintTokenAsync(adminClient, $"owner-{status}-" + Guid.NewGuid().ToString("N")[..6]);
+
+        using var tokenClient = ClientWithSystemToken(DependablyMultiFactory.ApexHost, token);
+        Assert.Equal(HttpStatusCode.OK, (await tokenClient.GetAsync("/api/v1/system/tenants")).StatusCode);
+
+        using var bootstrapAdmin = await _factory.CreateSystemAdminClient();
+        var statusResp = await bootstrapAdmin.PatchAsJsonAsync(
+            $"/api/v1/system/admins/{adminId}/account-status", new { accountStatus = status });
+        Assert.Equal(HttpStatusCode.NoContent, statusResp.StatusCode);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await tokenClient.GetAsync("/api/v1/system/tenants")).StatusCode);
+    }
+
     [Fact]
     public async Task OwnerDeleted_TokenGoneViaForeignKeyCascade()
     {
@@ -442,6 +466,80 @@ public sealed class SystemTokenTests : IClassFixture<DependablyMultiFactory>, IA
             expiresAt = DateTimeOffset.UtcNow.AddDays(365),
         });
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("", "name")]
+    [InlineData("   ", "name")]
+    [InlineData("TOO_LONG_NAME", "name")]
+    [InlineData("deploy\u0007bell", "name")]
+    public async Task Mint_InvalidName_Returns422NamingTheField_AndMintsNothing(string name, string field)
+    {
+        using var sysAdmin = await _factory.CreateSystemAdminClient();
+        int before = (await sysAdmin.GetFromJsonAsync<JsonElement>("/api/v1/system/tokens")).GetArrayLength();
+
+        // now-ok: request body validated against the host's real clock.
+        var resp = await sysAdmin.PostAsJsonAsync("/api/v1/system/tokens", new
+        {
+            name = name == "TOO_LONG_NAME" ? new string('n', 201) : name,
+            expiresAt = DateTimeOffset.UtcNow.AddDays(30),
+        });
+
+        await ProblemBody.AssertValidationAsync(resp, field);
+        Assert.Equal(before, (await sysAdmin.GetFromJsonAsync<JsonElement>("/api/v1/system/tokens")).GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("TOO_LONG_DESCRIPTION")]
+    [InlineData("line one\nline two")]
+    public async Task Mint_InvalidDescription_Returns422_AndMintsNothing(string description)
+    {
+        using var sysAdmin = await _factory.CreateSystemAdminClient();
+        int before = (await sysAdmin.GetFromJsonAsync<JsonElement>("/api/v1/system/tokens")).GetArrayLength();
+
+        // now-ok: request body validated against the host's real clock.
+        var resp = await sysAdmin.PostAsJsonAsync("/api/v1/system/tokens", new
+        {
+            name = "described-" + Guid.NewGuid().ToString("N")[..6],
+            expiresAt = DateTimeOffset.UtcNow.AddDays(30),
+            description = description == "TOO_LONG_DESCRIPTION" ? new string('d', 201) : description,
+        });
+
+        await ProblemBody.AssertValidationAsync(resp, "description");
+        Assert.Equal(before, (await sysAdmin.GetFromJsonAsync<JsonElement>("/api/v1/system/tokens")).GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Mint_DescriptionIsTrimmed_AndBlankDescriptionIsStoredAsNone()
+    {
+        using var sysAdmin = await _factory.CreateSystemAdminClient();
+
+        var (_, trimmed) = await MintTokenAsync(
+            sysAdmin, "trim-" + Guid.NewGuid().ToString("N")[..6], description: "  nightly tenant sync  ");
+        var (_, blank) = await MintTokenAsync(
+            sysAdmin, "blank-" + Guid.NewGuid().ToString("N")[..6], description: "   ");
+
+        Assert.Equal("nightly tenant sync", trimmed.GetProperty("description").GetString());
+        Assert.Equal(JsonValueKind.Null, blank.GetProperty("description").ValueKind);
+    }
+
+    [Fact]
+    public async Task Revoke_RemovesOnlyTheNamedToken_AndUnknownIdIs404()
+    {
+        using var sysAdmin = await _factory.CreateSystemAdminClient();
+        var (_, doomed) = await MintTokenAsync(sysAdmin, "doomed-" + Guid.NewGuid().ToString("N")[..6]);
+        var (_, kept) = await MintTokenAsync(sysAdmin, "kept-" + Guid.NewGuid().ToString("N")[..6]);
+        string doomedId = doomed.GetProperty("id").GetString()!;
+        string keptId = kept.GetProperty("id").GetString()!;
+
+        Assert.Equal(HttpStatusCode.NoContent, (await sysAdmin.DeleteAsync($"/api/v1/system/tokens/{doomedId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await sysAdmin.DeleteAsync($"/api/v1/system/tokens/{doomedId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await sysAdmin.DeleteAsync($"/api/v1/system/tokens/{Guid.NewGuid():N}")).StatusCode);
+
+        var list = await sysAdmin.GetFromJsonAsync<JsonElement>("/api/v1/system/tokens");
+        Assert.DoesNotContain(list.EnumerateArray(), t => t.GetProperty("id").GetString() == doomedId);
+        Assert.Contains(list.EnumerateArray(), t => t.GetProperty("id").GetString() == keptId);
     }
 
     /// <summary>

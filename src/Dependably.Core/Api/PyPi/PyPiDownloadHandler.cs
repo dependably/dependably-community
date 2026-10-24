@@ -401,7 +401,7 @@ public sealed class PyPiDownloadHandler(
     }
 
     // Proxies a PyPI artifact from upstream on a cache miss. Evaluates the allowlist/blocklist,
-    // passthrough, and claim gates before triggering the outbound fetch.
+    // passthrough, and claim gates before any outbound request.
     // Cohesive upstream-fetch helper; pkgVersions + parsed each carry distinct resolution state.
 #pragma warning disable S107
     private async Task<IActionResult> FetchFromUpstreamAsync(
@@ -410,15 +410,13 @@ public sealed class PyPiDownloadHandler(
         TokenRecord? token, OrgSettings settings, string? sourceIp, CancellationToken ct)
 #pragma warning restore S107
     {
-        // Cache miss — proxy from upstream.
+        // Cache miss — proxy from upstream. Every refusal gate runs before the upstream URL is
+        // resolved: resolution fetches the upstream's simple index for this package name with
+        // the upstream credential, so a request refused afterwards has already disclosed the
+        // name (a reserved or local_only internal name) to every configured upstream.
+        // The anonymous-pull check has already run in both callers' branches (RequireUploadedAuth
+        // for an uploaded row, TryServeProxyCacheHitAsync otherwise).
         httpContext.Response.Headers["X-Cache"] = "MISS";
-        var bases = await registries.ResolveAsync(orgId, "pypi", ct);
-        var resolved = await proxyFetcher.ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, bases, ct);
-        if (resolved is null)
-        {
-            return new NotFoundResult();
-        }
-
         var gateError = await proxyFetcher.CheckProxyAllowlistBlocklistAsync(orgId, parsed, token, settings, sourceIp, ct);
         if (gateError is not null)
         {
@@ -434,8 +432,15 @@ public sealed class PyPiDownloadHandler(
         // air-gap implicit local_only) and reserved names disable proxy serving with the
         // same silent 404.
         string purlNameForClaim = pkgVersions?.Package.PurlName ?? parsed.PurlName;
-        return await reserved.IsReservedAsync(orgId, "pypi", purlNameForClaim, ct)
-            || !await claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlNameForClaim, ct)
+        if (await reserved.IsReservedAsync(orgId, "pypi", purlNameForClaim, ct)
+            || !await claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlNameForClaim, ct))
+        {
+            return new NotFoundResult();
+        }
+
+        var bases = await registries.ResolveAsync(orgId, "pypi", ct);
+        var resolved = await proxyFetcher.ResolveProxyUpstreamUrlAsync(file, parsed, pkgVersions, bases, ct);
+        return resolved is null
             ? new NotFoundResult()
             : await proxyFetcher.FetchAndCacheUpstreamAsync(
                 httpContext,

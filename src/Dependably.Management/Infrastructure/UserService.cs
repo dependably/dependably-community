@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Dapper;
 
 namespace Dependably.Infrastructure;
@@ -31,44 +32,70 @@ public sealed class UserService
     }
 
     /// <summary>
-    /// Creates a tenant user from an accepted invite. Caller is responsible for invite
-    /// consumption (<see cref="InviteRepository.AcceptAsync"/>) before calling this so the
-    /// invite is single-use even if user creation later fails.
+    /// Redeems an invite: consumes it and creates the tenant user it grants in one transaction
+    /// (<see cref="InviteRepository.RedeemAsync{TResult}"/>), so a suspension cannot land between
+    /// the two and leave an account the revoke never saw. Returns null when the invite is unknown,
+    /// expired, or already accepted; throws <see cref="Dependably.Storage.TenantNotReadyException"/>
+    /// when the tenant is locked out, with the invite left pending. The password is hashed before
+    /// the transaction opens, so the BCrypt work never holds the write lock.
     ///
-    /// <para>Returns null when the tenant already holds an account for that address. The address
-    /// is stored canonically, so an invite addressed to a different casing of an existing member's
-    /// email resolves to the same account rather than minting a second one: two rows satisfying
-    /// every <c>lower(email)</c> lookup is what lets an invite silently take over the login of an
-    /// address that already belongs to someone. The uniqueness constraint is the arbiter, not a
-    /// prior SELECT — an invite can be accepted concurrently with any other account creation.</para>
+    /// <para>A null <see cref="InviteAcceptance.UserId"/> means the tenant already holds an
+    /// account for that address: the invite is still spent, and the answer is "sign in", not a
+    /// second account resolving to the same login.</para>
     /// </summary>
-    public async Task<string?> CreateFromInviteAsync(InviteRecord invite, string password, CancellationToken ct = default)
+    public static async Task<InviteAcceptance?> AcceptInviteAsync(
+        InviteRepository invites, string rawToken, string password, CancellationToken ct = default)
     {
         string passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 12);
-        string userId = Guid.NewGuid().ToString("N");
-        await using var conn = await _db.OpenAsync(ct);
-        try
-        {
-            await conn.ExecuteAsync(
-                """
-                INSERT INTO users (id, tenant_id, email, password_hash, role)
-                VALUES (@id, @tenantId, @email, @hash, @role)
-                """,
-                new
-                {
-                    id = userId,
-                    tenantId = invite.OrgId,
-                    email = EmailNormalizer.Normalize(invite.Email),
-                    hash = passwordHash,
-                    role = invite.Role ?? "member",
-                });
-        }
-        catch (Exception ex) when (IsUniqueViolation(ex))
-        {
-            return null;
-        }
+        var redeemed = await invites.RedeemAsync(
+            rawToken, (invite, conn, tx) => InsertFromInviteAsync(conn, tx, invite, passwordHash, ct), ct);
+        return redeemed is null ? null : new InviteAcceptance(redeemed.Credential, redeemed.Result);
+    }
 
+    /// <summary>
+    /// Creates a tenant user from an invite the caller has already consumed. Returns null when the
+    /// tenant already holds an account for that address. It neither consumes the invite nor runs
+    /// the tenant-status gate, so it is internal: it exists for tests of the insert's address
+    /// canonicalization, and every production redemption goes through
+    /// <see cref="AcceptInviteAsync"/>, which does both in the same transaction.
+    /// </summary>
+    internal async Task<string?> CreateFromInviteAsync(InviteRecord invite, string password, CancellationToken ct = default)
+    {
+        string passwordHash = BCrypt.Net.BCrypt.HashPassword(password, workFactor: 12);
+        await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        string? userId = await InsertFromInviteAsync(conn, tx, invite, passwordHash, ct);
+        await tx.CommitAsync(ct);
         return userId;
+    }
+
+    // The address is stored canonically, so an invite addressed to a different casing of an
+    // existing member's email resolves to the same account rather than minting a second one: two
+    // rows satisfying every lower(email) lookup is what lets an invite silently take over the
+    // login of an address that already belongs to someone. UNIQUE (tenant_id, email) is the
+    // arbiter, not a prior SELECT, because an invite can be accepted concurrently with any other
+    // account creation; DO NOTHING turns the collision into zero rows instead of an error that
+    // would abort the surrounding transaction on Postgres and take the invite consumption with it.
+    private static async Task<string?> InsertFromInviteAsync(
+        DbConnection conn, DbTransaction tx, InviteRecord invite, string passwordHash, CancellationToken ct)
+    {
+        string userId = Guid.NewGuid().ToString("N");
+        int inserted = await conn.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT INTO users (id, tenant_id, email, password_hash, role)
+            VALUES (@id, @tenantId, @email, @hash, @role)
+            ON CONFLICT DO NOTHING
+            """,
+            new
+            {
+                id = userId,
+                tenantId = invite.OrgId,
+                email = EmailNormalizer.Normalize(invite.Email),
+                hash = passwordHash,
+                role = invite.Role ?? "member",
+            },
+            transaction: tx, cancellationToken: ct));
+        return inserted == 0 ? null : userId;
     }
 
     /// <summary>
@@ -106,35 +133,43 @@ public sealed class UserService
         // consistent with the credential change; token_version remains the canonical per-request
         // session-invalidation signal.
         string stamp = Guid.NewGuid().ToString();
+
+        // The password write, session cut-off, token revocation, and device drop commit together:
+        // a fault between them must not leave a remembered device that skips the second factor
+        // under the new password.
+        await using var tx = await conn.BeginTransactionAsync(ct);
         // xtenant: self-service credential change keyed by the session subject's users PK.
-        await conn.ExecuteAsync(
+        await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE users SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
-            new { hash = newHash, stamp, id = userId });
+            new { hash = newHash, stamp, id = userId }, transaction: tx, cancellationToken: ct));
         // xtenant: reads back the same session-subject users PK just written.
-        long newVersion = await conn.ExecuteScalarAsync<long>(
-            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+        long newVersion = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+            "SELECT token_version FROM users WHERE id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
         // Revoke (delete) the user's API tokens — a rotated credential must cut off
         // everything minted under the old one. user_id is FK-bound to users.id, which is
         // already tenant-scoped.
         // xtenant: user_tokens.user_id is FK-bound to the session subject's users row.
-        int revokedApiTokens = await conn.ExecuteAsync(
-            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
+        int revokedApiTokens = await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
         // Revoke trusted-device records so remembered devices no longer bypass TOTP after
         // a password change. Optional dependency keeps existing test constructors working.
         if (_trustedDevices is not null)
         {
-            await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
+            await TrustedDeviceService.DeleteAllForUserAsync(conn, tx, userId, "tenant", ct);
         }
 
         // Any outstanding self-serve reset link is voided by any credential change — a password
         // change through one channel must never leave a still-valid reset link outstanding on
         // another.
         // xtenant: keyed by users PK; userId is the authenticated session's own subject claim.
-        await conn.ExecuteAsync(
-            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId });
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
+        await tx.CommitAsync(ct);
+
+        // After the commit, so a cache fill cannot re-read the pre-change version.
         _tokenVersions?.Invalidate(userId);
         return new PasswordChangeResult(PasswordChangeOutcome.Success, newVersion, revokedApiTokens);
     }
@@ -155,64 +190,105 @@ public sealed class UserService
     }
 
     /// <summary>
-    /// Applies a verified email change (GDPR Art. 16 rectification) and cuts off every session and
-    /// token minted under the old address. Returns the bumped <c>token_version</c>, or null when
+    /// Redeems an email-change link (GDPR Art. 16 rectification): consumes it and applies the
+    /// change in one transaction (<see cref="EmailChangeTokenRepository.RedeemAsync{TResult}"/>),
+    /// so a suspension cannot land between the two and leave a moved address the revoke never saw.
+    /// Returns null when the link is unknown, expired, or already used; throws
+    /// <see cref="Dependably.Storage.TenantNotReadyException"/> when the tenant is locked out, with
+    /// the link left pending. A null <see cref="EmailChangeConfirmation.NewTokenVersion"/> means
     /// the new address is already taken inside the tenant.
     ///
-    /// The session bump is not optional bookkeeping. Email is the account's login identifier and
-    /// the delivery address for password resets and security notices, so the change is a
-    /// credential-class event: anything holding a session issued to the old identity must
-    /// re-authenticate, exactly as it must after a password change.
+    /// <para>
+    /// The change cuts off every session and token minted under the old address, because email is
+    /// the account's login identifier and the delivery address for password resets and security
+    /// notices: it is a credential-class event, so anything holding a session issued to the old
+    /// identity must re-authenticate, exactly as it must after a password change.
+    /// </para>
     ///
-    /// <c>UNIQUE (tenant_id, email)</c> is the arbiter of a collision, not a prior SELECT. The
-    /// address is checked when the change is requested, but hours can pass before the link is
-    /// redeemed and another member may claim it meanwhile; catching the constraint violation here
-    /// is what makes the outcome correct rather than merely likely.
+    /// <para>
+    /// The address is checked when the change is requested, but hours can pass before the link is
+    /// redeemed and another member may claim it meanwhile, so the UPDATE carries the collision
+    /// check itself; a collision spends the link and changes nothing else. A concurrent claim that
+    /// commits between that check and the write still trips <c>UNIQUE (tenant_id, email)</c>,
+    /// which rolls the whole redemption back (the link stays redeemable) and reads as the same
+    /// conflict.
+    /// </para>
     /// </summary>
-    public async Task<long?> ApplyVerifiedEmailChangeAsync(
-        string userId, string newEmail, CancellationToken ct = default)
+    public async Task<EmailChangeConfirmation?> ConfirmEmailChangeAsync(
+        EmailChangeTokenRepository changeTokens, string rawToken, CancellationToken ct = default)
     {
-        string normalized = EmailNormalizer.Normalize(newEmail);
+        CredentialRedemption<EmailChangeTokenRecord, long?>? redeemed;
+        try
+        {
+            redeemed = await changeTokens.RedeemAsync(
+                rawToken, (consumed, conn, tx) => ApplyEmailChangeAsync(conn, tx, consumed, ct), ct);
+        }
+        catch (Exception ex) when (IsUniqueViolation(ex))
+        {
+            return new EmailChangeConfirmation(null, null);
+        }
+
+        if (redeemed is null)
+        {
+            return null;
+        }
+
+        if (redeemed.Result is not null)
+        {
+            _tokenVersions?.Invalidate(redeemed.Credential.UserId);
+        }
+
+        return new EmailChangeConfirmation(redeemed.Credential, redeemed.Result);
+    }
+
+    private async Task<long?> ApplyEmailChangeAsync(
+        DbConnection conn, DbTransaction tx, EmailChangeTokenRecord consumed, CancellationToken ct)
+    {
+        string normalized = EmailNormalizer.Normalize(consumed.NewEmail);
         // Rotating the Identity security_stamp alongside token_version keeps the Identity model
         // consistent; token_version remains the canonical per-request invalidation signal.
         string stamp = Guid.NewGuid().ToString();
+        string userId = consumed.UserId;
 
-        await using var conn = await _db.OpenAsync(ct);
-        try
-        {
-            // xtenant: keyed by the users PK the change token was minted for.
-            await conn.ExecuteAsync(
-                """
-                UPDATE users
-                SET email = @email, token_version = token_version + 1, security_stamp = @stamp
-                WHERE id = @id
-                """,
-                new { email = normalized, stamp, id = userId });
-        }
-        catch (Exception ex) when (IsUniqueViolation(ex))
+        // The collision predicate compares against the same tenant's rows only, so the address
+        // stays free to exist in another tenant.
+        // xtenant: keyed by the users PK the change token was minted for; the subquery is
+        // correlated to that row's own tenant_id.
+        int updated = await conn.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE users
+            SET email = @email, token_version = token_version + 1, security_stamp = @stamp
+            WHERE id = @id
+              AND NOT EXISTS (
+                  SELECT 1 FROM users other
+                  WHERE other.tenant_id = users.tenant_id AND other.email = @email AND other.id <> @id)
+            """,
+            new { email = normalized, stamp, id = userId }, transaction: tx, cancellationToken: ct));
+        if (updated == 0)
         {
             // Someone claimed the address between the request and the redemption.
             return null;
         }
 
         // xtenant: reads back the same users PK just written.
-        long newVersion = await conn.ExecuteScalarAsync<long>(
-            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+        long newVersion = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+            "SELECT token_version FROM users WHERE id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
         // xtenant: user_tokens.user_id is FK-bound to the users row above.
-        await conn.ExecuteAsync("DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
         if (_trustedDevices is not null)
         {
-            await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
+            await TrustedDeviceService.DeleteAllForUserAsync(conn, tx, userId, "tenant", ct);
         }
 
         // Any reset link outstanding against the OLD address must die with it — otherwise a link
         // mailed to the previous mailbox still resets the account that mailbox no longer owns.
         // xtenant: keyed by the same users PK.
-        await conn.ExecuteAsync("DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId });
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
-        _tokenVersions?.Invalidate(userId);
         return newVersion;
     }
 
@@ -223,51 +299,70 @@ public sealed class UserService
         || ex.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Completes a self-serve "forgot password" reset: sets the new credential and cuts off
-    /// every session/token minted under the old one, exactly like <see cref="ChangePasswordAsync"/>
-    /// but without a current-password check — the caller (<c>AuthController</c>) has already
-    /// authenticated the request via the one-shot reset token instead. Also voids any other
-    /// outstanding reset link for the user (defense against a stale second link being replayed
-    /// after the account's credential has already moved on) and clears
-    /// <c>must_change_password</c> so the freshly reset account is not immediately forced to
-    /// rotate again. Returns the bumped <c>token_version</c>.
+    /// Completes a self-serve "forgot password" reset: consumes the link and sets the new
+    /// credential in one transaction (<see cref="PasswordResetTokenRepository.RedeemAsync{TResult}"/>),
+    /// so a suspension cannot land between the two and leave a password the revoke never saw.
+    /// Returns the consumed link, or null when it is unknown, expired, or already used; throws
+    /// <see cref="Dependably.Storage.TenantNotReadyException"/> when the tenant is locked out, with
+    /// the link left pending. The password is hashed before the transaction opens.
+    ///
+    /// <para>
+    /// The write cuts off every session and token minted under the old credential, exactly like
+    /// <see cref="ChangePasswordAsync"/> but without a current-password check, since the one-shot
+    /// link is what authenticated the request. It also voids every other outstanding reset link
+    /// for the user (a stale second link must not be replayed after the credential has moved on)
+    /// and clears <c>must_change_password</c> so the freshly reset account is not immediately
+    /// forced to rotate again.
+    /// </para>
     /// </summary>
-    public async Task<long> ResetPasswordByRecoveryAsync(
-        string userId, string newPassword, CancellationToken ct = default)
+    public async Task<PasswordResetTokenRecord?> ResetPasswordWithLinkAsync(
+        PasswordResetTokenRepository resetTokens, string rawToken, string newPassword, CancellationToken ct = default)
     {
         string newHash = BCrypt.Net.BCrypt.HashPassword(newPassword, workFactor: 12);
+        var redeemed = await resetTokens.RedeemAsync(
+            rawToken, (consumed, conn, tx) => ApplyRecoveredPasswordAsync(conn, tx, consumed.UserId, newHash, ct), ct);
+        if (redeemed is null)
+        {
+            return null;
+        }
+
+        _tokenVersions?.Invalidate(redeemed.Credential.UserId);
+        return redeemed.Credential;
+    }
+
+    private async Task<long> ApplyRecoveredPasswordAsync(
+        DbConnection conn, DbTransaction tx, string userId, string newHash, CancellationToken ct)
+    {
         // Rotating the Identity security_stamp alongside token_version keeps the Identity model
         // consistent with the credential change; token_version remains the canonical per-request
         // session-invalidation signal.
         string stamp = Guid.NewGuid().ToString();
 
-        await using var conn = await _db.OpenAsync(ct);
         // xtenant: keyed by the users PK the reset token was minted for.
-        await conn.ExecuteAsync(
+        await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE users SET password_hash = @hash, must_change_password = 0, token_version = token_version + 1, security_stamp = @stamp WHERE id = @id",
-            new { hash = newHash, stamp, id = userId });
+            new { hash = newHash, stamp, id = userId }, transaction: tx, cancellationToken: ct));
         // xtenant: reads back the same users PK just written.
-        long newVersion = await conn.ExecuteScalarAsync<long>(
-            "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+        long newVersion = await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+            "SELECT token_version FROM users WHERE id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
         // Revoke (delete) the user's API tokens — a rotated credential must cut off everything
         // minted under the old one. user_id is FK-bound to users.id, which is already tenant-scoped.
         // xtenant: user_tokens.user_id is FK-bound to the reset token's users row.
-        await conn.ExecuteAsync(
-            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId });
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM user_tokens WHERE user_id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
         if (_trustedDevices is not null)
         {
-            await _trustedDevices.DeleteAllForUserAsync(userId, "tenant", ct);
+            await TrustedDeviceService.DeleteAllForUserAsync(conn, tx, userId, "tenant", ct);
         }
 
-        // Void every outstanding reset link for the user (including the one just consumed by the
-        // caller, and any stale link requested earlier) — replay defense.
+        // Void every outstanding reset link for the user (including the one just consumed, and
+        // any stale link requested earlier) — replay defense.
         // xtenant: keyed by the users PK the reset token was minted for.
-        await conn.ExecuteAsync(
-            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId });
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM password_reset_tokens WHERE user_id = @id", new { id = userId }, transaction: tx, cancellationToken: ct));
 
-        _tokenVersions?.Invalidate(userId);
         return newVersion;
     }
 
@@ -458,3 +553,17 @@ public sealed record UserContext(
     string? TenantDefaultTimezone = null,
     bool MfaEnabled = false,
     bool MfaEnrollmentRequired = false);
+
+/// <summary>
+/// A redeemed invite. <see cref="UserId"/> is the account it created, or null when the tenant
+/// already held an account for the invite's address (the invite is spent either way).
+/// </summary>
+public sealed record InviteAcceptance(InviteRecord Invite, string? UserId);
+
+/// <summary>
+/// A redeemed email-change link. <see cref="NewTokenVersion"/> is the account's bumped
+/// <c>token_version</c>, or null when the new address was already taken in the tenant.
+/// <see cref="Token"/> is the consumed link; it is null only when a concurrent claim of the
+/// address rolled the whole redemption back, which leaves the link unconsumed.
+/// </summary>
+public sealed record EmailChangeConfirmation(EmailChangeTokenRecord? Token, long? NewTokenVersion);

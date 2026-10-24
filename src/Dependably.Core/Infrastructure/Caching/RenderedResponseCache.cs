@@ -75,12 +75,21 @@ public class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, byte[]>
     /// When a process-wide concurrency gate was supplied at construction, each MISS rebuild
     /// acquires one gate slot before executing. Cache HITs return immediately without
     /// acquiring any slot.
+    ///
+    /// <paramref name="epochToken"/> is the org policy-epoch token the caller captured (via
+    /// <see cref="MetadataResponseCache{TKey,TValue}.CaptureOrgEpochToken"/>) before it read the
+    /// org state that chose <paramref name="key"/> and shaped <paramref name="rebuild"/> — proxy
+    /// settings, reservations, registries. When supplied, the stored entry binds to it instead of
+    /// to a token captured here, so an epoch bump landing between that read and this call still
+    /// expires the entry. When <see langword="null"/>, the token is captured on entry to the
+    /// rebuild, which covers only state the rebuild itself reads.
     /// </summary>
     public async Task<byte[]?> GetOrRebuildAsync(
         TKey key,
         TimeSpan ttl,
         Func<CancellationToken, Task<byte[]?>> rebuild,
-        CancellationToken ct)
+        CancellationToken ct,
+        Microsoft.Extensions.Primitives.IChangeToken? epochToken = null)
     {
         // Fast path: cache hit bypasses single-flight and the concurrency gate entirely.
         if (TryGet(key, out byte[]? cached) && cached is not null)
@@ -104,15 +113,16 @@ public class RenderedResponseCache<TKey> : MetadataResponseCache<TKey, byte[]>
                 // proxy-settings PUT that lands mid-rebuild must not have its Invalidate lost
                 // just because the eventual Set happens to run after a fresh epoch is already
                 // live. Binding to the token captured here means that write's entry is already
-                // expired the instant it lands.
-                var epochToken = CaptureEpochToken(key);
+                // expired the instant it lands. A caller that read policy state before this call
+                // supplies the token it captured ahead of that read instead.
+                var boundEpochToken = epochToken ?? CaptureEpochToken(key);
 
                 // CancellationToken.None: the shared task must not be cancelled by any one
                 // caller's disconnection — individual callers detach via WaitAsync(ct).
                 byte[]? bytes = await RebuildWithGateAsync(rebuild, CancellationToken.None);
                 if (bytes is not null)
                 {
-                    SetIfGenerationUnchanged(key, bytes, ttl, generation, epochToken);
+                    SetIfGenerationUnchanged(key, bytes, ttl, generation, boundEpochToken);
                 }
                 return bytes;
             }));

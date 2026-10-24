@@ -1,9 +1,11 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Protocol.Hex;
+using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
@@ -312,5 +314,104 @@ public sealed class HexControllerTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/hex/tarballs/demo-notaversion.tar")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/hex/packages/../etc")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/hex/api/packages/x")).StatusCode);
+    }
+
+    // ── docs under a reservation ──────────────────────────────────────────────
+
+    private void StubUpstreamDocs(string name, string version) =>
+        _factory.MockUpstream
+            .Given(Request.Create().WithPath($"/docs/{name}-{version}.tar.gz").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithHeader("Content-Type", "application/gzip")
+                .WithBody(Contents()));
+
+    private int UpstreamDocsRequests(string name, string version) =>
+        _factory.MockUpstream.LogEntries.Count(e => e.RequestMessage?.Path == $"/docs/{name}-{version}.tar.gz");
+
+    private async Task<UpstreamFixture> CacheTarballAsync(HttpClient client, string name)
+    {
+        var fx = StubUpstream(name, "1.0.0");
+        StubUpstreamDocs(name, "1.0.0");
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/hex/tarballs/{name}-1.0.0.tar")).StatusCode);
+        return fx;
+    }
+
+    private async Task ReserveAsync(string pattern)
+    {
+        using var admin = _factory.CreateClientWithBearer(await _factory.CreateAdminJwt());
+        var add = await admin.PostAsJsonAsync("/api/v1/reserved-namespaces", new { ecosystem = "hex", pattern });
+        Assert.Equal(HttpStatusCode.Created, add.StatusCode);
+    }
+
+    private TieredBlobStorage Blobs => _factory.Services.GetRequiredService<TieredBlobStorage>();
+
+    [Fact]
+    public async Task Docs_ForANameReservedAfterItsTarballWasCached_Are404_WithoutConsultingTheUpstream()
+    {
+        string name = NewName();
+        using var client = await PullClientAsync();
+        var fx = await CacheTarballAsync(client, name);
+        await ReserveAsync(name);
+
+        var resp = await client.GetAsync($"/hex/docs/{name}-1.0.0.tar.gz");
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Equal(0, UpstreamDocsRequests(name, "1.0.0"));
+        Assert.False(await Blobs.Cache.ExistsAsync(BlobKeys.HexDocs(await DefaultOrgIdAsync(), name, "1.0.0")));
+
+        // The cached tarball itself is already held, so it keeps serving under the reservation.
+        var tarball = await client.GetAsync($"/hex/tarballs/{name}-1.0.0.tar");
+        Assert.Equal(HttpStatusCode.OK, tarball.StatusCode);
+        Assert.Equal(fx.Tarball, await tarball.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task Docs_AlreadyHeldForAReservedName_StillServe_WithoutConsultingTheUpstream()
+    {
+        string name = NewName();
+        using var client = await PullClientAsync();
+        await CacheTarballAsync(client, name);
+        byte[] held = Contents();
+        await Blobs.Cache.PutAsync(BlobKeys.HexDocs(await DefaultOrgIdAsync(), name, "1.0.0"), new MemoryStream(held));
+        await ReserveAsync(name);
+
+        var resp = await client.GetAsync($"/hex/docs/{name}-1.0.0.tar.gz");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(held, await resp.Content.ReadAsByteArrayAsync());
+        Assert.Equal(0, UpstreamDocsRequests(name, "1.0.0"));
+    }
+
+    [Fact]
+    public async Task Docs_ForANameSharingAReservedPrefixButNotMatchingIt_AreFetchedOnce()
+    {
+        string reserved = NewName();
+        string twin = reserved + "x";
+        using var client = await PullClientAsync();
+        await CacheTarballAsync(client, twin);
+        await ReserveAsync(reserved);
+
+        var first = await client.GetAsync($"/hex/docs/{twin}-1.0.0.tar.gz");
+        var second = await client.GetAsync($"/hex/docs/{twin}-1.0.0.tar.gz");
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.Equal(1, UpstreamDocsRequests(twin, "1.0.0"));
+        Assert.True(await Blobs.Cache.ExistsAsync(BlobKeys.HexDocs(await DefaultOrgIdAsync(), twin, "1.0.0")));
+    }
+
+    [Fact]
+    public async Task Docs_ForACachedReleaseInAnOrgWithNoReservation_AreFetchedOnce()
+    {
+        string name = NewName();
+        using var client = await PullClientAsync();
+        await CacheTarballAsync(client, name);
+
+        var first = await client.GetAsync($"/hex/docs/{name}-1.0.0.tar.gz");
+        var second = await client.GetAsync($"/hex/docs/{name}-1.0.0.tar.gz");
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.Equal(1, UpstreamDocsRequests(name, "1.0.0"));
     }
 }

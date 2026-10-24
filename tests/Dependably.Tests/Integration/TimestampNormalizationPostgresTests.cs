@@ -8,9 +8,10 @@ namespace Dependably.Tests.Integration;
 /// Live-Postgres counterpart to <c>SchemaInitializerTimestampNormalizationTests</c>: confirms the
 /// self-healing legacy-DateTimeOffset repair sweep correctly parses and UTC-shifts Npgsql's own
 /// legacy provider-native shape (<c>2026-03-04 05:06:07.5+00</c> — space-separated, short-form
-/// offset, no colon) the same way it handles Microsoft.Data.Sqlite's, and measures the set-based
-/// approach against a row-by-row equivalent of the earlier implementation on the same live
-/// engine, so the speedup is evidenced rather than asserted.
+/// offset, no colon) the same way it handles Microsoft.Data.Sqlite's, and that the high-volume
+/// columns are repaired set-based on the live engine: the sweep's statement list is fixed, not a
+/// round trip per legacy row. It counts statements rather than timing them, so a contended
+/// runner cannot fail it and a per-row regression fails it on an idle one.
 /// </summary>
 [Trait("Category", "SchemaPostgres")]
 [Collection("LivePostgres")]
@@ -145,9 +146,12 @@ public sealed class TimestampNormalizationPostgresTests
     }
 
     [Fact]
-    public async Task SetBasedSweep_IsAtLeastAnOrderOfMagnitudeFasterThanRowByRow()
+    public async Task SetBasedSweep_IssuesTheSameStatementsRegardlessOfLegacyRowCount()
     {
-        const int rowCount = 20_000;
+        // Two backlogs two orders of magnitude apart. A set-based sweep issues an identical,
+        // fixed statement list for both; any per-row round trip makes the larger list longer.
+        const int smallBacklog = 10;
+        const int largeBacklog = 1_000;
 
         await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
         var store = pg.Store;
@@ -160,37 +164,41 @@ public sealed class TimestampNormalizationPostgresTests
             await TemporalCheckTestHelper.DropPostgresCheckAsync(conn, "cache_artifact", "last_accessed_at");
         }
 
-        // Seeded and measured one at a time (not both up front) so each pass's WHERE-filtered
-        // scan only ever has to consider its own rows, keeping the comparison apples-to-apples
-        // at the same row count instead of one pass paying for the other's rows too.
-        await SeedLegacyRowsAsync(store, "set", rowCount);
-
         var initializer = new SchemaInitializer(store);
 
-        // The set-based sweep this fix ships, timed directly (bypassing the rest of
-        // InitializeAsync so the measurement isolates the sweep itself).
-        long setBasedMs;
-        await using (var setConn = await store.OpenAsync())
-        {
-            var setBasedStopwatch = System.Diagnostics.Stopwatch.StartNew(); // now-ok: timing evidence, logged not branched on
-            await initializer.NormalizeLegacyDateTimeOffsetColumnsAsync(setConn);
-            setBasedStopwatch.Stop();
-            setBasedMs = setBasedStopwatch.ElapsedMilliseconds;
+        // Each backlog is seeded and swept on its own, so the second sweep sees only its own
+        // legacy rows: the first sweep has already made the small backlog canonical.
+        await SeedLegacyRowsAsync(store, "small", smallBacklog);
+        var smallStatements = await CaptureSweepStatementsAsync(store, initializer);
+        Assert.Equal(smallBacklog, await CountNormalizedAsync(store, "small"));
 
-            long setNormalized = await setConn.ExecuteScalarAsync<long>(
-                "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'set' AND first_cached_at = '2026-03-04T03:06:07Z'");
-            Assert.Equal(rowCount, setNormalized);
+        await SeedLegacyRowsAsync(store, "large", largeBacklog);
+        var largeStatements = await CaptureSweepStatementsAsync(store, initializer);
+        Assert.Equal(largeBacklog, await CountNormalizedAsync(store, "large"));
+
+        // The statement list does not grow with the backlog, statement for statement.
+        Assert.True(
+            smallStatements.SequenceEqual(largeStatements),
+            $"expected the same statements for a {smallBacklog}-row and a {largeBacklog}-row " +
+            $"backlog, got {smallStatements.Count} and {largeStatements.Count}");
+
+        // Exactly one statement writes each high-volume column: a per-row UPDATE matches too.
+        foreach (string column in new[] { "first_cached_at", "last_accessed_at" })
+        {
+            Assert.Single(
+                largeStatements,
+                sql => sql.Contains($"UPDATE cache_artifact SET {column} =", StringComparison.Ordinal));
         }
 
-        await SeedLegacyRowsAsync(store, "row", rowCount);
-
-        // A row-by-row equivalent of the implementation this fix replaced: one SELECT, then one
-        // UPDATE per row. Reproduced here only to measure it against a live engine — not shipped.
-        long rowByRowMs;
-        await using (var rowConn = await store.OpenAsync())
+        // Twin: the same counter on a row-by-row loop (one SELECT, then one UPDATE per row, the
+        // shape the set-based sweep replaces) counts every round trip. Without this, a counter
+        // that silently saw nothing would pass the equality above.
+        const int rowBacklog = 25;
+        await SeedLegacyRowsAsync(store, "row", rowBacklog);
+        await using (var inner = await store.OpenAsync())
         {
-            var rowByRowStopwatch = System.Diagnostics.Stopwatch.StartNew(); // now-ok: timing evidence, logged not branched on
-            var legacyRows = (await rowConn.QueryAsync<(string Id, string Value)>(
+            var counting = new CountingConnection(inner);
+            var legacyRows = (await counting.QueryAsync<(string Id, string Value)>(
                 "SELECT id AS Id, first_cached_at AS Value FROM cache_artifact " +
                 "WHERE ecosystem = 'row' AND first_cached_at IS NOT NULL"))
                 .ToList();
@@ -198,27 +206,36 @@ public sealed class TimestampNormalizationPostgresTests
             {
                 var parsed = DateTimeOffset.Parse(value, System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal);
-                string normalized = parsed.ToUtcIso();
-                await rowConn.ExecuteAsync(
+                await counting.ExecuteAsync(
                     "UPDATE cache_artifact SET first_cached_at = @normalized WHERE id = @id",
-                    new { normalized, id });
+                    new { normalized = parsed.ToUtcIso(), id });
             }
-            rowByRowStopwatch.Stop();
-            rowByRowMs = rowByRowStopwatch.ElapsedMilliseconds;
 
-            long rowNormalized = await rowConn.ExecuteScalarAsync<long>(
-                "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'row' AND first_cached_at = '2026-03-04T03:06:07Z'");
-            Assert.Equal(rowCount, rowNormalized);
+            Assert.Equal(1 + rowBacklog, counting.Statements.Count);
         }
 
-        // The set-based UPDATE this fix ships is meaningfully faster than a row-by-row
-        // round-trip loop on the same live engine, at the same row count, in the same test run —
-        // even though, unlike a naive string-replace, it performs a real per-row UTC-offset
-        // shift via ::timestamptz for correctness.
-        Assert.True(
-            rowByRowMs > setBasedMs * 3,
-            $"expected the set-based sweep ({setBasedMs}ms) to be meaningfully faster than " +
-            $"row-by-row ({rowByRowMs}ms) at {rowCount} rows");
+        await using var read = await store.OpenAsync();
+        Assert.Equal(rowBacklog, await read.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact " +
+            "WHERE ecosystem = 'row' AND first_cached_at = '2026-03-04T03:06:07Z'"));
+    }
+
+    private static async Task<IReadOnlyList<string>> CaptureSweepStatementsAsync(
+        NpgsqlMetadataStore store, SchemaInitializer initializer)
+    {
+        await using var inner = await store.OpenAsync();
+        var counting = new CountingConnection(inner);
+        await initializer.NormalizeLegacyDateTimeOffsetColumnsAsync(counting);
+        return counting.Statements;
+    }
+
+    private static async Task<long> CountNormalizedAsync(NpgsqlMetadataStore store, string ecosystemTag)
+    {
+        await using var conn = await store.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = @ecosystemTag " +
+            "AND first_cached_at = '2026-03-04T03:06:07Z' AND last_accessed_at = '2026-03-04T03:06:07Z'",
+            new { ecosystemTag });
     }
 
     private static async Task SeedLegacyRowsAsync(NpgsqlMetadataStore store, string ecosystemTag, int rowCount)

@@ -123,6 +123,7 @@ public static class ManagementServiceCollectionExtensions
                 {
                     // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
                     UseProxy = false,
+                    UseCookies = false,
                     AllowAutoRedirect = false,
                     ConnectCallback = siemCallback.ConnectAsync,
                 });
@@ -299,6 +300,7 @@ public static class ManagementServiceCollectionExtensions
             {
                 // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
                 UseProxy = false,
+                UseCookies = false,
                 AllowAutoRedirect = false,
                 ConnectCallback = webhookCallback.ConnectAsync,
             });
@@ -344,6 +346,7 @@ public static class ManagementServiceCollectionExtensions
             {
                 // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
                 UseProxy = false,
+                UseCookies = false,
                 AllowAutoRedirect = false,
                 ConnectCallback = slackCallback.ConnectAsync,
             });

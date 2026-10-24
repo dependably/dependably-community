@@ -799,6 +799,32 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
             "OVERWRITE failure must not trigger a compensating blob delete; the put was destructive.");
     }
 
+    [Theory]
+    [InlineData("npm", true, true, "npm:unscannable-manifest")]
+    [InlineData("npm", false, true, "npm:unscannable-manifest")]
+    [InlineData("pypi", true, false, null)]
+    [InlineData("pypi", false, false, null)]
+    public async Task InstallScriptDetection_BlobUnreadable_FailsClosedForNpmOnly(
+        string ecosystem, bool readReturnsNull, bool expectedFlag, string? expectedKind)
+    {
+        var unreadable = new UnreadableAfterPutBlobStore(_blobs, readReturnsNull);
+        var svc = BuildWithRegistry(unreadable);
+        var req = Sample(name: "unreadable-pkg") with
+        {
+            Ecosystem = ecosystem,
+            Purl = $"pkg:{ecosystem}/unreadable-pkg@1.0.0",
+        };
+
+        var result = await svc.StoreAndRecordAsync(req);
+        Assert.IsType<PublishResult.Accepted>(result);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", ecosystem, "unreadable-pkg");
+        var version = await packages.GetVersionAsync(pkg!.Id, "1.0.0");
+        Assert.Equal(expectedFlag, version!.HasInstallScript);
+        Assert.Equal(expectedKind, version.InstallScriptKind);
+    }
+
     // ── Original orphan-delete test (kept) ──────────────────────────────────────
 
     [Fact]
@@ -873,6 +899,18 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
     /// branch compensated. When <paramref name="throwOnDelete"/> is set, DeleteAsync throws,
     /// exercising the inner catch around the compensating delete.
     /// </summary>
+    private sealed class UnreadableAfterPutBlobStore(IBlobStore inner, bool returnsNull) : IBlobStore
+    {
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => inner.PutAsync(key, data, ct);
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default)
+            => returnsNull ? Task.FromResult<Stream?>(null) : throw new IOException("storage fault");
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default) => inner.GetRangeAsync(key, from, to, ct);
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => inner.ExistsAsync(key, ct);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => inner.DeleteAsync(key, ct);
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => inner.GetTotalSizeAsync(ct);
+        public IAsyncEnumerable<BlobInfo> ListAsync(string prefix, CancellationToken ct = default) => inner.ListAsync(prefix, ct);
+    }
+
     private sealed class DropTableOnPutBlobStore : IBlobStore
     {
         private readonly IBlobStore _inner;
@@ -1002,6 +1040,101 @@ public sealed class PackagePublishServiceTests : IAsyncLifetime
         var rej = Assert.IsType<PublishResult.Rejected>(await svc.StoreAndRecordAsync(wheel));
         Assert.Equal(409, rej.HttpStatus);
         Assert.Equal("version_exists", rej.Code);
+    }
+
+    [Theory]
+    [InlineData("1.0.0rc1", "1.0.0-rc1")]
+    [InlineData("1.0.0rc1", "1.0.0.RC1")]
+    [InlineData("1.0.0a1", "1.0.0alpha1")]
+    public async Task Pypi_Pep440EqualSpelling_NewFilename_AttachesToTheStoredRelease(string first, string second)
+    {
+        var svc = Build();
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("canon", first, $"canon-{first}.tar.gz")));
+
+        string wheel = $"canon-{second}-py3-none-any.whl";
+        var dry = await svc.ValidateAsync(PypiSample("canon", second, wheel));
+        Assert.IsType<PublishResult.Accepted>(dry);
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("canon", second, wheel)));
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "canon");
+        var stored = Assert.Single(await packages.GetVersionsAsync(pkg!.Id));
+        Assert.Equal(first, stored.Version);
+        var files = await new PackageVersionFilesRepository(_db).GetByVersionAsync(stored.Id);
+        Assert.Equal(2, files.Count);
+        Assert.Contains(files, f => f.Filename == wheel);
+    }
+
+    [Fact]
+    public async Task Pypi_Pep440EqualSpelling_DryRunReportsTheStoredPurl()
+    {
+        var svc = Build();
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("dry", "1.0a", "dry-1.0a.tar.gz")));
+
+        var req = PypiSample("dry", "1.0a0", "dry-1.0a0-py3-none-any.whl");
+        var dry = Assert.IsType<PublishResult.Accepted>(await svc.ValidateAsync(req));
+        var real = Assert.IsType<PublishResult.Accepted>(await svc.StoreAndRecordAsync(req));
+        Assert.Equal("pkg:pypi/dry@1.0a", dry.Purl);
+        Assert.Equal(real.Purl, dry.Purl);
+    }
+
+    [Fact]
+    public async Task Pypi_Pep440EqualLegacyProxyOriginRow_IsNotAttachedTo()
+    {
+        var svc = Build();
+        var first = (PublishResult.Accepted)await svc.StoreAndRecordAsync(
+            PypiSample("legacy", "1.0.0rc1", "legacy-1.0.0rc1.tar.gz"));
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("UPDATE package_versions SET origin = 'proxy' WHERE id = @id", new { id = first.VersionId });
+        }
+
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("legacy", "1.0.0-rc1", "legacy-1.0.0-rc1.tar.gz")));
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "legacy");
+        var versions = await packages.GetVersionsAsync(pkg!.Id);
+        Assert.Equal(2, versions.Count);
+        Assert.Contains(versions, v => v.Version == "1.0.0-rc1" && v.Origin == "uploaded");
+    }
+
+    [Fact]
+    public async Task Pypi_Pep440EqualSpelling_SameFilename_StaysPolicyGated()
+    {
+        var svc = Build();
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("canon2", "1.0.0rc1", "canon2-1.0.0rc1.tar.gz")));
+
+        var again = PypiSample("canon2", "1.0.0-rc1", "canon2-1.0.0rc1.tar.gz");
+        var rej = Assert.IsType<PublishResult.Rejected>(await svc.StoreAndRecordAsync(again));
+        Assert.Equal(409, rej.HttpStatus);
+        Assert.Equal("version_exists", rej.Code);
+        var dry = Assert.IsType<PublishResult.Rejected>(await svc.ValidateAsync(again));
+        Assert.Equal("version_exists", dry.Code);
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "canon2");
+        Assert.Single(await packages.GetVersionsAsync(pkg!.Id));
+    }
+
+    [Fact]
+    public async Task Pypi_DistinctVersions_BothAccepted()
+    {
+        var svc = Build();
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("twin", "1.0.0rc1", "twin-1.0.0rc1.tar.gz")));
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("twin", "1.0.0rc2", "twin-1.0.0rc2.tar.gz")));
+        Assert.IsType<PublishResult.Accepted>(
+            await svc.StoreAndRecordAsync(PypiSample("twin", "1.0.0", "twin-1.0.0.tar.gz")));
+
+        var packages = new PackageRepository(_db);
+        var pkg = await packages.GetByPurlNameAsync("o1", "pypi", "twin");
+        Assert.Equal(3, (await packages.GetVersionsAsync(pkg!.Id)).Count);
     }
 
     [Fact]

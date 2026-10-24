@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dapper;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure.Identity;
 
@@ -26,17 +27,20 @@ internal sealed class DependablyUserStore :
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IMfaSecretProtector _protector;
     private readonly IRecoveryCodeHasher _recoveryCodeHasher;
+    private readonly ILogger<DependablyUserStore> _logger;
 
     public DependablyUserStore(
         IMetadataStore db,
         IHttpContextAccessor httpContextAccessor,
         IMfaSecretProtector protector,
-        IRecoveryCodeHasher recoveryCodeHasher)
+        IRecoveryCodeHasher recoveryCodeHasher,
+        ILogger<DependablyUserStore>? logger = null)
     {
         _db = db;
         _httpContextAccessor = httpContextAccessor;
         _protector = protector;
         _recoveryCodeHasher = recoveryCodeHasher;
+        _logger = logger ?? NullLogger<DependablyUserStore>.Instance;
     }
 
     private string RequireTenantId()
@@ -275,27 +279,34 @@ internal sealed class DependablyUserStore :
 
     // ── IUserAuthenticatorKeyStore ────────────────────────────────────────────
 
+    /// <summary>
+    /// The plaintext TOTP key, decrypted from the stored value. Every stored value is treated as
+    /// ciphertext: this store only ever writes ciphertext, so a plaintext key in the column came
+    /// from outside the application and is not trusted. A value that does not decrypt returns
+    /// null with a warning naming the user and the reason (<see cref="TotpKeyShape"/>): the
+    /// account has no usable key, so no code verifies, and the stored value is never offered to
+    /// the token provider as if it were a key.
+    /// </summary>
     public Task<string?> GetAuthenticatorKeyAsync(DependablyUser user, CancellationToken cancellationToken)
     {
-        // The stored key is encrypted; return the plaintext that was set by SetAuthenticatorKeyAsync,
-        // or decrypt from the raw column value when the user was loaded from the DB with an encrypted value.
-        if (user.AuthenticatorKey is null)
+        string? stored = user.AuthenticatorKey;
+        if (stored is null)
         {
             return Task.FromResult<string?>(null);
         }
 
-        // If the key looks like base64-encoded encrypted data (set from DB), decrypt it on the way out.
-        // Keys set in-memory via SetAuthenticatorKeyAsync are stored as-is (plaintext) until UpdateAsync
-        // persists them. The store always writes encrypted; reads decrypt only when the format matches.
         try
         {
-            string decrypted = _protector.Unprotect(user.AuthenticatorKey);
-            return Task.FromResult<string?>(decrypted);
+            return Task.FromResult<string?>(_protector.Unprotect(stored));
         }
         catch (MfaSecretProtectionException)
         {
-            // Not an encrypted blob — the key is already plaintext (set in memory this request).
-            return Task.FromResult<string?>(user.AuthenticatorKey);
+            _logger.LogWarning(
+                "Stored secret {Kind} in {Table} row {RowId} (org {OrgId}) does not decrypt: {Reason}. "
+                + "TOTP verification fails for this account until it enrols again; recovery codes still work.",
+                ProtectedSecretKinds.UserTotpKey, "users", user.Id, user.TenantId,
+                TotpKeyShape.FailureReason(stored));
+            return Task.FromResult<string?>(null);
         }
     }
 

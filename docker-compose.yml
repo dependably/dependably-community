@@ -32,6 +32,10 @@ services:
       # (archived tree, matching the fedora:40 integration-test fixture).
       Rpm__Upstream: ${RPM_UPSTREAM:-https://archives.fedoraproject.org/pub/archive/fedora/linux/releases/40/Everything/x86_64/os}
       Rpm__UpstreamMode: ${RPM_UPSTREAM_MODE:-passthrough}
+      # Container image scanning, off by default. With it on, pushed and pulled images
+      # are queued for the image scanner (the oci-scan profile below), and OCI versions
+      # take their status from its results. See OPERATIONS.md > OCI image scanning.
+      OCI_SCAN_ENABLED: ${OCI_SCAN_ENABLED:-false}
       # GC heap cap — prevents OOM-kill on memory-constrained hosts (ARM64, Raspberry Pi).
       # Set to ~75 % of the container mem_limit. The .NET runtime reads this at process
       # start; changing it while the container is running has no effect. Leave unset on
@@ -64,9 +68,44 @@ services:
     # wait out the 90s staleness window before it can take over.
     stop_grace_period: 45s
 
+  # The OCI image scanner, started only with `--profile oci-scan` (and OCI_SCAN_ENABLED=true
+  # above). The image is not publicly distributed yet: it is pulled from the private
+  # registry, so leave the profile off without access to it. Dependably runs fully without
+  # it; OCI images then read no_feed. It reads each queued image through Dependably's scan
+  # API and posts the result;
+  # it never touches the database. It shares the dependably service's network namespace
+  # and calls it on localhost, which single-org mode always resolves to the one org.
+  # In multi-tenant mode, set OCI_SCANNER_DEPENDABLY_URL to the tenant's own https://<slug>.<domain>.
+  oci-scanner:
+    image: ${DEP_IMAGE_REGISTRY:-dependably.northwardlabs.ca}/dependably/oci-scanner:${OCI_SCANNER_TAG:-0.2.0}
+    profiles: [oci-scan]
+    network_mode: service:dependably
+    depends_on:
+      dependably:
+        condition: service_healthy
+    environment:
+      DEPENDABLY_URL: ${OCI_SCANNER_DEPENDABLY_URL:-http://localhost:8080}
+      # A service token minted with the "OCI image scanner" preset (scan:oci only).
+      DEPENDABLY_TOKEN_FILE: /run/secrets/oci_scanner_token
+      # remote queries api.osv.dev (or OSV_BASE_URL); local reads OSV dumps from OSV_LOCAL_PATH.
+      OSV_SOURCE: ${OCI_SCANNER_OSV_SOURCE:-remote}
+      SCAN_PLATFORMS: ${OCI_SCANNER_PLATFORMS:-linux/amd64,linux/arm64}
+    secrets:
+      - oci_scanner_token
+    # One image at a time, replayed in memory: no writable filesystem, no capabilities.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1536m
+    restart: unless-stopped
+
 volumes:
   dependably-data:
 
 secrets:
   registry_key:
     environment: REGISTRY_KEY
+  oci_scanner_token:
+    environment: OCI_SCANNER_TOKEN

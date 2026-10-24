@@ -275,7 +275,12 @@ public sealed class VulnTrackerOverlayColumnsMigrationTests : IAsyncLifetime
                     id           TEXT PRIMARY KEY,
                     osv_id       TEXT NOT NULL UNIQUE,
                     ecosystem    TEXT NOT NULL,
-                    package_name TEXT NOT NULL
+                    package_name TEXT NOT NULL,
+                    aliases      TEXT,
+                    summary      TEXT,
+                    severity     TEXT,
+                    cvss_score   REAL,
+                    fetched_at   TEXT
                 )
                 """);
             await SeedAdvisoryAsync(setup, "v-legacy");

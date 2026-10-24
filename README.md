@@ -11,10 +11,17 @@ Every package your team pulls from the internet is a supply chain risk. Dependab
 - **Proxy cache** — pull-through cache for npm, PyPI, NuGet, Maven, RPM, OCI, Go, Cargo, Alpine apk, Terraform providers, and Hex; verified by SHA-256 before storage, served locally on every subsequent request. Go, apk, and Terraform are proxy-only (no hosted push). Hex registry resources are rebuilt and re-signed under the org's own key, because a Hex client verifies both the signature and the repository name embedded in every index resource.
 - **NuGet symbol server** — `.snupkg` symbol packages are indexed by debug-id and served over SSQP, so Visual Studio and `dotnet-symbol` resolve PDBs straight from your registry. A distinct capability from storing `.snupkg` files: Portable PDBs only, and source files are not served.
 - **Supply chain tracking** — first-fetch detection, per-version checksum verification, CycloneDX 1.6 SBOM generation
+- **Vulnerability screening** — cached and hosted versions are matched against OSV (the live API, or a sideloaded dump with `OSV_MODE=local`), with optional SSVC, EPSS, NVD-score, and ransomware-campaign enrichment from a vulnerability tracker. OCI images have no OSV feed and read `no_feed` by default; see [OPERATIONS.md](OPERATIONS.md#oci-image-scanning).
+- **Block gate** — per-org controls that refuse a download on malicious packages, known-exploited (KEV) and ransomware-linked vulnerabilities, SSVC exploitation, EPSS and CVSS thresholds, release age, deprecation and revocation, install scripts, and signature and provenance verification against per-org trust anchors. A refused request is a 403 whose `X-Dependably-Block-Reason` names the control.
+- **Licence policy** — per-org allowed, conditional, and blocked licences, enforced separately on serve and on publish
+- **Pre-install lookup** — `GET /api/v1/lookup` returns the verdict for a candidate package before anything is installed, and says whether its advisory source was checked, unavailable, or not applicable
+- **Projects plane** — upload CycloneDX SBOMs, OpenVEX documents, and SARIF reports against projects organized in folders; components cross-link to the package versions the registry already knows
 - **Allowlisting** — per-org PURL pattern allowlists to restrict which packages can be fetched or pushed
+- **Dependency-confusion guard** — reserved namespaces keep private names from ever being resolved upstream; optional source pinning binds each proxied name to the first upstream host that served it
 - **Multitenancy** — multiple orgs, scoped tokens, role-based access, full org isolation
 - **Retention policies** — configurable keep-versions and keep-days per org
-- **Single binary** — self-contained Alpine Docker image; SQLite metadata; local, S3, or Azure blob storage
+- **Air-gapped and edge modes** — `AIR_GAPPED=true` skips outbound calls such as OSV queries and deprecation refresh (pair it with `OSV_MODE=local`); `DEPLOYMENT_MODE=edge` runs a cache-only node that pulls through a central instance
+- **Single binary** — self-contained Alpine Docker image; SQLite or Postgres metadata; local, S3, or Azure blob storage
 
 ---
 
@@ -217,16 +224,16 @@ The full route surface is contract-tested against [`tests/Contracts/openapi.cont
 This repository carries the source, its build and contribution guides, and the live OpenAPI
 documents above. Prose documentation lives in repositories of its own:
 
-- **[dependably-documentation](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-documentation)**
+- **[dependably-documentation](https://github.com/dependably/dependably-documentation)**
   — end-user and administrator guides. Per-ecosystem client setup (npm, PyPI, NuGet, Maven, Cargo,
-  Go, Terraform, Docker, RPM), the web console tour, diagnosing a blocked package, the vulnerability
+  Go, Terraform, Hex, Docker, RPM), the web console tour, diagnosing a blocked package, the vulnerability
   remediation walkthrough, log output, and the Grafana integration.
 - **dependably-enterprise** — deployment and migration runbooks: enrolling a cache-only edge node,
   moving a standalone SQLite install onto Postgres, the `COLLATE "C"` retrofit, HA and blue-green
   topology, and the threat model.
-- **[dependably-community.spec](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec)**
-  — design intent: architecture documents, decision records, and the per-work-item spec record.
-  Start here for *why* the system is shaped the way it is.
+- **dependably-community.spec** (private) — design intent: architecture documents, decision
+  records, and the per-work-item spec record. It is not published; the architectural rules and
+  invariants a contributor needs are in [CLAUDE.md](CLAUDE.md).
 
 ---
 

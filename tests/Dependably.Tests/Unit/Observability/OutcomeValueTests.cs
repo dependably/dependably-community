@@ -32,6 +32,9 @@ public sealed partial class OutcomeValueTests
         // SBOM component scan result (dependably.sbom.scan_components only) — "deferred" is the
         // fail-closed branch: the advisory source was unreachable, so nothing was scored.
         "scanned", "deferred",
+        // Background-job run that finished but kept its previous data (a rejected threat feed);
+        // recorded by BackgroundJobScope.Degrade.
+        "degraded",
     };
 
     // Matches: ("outcome", "value")  or  ("dependably.outcome", "value")

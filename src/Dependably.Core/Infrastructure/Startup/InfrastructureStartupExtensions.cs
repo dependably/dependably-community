@@ -101,12 +101,28 @@ internal static partial class InfrastructureStartupExtensions
         // coordinates to an ecosystem's full cache-key variant matrix, shared by the local
         // mutation path and the peer-message path so the two can never disagree.
         //
-        // TryAddSingleton for the bus: standalone deployments keep the in-process path and take
-        // on no broker dependency, while a composition root that configures a fan-out transport
-        // (the management wiring registers the Redis one when REDIS_CONNECTION_STRING is set)
-        // registers first and wins. The edge composition root never reaches that wiring, so it
-        // binds the no-op here.
+        // The no-op bus is the default: standalone deployments keep the in-process path and take
+        // on no broker dependency. This runs before the management wiring, which, when
+        // REDIS_CONNECTION_STRING is set, Replaces this descriptor with the Redis bus, so the
+        // collection holds exactly one bus. TryAdd keeps that true if a composition root ever
+        // registers its transport before this runs. The edge composition root never reaches the
+        // management wiring, so it binds the no-op here.
         builder.Services.TryAddSingleton<IMetadataInvalidationBus, NullMetadataInvalidationBus>();
+
+        // The org-wide half of that expansion: the reservation list, the settings record, the
+        // org epoch and the lookup outcomes. Every dependency is resolved as required so a
+        // composition root that lacks one fails at startup instead of silently skipping a step
+        // of a received org-wide invalidation. The list cache is shared with
+        // ReservedNamespaceService, which reads through it.
+        builder.Services.AddSingleton(sp =>
+            new Dependably.Protocol.ReservedNamespaceListCache(
+                sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>()));
+        builder.Services.AddSingleton(sp =>
+            new OrgWideCacheEviction(
+                sp.GetRequiredService<Dependably.Protocol.ReservedNamespaceListCache>(),
+                sp.GetRequiredService<OrgRepository>(),
+                sp.GetRequiredService<OrgCacheEpochStore>(),
+                sp.GetRequiredService<Dependably.Protocol.PackageLookupCache>()));
         builder.Services.AddSingleton<MetadataInvalidationCoordinator>();
         builder.Services.AddSingleton<MetadataInvalidationReceiver>();
     }

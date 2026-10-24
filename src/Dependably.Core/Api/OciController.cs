@@ -386,6 +386,163 @@ public sealed partial class OciController : OrgScopedControllerBase
     }
 
     /// <summary>
+    /// The one block gate every manifest-returning OCI path calls: the local manifest hit, the
+    /// upstream miss (GET and HEAD), the stale-tag serve, and the blob route's local and upstream
+    /// reads of manifest bytes. Returns the 403 to send, or null to serve.
+    ///
+    /// <para>With the org's <c>oci_scan_enforcement</c> at <c>off</c> it answers exactly as the
+    /// licence-only gate always has (<see cref="EvaluateLicenseBlockAsync"/>, called from nowhere
+    /// else). Otherwise it resolves the image that owns <paramref name="digest"/> through the
+    /// org's own catalogue and reference graph, reads the org's own scan facts, builds the request
+    /// with <see cref="BlockGateRequest.ForOciImage"/>, and evaluates every arm, the licence arm
+    /// last. A digest the org holds no catalogue row for, proxied or pushed by digest only, is
+    /// catalogued and queued for scanning first, so the refusal a first pull gets is answered from
+    /// the scan on a retry. The two planes catalogue under different names: a hosted digest only
+    /// under the repository it was pushed to (any other name keeps it unscanned, because hosted
+    /// bytes are held per digest and reachable under every name), while a proxied digest is
+    /// catalogued under the requested repository, the name it was fetched from upstream under. A
+    /// publish-only push probe (<see cref="IsPushProbe"/>) is answered on the licence arm alone.</para>
+    ///
+    /// <para>A failure reading the facts refuses under <c>block</c> and serves under <c>warn</c>,
+    /// logged either way: a gate input the plane could not read is never "nothing to block
+    /// on".</para>
+    /// </summary>
+    /// <param name="licenseSpdx">The SPDX expression stamped on the manifest's <c>oci_blobs</c> row,
+    /// already read by the caller.</param>
+    /// <param name="gatesManifest">False for a blob-route read of a layer or config blob: those are
+    /// never scan-gated (the manifest is the pull entry point), and keep the licence-only answer.</param>
+#pragma warning disable S107 // the request coordinates plus the two per-call facts the caller already holds
+    private async Task<IActionResult?> EvaluateOciPullGateAsync(
+        string orgId, string repository, string digest, string? licenseSpdx, TokenRecord? token,
+        CancellationToken ct, bool gatesManifest = true)
+#pragma warning restore S107
+    {
+        var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
+        string posture = settings?.OciScanEnforcement ?? "off";
+
+        // State the posture, off included, which is how an edge node pulling through this
+        // instance learns whether it may answer this org's manifests from its own cache; an edge
+        // reads a response without it as saying nothing. Stated to anonymous callers too: the
+        // value is not sensitive, and an edge whose master token stops resolving under anonymous
+        // pull is answered anonymously. Stated before any branch below can return, and on a layer
+        // read too, so every answer the gate gives carries it. An edge states nothing: its own
+        // org_settings are not the master's, so the value would be its local default, not the
+        // org's posture.
+        if (!_svc.EdgeGuard.IsEdge)
+        {
+            Response.Headers[Dependably.Infrastructure.Edge.EdgeOciScanPostureStore.Header] = posture;
+        }
+
+        if (settings is null || posture == "off")
+        {
+            return await EvaluateLicenseBlockAsync(orgId, PurlNormalizer.Oci(repository, digest), licenseSpdx, token, ct);
+        }
+
+        if (!gatesManifest || IsPushProbe(token))
+        {
+            return await EvaluateLicenseBlockAsync(orgId, PurlNormalizer.Oci(repository, digest), licenseSpdx, token, ct);
+        }
+
+        if (_svc.PullGate is null)
+        {
+            // Enforcement is on but no resolver is wired: a gate input that cannot be read is
+            // never "nothing to block on", so block refuses as unscanned and warn serves.
+            _logger.LogWarning(
+                "OCI pull gate has no scan resolver for {Repository}@{Digest} in org {OrgId}; {Posture}.",
+                repository, digest, orgId, UnreadableFactsFate(posture));
+            return UnreadableFactsRefusal(posture)
+                ?? await EvaluateLicenseBlockAsync(orgId, PurlNormalizer.Oci(repository, digest), licenseSpdx, token, ct);
+        }
+
+        OciPullGateContext context;
+        try
+        {
+            context = await _svc.PullGate.ResolveAsync(orgId, repository, digest, ct);
+            if (!context.Held
+                && (await _svc.Upstream.CatalogueDigestPullAsync(orgId, repository, digest, ct)
+                    || await _svc.Uploads.CatalogueDigestPushAsync(orgId, repository, digest, ct)))
+            {
+                context = await _svc.PullGate.ResolveAsync(orgId, repository, digest, ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "OCI pull gate could not read scan facts for {Repository}@{Digest} in org {OrgId} ({ExceptionType}); {Posture}.",
+                repository, digest, orgId, ex.GetType().Name, UnreadableFactsFate(posture));
+            return UnreadableFactsRefusal(posture)
+                ?? await EvaluateLicenseBlockAsync(orgId, PurlNormalizer.Oci(repository, digest), licenseSpdx, token, ct);
+        }
+
+        var request = BlockGateRequest.ForOciImage(
+            orgId, PurlNormalizer.Oci(repository, context.OwnerDigest), context.Facts, context.ManualState,
+            token, settings, HttpContext.GetNormalizedRemoteIp(),
+            licenseSpdx is null ? [] : [licenseSpdx],
+            owners: context.Owners?.Select(o => new OciGateOwner(
+                PurlNormalizer.Oci(repository, o.Digest), o.HostedVersionId ?? string.Empty)).ToList());
+        var outcome = await _svc.BlockGate.EvaluateAsync(request, ct);
+        return outcome.Decision != BlockDecision.Blocked
+            ? null
+            : OciGateRefusal(outcome.Arm, RefusalMessage(outcome, context.Facts, token is not null));
+    }
+
+    /// <summary>
+    /// True for the HEAD a push issues before it writes, made with a token admitted only through
+    /// <see cref="Capabilities.PublishOci"/> (see <c>allowPushProbe</c> on
+    /// <see cref="AuthorizePullAsync"/>). It asks whether the registry already holds a digest, and
+    /// carries no bytes back, so it is not a pull: the scan gate is not applied to it, and it is
+    /// answered on the licence arm as it was before that gate existed, with none of a refusal's
+    /// activity row, review-queue entry or webhook. A pull-capable token's HEAD is a pull (a
+    /// HEAD-first client resolves every pull that way) and stays gated.
+    /// </summary>
+    private bool IsPushProbe(TokenRecord? token) =>
+        HttpMethods.IsHead(Request.Method)
+        && token is not null
+        && !token.HasCapability(Capabilities.PullOci)
+        && !token.HasCapability(Capabilities.ReadArtifact)
+        && token.HasCapability(Capabilities.PublishOci);
+
+    private static string UnreadableFactsFate(string posture) =>
+        posture == "block" ? "refusing the pull" : "serving under warn";
+
+    // Scan facts the gate could not read: block refuses as unscanned; warn returns null so the
+    // caller serves on the licence arm alone.
+    private IActionResult? UnreadableFactsRefusal(string posture) =>
+        posture == "block"
+            ? OciGateRefusal(BlockArm.Unscanned,
+                "Image is blocked by the organization's vulnerability policy: its scan result could not be read.")
+            : null;
+
+    // The refusal body. The arm is always named; a caller holding a token for the org is also
+    // told why an unscanned image has no answer yet. An anonymous caller (anonymous pull) gets
+    // only the arm, the same disclosure rule the manifest-404 diagnostic follows.
+    private static string RefusalMessage(BlockOutcome outcome, Dependably.Infrastructure.OciScan.OciGateFacts facts, bool authenticated) =>
+        outcome.Arm switch
+        {
+            BlockArm.License => "Image license is blocked by the organization's license policy.",
+            BlockArm.Manual => "Image is blocked by an organization administrator.",
+            BlockArm.Unscanned when authenticated => facts.UnscannedSubReason switch
+            {
+                "partial" => "Image is blocked by the organization's vulnerability policy (unscanned): its scan could not "
+                    + "cover every component, so it has no complete answer. An administrator can review it in the quarantine queue.",
+                "no_scanner" => "Image is blocked by the organization's vulnerability policy (unscanned): it is queued for "
+                    + "scanning, but no image scanner is currently running for this organization.",
+                _ => "Image is blocked by the organization's vulnerability policy (unscanned): it is queued for scanning. "
+                    + "Retry once the scan completes.",
+            },
+            _ => $"Image is blocked by the organization's vulnerability policy ({outcome.ReasonToken}).",
+        };
+
+    private ObjectResult OciGateRefusal(BlockArm arm, string message)
+    {
+        // OCI already carries a spec-shaped error body, so the header is additive rather than the
+        // only signal — but it keeps one refusal spelled the same way across every ecosystem.
+        HttpContext.Response.Headers[BlockRefusalResult.ReasonHeader] =
+            new BlockOutcome(BlockDecision.Blocked, arm).ReasonToken;
+        return OciError(StatusCodes.Status403Forbidden, OciErrorCode.DENIED, message);
+    }
+
+    /// <summary>
     /// Resolves an OCI reference to the digest held locally, together with the tag entry's
     /// <c>last_revalidated</c> stamp so the caller can judge whether a mutable reference is
     /// still fresh. <c>Digest</c> is null when nothing is held locally.
@@ -669,4 +826,6 @@ public sealed record OciControllerServices(
     TenantArtifactAccessRepository TenantArtifactAccess,
     Dependably.Security.AuthDenialAuditCoalescer DenialAudit,
     Dependably.Security.NameBindingGate? NameBinding = null,
-    BlobPresignService? Presign = null);
+    BlobPresignService? Presign = null,
+    OciPullGateResolver? PullGate = null,
+    Dependably.Infrastructure.Edge.EdgeOciScanPostureStore? EdgePostures = null);

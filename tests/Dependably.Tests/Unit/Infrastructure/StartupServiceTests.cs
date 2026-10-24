@@ -689,4 +689,75 @@ public sealed class StartupServiceTests : IAsyncLifetime
 
         Assert.DoesNotContain(logs, l => l.Contains("TRUSTED_PROXIES resolves to", StringComparison.Ordinal));
     }
+
+    private const string ApexLabelCollisionMarker = "system-admin host label under the tenant domain";
+
+    private static IConfiguration ApexLabelConfig(string mode) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DEPLOYMENT_MODE"] = mode,
+                ["APEX_HOST"] = "ops.example.test",
+                ["TENANT_DOMAIN"] = "example.test",
+            })
+            .Build();
+
+    // Completes a first boot (so the instance is a normal restart, not half-bootstrapped), then
+    // inserts the org the restart under test will see.
+    private async Task SeedOrgAsync(IConfiguration config, string id, string slug, bool softDeleted = false)
+    {
+        await BuildService(config: config).StartAsync(CancellationToken.None);
+        await using var conn = await _db.OpenAsync();
+        // Raw SQL on purpose: tenant-create refuses the reserved label, so only a direct insert
+        // models an org that predates the label becoming reserved.
+        await conn.ExecuteAsync(
+            "INSERT INTO orgs (id, slug, deleted_at) VALUES (@id, @slug, @deletedAt)",
+            new { id, slug, deletedAt = softDeleted ? "2020-01-01T00:00:00Z" : null });
+    }
+
+    [Fact]
+    public async Task StartAsync_MultiMode_LiveOrgHoldsApexLabel_WarnsNamingTheOrg()
+    {
+        var config = ApexLabelConfig("multi");
+        await SeedOrgAsync(config, "org-ops-live", "ops");
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.Contains(warnings, w => w.Contains(ApexLabelCollisionMarker, StringComparison.Ordinal)
+            && w.Contains("org-ops-live", StringComparison.Ordinal)
+            && w.Contains("ops", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_MultiMode_SoftDeletedOrgHoldsApexLabel_NoCollisionWarning()
+    {
+        var config = ApexLabelConfig("multi");
+        await SeedOrgAsync(config, "org-ops-gone", "ops", softDeleted: true);
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(ApexLabelCollisionMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_MultiMode_OnlyUnrelatedSlug_NoCollisionWarning()
+    {
+        var config = ApexLabelConfig("multi");
+        await SeedOrgAsync(config, "org-acme", "acme");
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(ApexLabelCollisionMarker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StartAsync_SingleMode_LiveOrgHoldsApexLabel_NoCollisionWarning()
+    {
+        var config = ApexLabelConfig("single");
+        await SeedOrgAsync(config, "org-ops-live", "ops");
+
+        var warnings = await StartAndCaptureWarningsAsync(config);
+
+        Assert.DoesNotContain(warnings, w => w.Contains(ApexLabelCollisionMarker, StringComparison.Ordinal));
+    }
 }

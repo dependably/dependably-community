@@ -46,6 +46,10 @@ namespace Dependably.Tests.Unit.Protocol;
 ///  - FetchUpstreamVersionsAsync_Upstream5xx_ReturnsNull: error → null (caller serves
 ///    local-only).
 ///  - FetchUpstreamVersionsAsync_AirGap_ReturnsNull: air-gap → null, no throw.
+///  - FetchUpstreamMetadataAsync_*: one fetch read as both documents the path can name — the
+///    version list, and the raw bytes only when the body is a group-level plugin-prefix
+///    document (no DOCTYPE, valid UTF-8, a &lt;metadata&gt; root with &lt;plugins&gt; and no
+///    declared version).
 ///  - TenantStorageQuota_*: both fetch paths carry the caller's org context onto the shared
 ///    cache-fill write, so Maven proxy pulls are bounded by the tenant's storage quota like
 ///    every other ecosystem, and a refusal surfaces as 413 rather than a silent 404.
@@ -594,6 +598,134 @@ public sealed class MavenUpstreamFetcherTests : IAsyncLifetime
         var versions = await fetcher.FetchUpstreamVersionsAsync(_upstream, artifactPath, default);
 
         Assert.Null(versions);
+    }
+
+    // ── Raw metadata fetch: artifact-level vs group-level plugin-prefix documents ──
+
+    private void StubMetadataBytes(string artifactPath, byte[] body, int status = 200)
+        => _server.Given(Request.Create().WithPath($"/{artifactPath}/maven-metadata.xml").UsingGet())
+                  .RespondWith(Response.Create().WithStatusCode(status).WithBody(body));
+
+    [Theory]
+    [InlineData("<metadata><plugins><plugin><name>Help</name><prefix>help</prefix><artifactId>maven-help-plugin</artifactId></plugin></plugins></metadata>")]
+    [InlineData("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<metadata>\n  <plugins/>\n</metadata>\n")]
+    [InlineData("<metadata xmlns=\"http://maven.apache.org/METADATA/1.1.0\"><plugins><plugin><prefix>exec</prefix><artifactId>exec-maven-plugin</artifactId></plugin></plugins></metadata>")]
+    public async Task FetchUpstreamMetadataAsync_PluginGroupDocument_ReturnsTheUpstreamBytesUnchanged(string xml)
+    {
+        const string path = "org/apache/maven/plugins";
+        // A UTF-8 BOM in front: still well-formed, and a re-serialisation would drop it.
+        byte[] body = [0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes(xml)];
+        StubMetadataBytes(path, body);
+
+        var result = await BuildFetcher().FetchUpstreamMetadataAsync(_upstream, path, default);
+
+        Assert.NotNull(result);
+        Assert.Empty(result.Versions);
+        Assert.Equal(body, result.PluginGroupDocument);
+    }
+
+    [Fact]
+    public async Task FetchUpstreamMetadataAsync_VersioningDocument_ReturnsVersions_AndNoPluginDocument()
+    {
+        const string path = "com/example/lib";
+        StubMetadataBytes(path, Encoding.UTF8.GetBytes(
+            "<metadata><groupId>com.example</groupId><artifactId>lib</artifactId>" +
+            "<versioning><versions><version>1.0</version><version>2.0</version></versions></versioning></metadata>"));
+
+        var result = await BuildFetcher().FetchUpstreamMetadataAsync(_upstream, path, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(new[] { "1.0", "2.0" }, result.Versions);
+        Assert.Null(result.PluginGroupDocument);
+    }
+
+    [Theory]
+    // Both shapes: a <versioning> child makes it artifact-level metadata.
+    [InlineData("<metadata><plugins><plugin><prefix>x</prefix></plugin></plugins><versioning><versions><version>1.0</version></versions></versioning></metadata>", 1)]
+    // Both shapes the Maven 2 way: a top-level <version> is still a declared version.
+    [InlineData("<metadata><version>1.0</version><plugins><plugin><prefix>x</prefix></plugin></plugins></metadata>", 1)]
+    // An empty <versioning> block and plugins: artifact-level, declaring nothing.
+    [InlineData("<metadata><plugins/><versioning/></metadata>", 0)]
+    // Neither shape.
+    [InlineData("<metadata><groupId>org.apache.maven</groupId></metadata>", 0)]
+    // <plugins> under a root that is not <metadata> (a POM, say).
+    [InlineData("<project><build><plugins><plugin/></plugins></build></project>", 0)]
+    [InlineData("<project><plugins><plugin/></plugins></project>", 0)]
+    // <plugins> nested below the root rather than a direct child of it.
+    [InlineData("<metadata><wrapper><plugins><plugin/></plugins></wrapper></metadata>", 0)]
+    // Not XML.
+    [InlineData("<html><body>Service Unavailable", 0)]
+    [InlineData("", 0)]
+    public async Task FetchUpstreamMetadataAsync_NotAPluginGroupDocument_NoPluginDocument(string xml, int versionCount)
+    {
+        const string path = "org/example/shape";
+        StubMetadataBytes(path, Encoding.UTF8.GetBytes(xml));
+
+        var result = await BuildFetcher().FetchUpstreamMetadataAsync(_upstream, path, default);
+
+        Assert.NotNull(result);
+        Assert.Equal(versionCount, result.Versions.Count);
+        Assert.Null(result.PluginGroupDocument);
+    }
+
+    [Theory]
+    // An internal entity: no expansion runs, and the document is not relayed to clients.
+    [InlineData("<!DOCTYPE metadata [<!ENTITY x \"help\">]><metadata><plugins><plugin><prefix>&x;</prefix></plugin></plugins></metadata>")]
+    // An external entity: refused before any resolver could be consulted.
+    [InlineData("<!DOCTYPE metadata [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><metadata><plugins><plugin><prefix>&x;</prefix></plugin></plugins></metadata>")]
+    // A bare DOCTYPE, no entities at all.
+    [InlineData("<!DOCTYPE metadata><metadata><plugins/></metadata>")]
+    public async Task FetchUpstreamMetadataAsync_PluginGroupDocumentWithDoctype_IsNotRelayed(string xml)
+    {
+        const string path = "org/example/dtd";
+        StubMetadataBytes(path, Encoding.UTF8.GetBytes(xml));
+
+        var result = await BuildFetcher().FetchUpstreamMetadataAsync(_upstream, path, default);
+
+        Assert.NotNull(result);
+        Assert.Null(result.PluginGroupDocument);
+    }
+
+    [Fact]
+    public async Task FetchUpstreamMetadataAsync_PluginGroupDocumentNotValidUtf8_IsNotRelayed()
+    {
+        // Well-formed under its declared Latin-1 encoding, but 0xE9 is not valid UTF-8: the served
+        // body is re-encoded from a UTF-8 string, so it could not be relayed byte-for-byte.
+        const string path = "org/example/latin1";
+        byte[] body =
+        [
+            .. Encoding.ASCII.GetBytes("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><metadata><plugins><plugin><name>caf"),
+            0xE9,
+            .. Encoding.ASCII.GetBytes("</name><prefix>cafe</prefix></plugin></plugins></metadata>"),
+        ];
+        StubMetadataBytes(path, body);
+
+        var result = await BuildFetcher().FetchUpstreamMetadataAsync(_upstream, path, default);
+
+        Assert.NotNull(result);
+        Assert.Null(result.PluginGroupDocument);
+    }
+
+    [Theory]
+    [InlineData(404)]
+    [InlineData(500)]
+    public async Task FetchUpstreamMetadataAsync_UpstreamNonSuccess_ReturnsNull(int status)
+    {
+        const string path = "org/example/missing";
+        StubMetadataBytes(path, Encoding.UTF8.GetBytes("<metadata><plugins/></metadata>"), status);
+
+        var result = await BuildFetcher().FetchUpstreamMetadataAsync(_upstream, path, default);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task FetchUpstreamMetadataAsync_AirGap_ReturnsNull()
+    {
+        var result = await BuildFetcher(airGapped: true)
+            .FetchUpstreamMetadataAsync(_upstream, "org/apache/maven/plugins", default);
+
+        Assert.Null(result);
     }
 
     // ── Negative cache TTL ─────────────────────────────────────────────────────

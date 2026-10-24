@@ -460,11 +460,10 @@ public sealed class SystemControllerUnitTests
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var td = new TrustedDeviceService(s.Store, TestTime.Frozen(), new ConfigurationBuilder().Build());
 
         var req = new ChangePasswordRequest("OldPassword123", "short");
         // login/urls are only reached on success; null! is safe for these early-exit paths.
-        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, null!, CancellationToken.None);
+        var result = await b.SystemController.ChangeMyPassword(req, null!, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -476,12 +475,11 @@ public sealed class SystemControllerUnitTests
         await s.WithOrgAsync();
         await s.WithUserAsync(role: "owner");
         var b = await s.BuildAsync();
-        var td = new TrustedDeviceService(s.Store, TestTime.Frozen(), new ConfigurationBuilder().Build());
 
         const string password = "SamePassword123!";
         var req = new ChangePasswordRequest(password, password);
         // login/urls are only reached on success; null! is safe for these early-exit paths.
-        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, null!, CancellationToken.None);
+        var result = await b.SystemController.ChangeMyPassword(req, null!, null!, null!, CancellationToken.None);
         var obj = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, obj.StatusCode);
     }
@@ -1107,10 +1105,9 @@ public sealed class SystemControllerUnitTests
                 [new System.Security.Claims.Claim("scope", "system")],
                 authenticationType: "test"));
 
-        var td = new TrustedDeviceService(s.Store, TestTime.Frozen(), new ConfigurationBuilder().Build());
         var req = new ChangePasswordRequest("OldPassword123!", "BrandNewPassword456!");
         // login/urls are only reached on success; null! is safe for this early-exit path.
-        var result = await b.SystemController.ChangeMyPassword(req, td, null!, null!, null!, CancellationToken.None);
+        var result = await b.SystemController.ChangeMyPassword(req, null!, null!, null!, CancellationToken.None);
         Assert.IsType<UnauthorizedResult>(result);
     }
 
@@ -1237,6 +1234,40 @@ public sealed class SystemControllerUnitTests
         Assert.Equal(slug, record.TenantSlug);
         Assert.Equal("ops-actor-id", record.Actor);
         Assert.Null(record.TenantName);
+    }
+
+    [Fact]
+    public async Task CreateTenant_EvictsACachedNoSuchTenantResolution_SoTheNewSubdomainResolvesAtOnce()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        using var cache = new Microsoft.Extensions.Caching.Memory.MemoryCache(
+            new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions());
+        var resolver = new SubdomainTenantResolver(
+            s.Store,
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["BASE_URL"] = "https://example.com" })
+                .Build(),
+            cache);
+        var b = await s.BuildAsync(tenantCache: resolver);
+        SetSystemActor(b, "ops-actor-id");
+
+        string slug = $"fresh-{Guid.NewGuid():N}"[..18];
+        var probe = new DefaultHttpContext();
+        probe.Request.Host = new HostString(slug + ".example.com");
+
+        // A request for the subdomain before the tenant exists caches "no such tenant".
+        Assert.True((await resolver.ResolveAsync(probe)).IsUninitialized);
+
+        var result = await b.SystemController.CreateTenant(
+            new CreateTenantRequest(slug, "owner@example.test"), CancellationToken.None);
+        Assert.IsType<OkObjectResult>(result);
+
+        // The same replica resolves the new tenant on the next request, not after the TTL.
+        var resolved = await resolver.ResolveAsync(probe);
+        Assert.True(resolved.IsTenant);
+        Assert.Equal(slug, resolved.TenantSlug);
     }
 
     [Fact]
@@ -1425,7 +1456,6 @@ public sealed class SystemControllerUnitTests
 
         var result = await b.SystemController.ChangeMyPassword(
             new ChangePasswordRequest("OldPassword123", "BrandNewPassword456!"),
-            new TrustedDeviceService(b.Db, s.Clock, new ConfigurationBuilder().Build()),
             BuildLoginService(b, s.Clock),
             new RequestPublicUrlBuilder(new ConfigurationBuilder().Build()),
             NoopMailer(s.Clock),

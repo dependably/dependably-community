@@ -3,6 +3,7 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -181,12 +182,60 @@ public sealed class UpstreamMetadataSingleFlightTests
             () => client.GetOrFetchMetadataAsync("http://forbidden/"));
     }
 
+    [Fact]
+    public async Task StalledBody_FailsAtDeadline_AndNextFetchRunsFresh()
+    {
+        // HttpClient.Timeout stops applying once headers arrive, so an upstream that sends
+        // headers and then never sends another body byte must still fail the shared fetch at
+        // its own deadline — otherwise the in-flight entry is never removed and every later
+        // caller for the URL joins a fetch that never completes, until the process restarts.
+        var time = TestTime.Frozen();
+        var handler = new StalledBodyHandler();
+        var (client, _) = BuildClient(handler, time: time);
+        const string url = "http://upstream.invalid/simple/ruff/";
+
+        var stalled = client.GetOrFetchMetadataAsync(url);
+        await handler.BodyReadStarted.WaitAsync(TimeSpan.FromSeconds(10));
+
+        time.Advance(UpstreamClient.MetadataFetchDeadline);
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => stalled.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.IsType<TimeoutException>(ex.InnerException);
+
+        // The failed fetch left the in-flight map, so the next caller reaches upstream again.
+        handler.StallBody = false;
+        var fresh = await client.GetOrFetchMetadataAsync(url).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(2, handler.CallCount);
+        Assert.Equal("fresh-body", fresh.BodyAsString());
+    }
+
+    [Fact]
+    public async Task StalledBody_BeforeDeadline_StillPending()
+    {
+        // Twin of the deadline test: the shared fetch is not failed early, so a slow but live
+        // upstream inside the budget is not cut off.
+        var time = TestTime.Frozen();
+        var handler = new StalledBodyHandler();
+        var (client, _) = BuildClient(handler, time: time);
+
+        var stalled = client.GetOrFetchMetadataAsync("http://upstream.invalid/simple/slow/");
+        await handler.BodyReadStarted.WaitAsync(TimeSpan.FromSeconds(10));
+
+        time.Advance(UpstreamClient.MetadataFetchDeadline - TimeSpan.FromSeconds(1));
+
+        Assert.False(stalled.IsCompleted);
+        Assert.Equal(1, handler.CallCount);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private static (UpstreamClient Client, GateHandler Handler) BuildClient(
-        GateHandler handler,
+    private static (UpstreamClient Client, THandler Handler) BuildClient<THandler>(
+        THandler handler,
         IUpstreamUrlValidator? validator = null,
-        bool airGapped = false)
+        bool airGapped = false,
+        TimeProvider? time = null)
+        where THandler : HttpMessageHandler
     {
         var factory = new FactoryFor(handler);
         var blobs = new InMemoryBlobStore();
@@ -205,8 +254,57 @@ public sealed class UpstreamMetadataSingleFlightTests
             airGap,
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
             Dependably.Infrastructure.StagingOptions.Resolve(config),
-            NullLogger<UpstreamClient>.Instance);
+            NullLogger<UpstreamClient>.Instance,
+            time: time);
         return (client, handler);
+    }
+
+    // Answers with 200 headers immediately; while StallBody is set, the body stream then never
+    // yields a byte until its read is cancelled — a half-open upstream connection.
+    private sealed class StalledBodyHandler : HttpMessageHandler
+    {
+        private readonly TaskCompletionSource _bodyReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int CallCount;
+        public volatile bool StallBody = true;
+
+        public Task BodyReadStarted => _bodyReadStarted.Task;
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref CallCount);
+            HttpContent content = StallBody
+                ? new StreamContent(new StalledStream(_bodyReadStarted))
+                : new StringContent("fresh-body", System.Text.Encoding.UTF8, "application/json");
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        }
+    }
+
+    private sealed class StalledStream : Stream
+    {
+        private readonly TaskCompletionSource _readStarted;
+        public StalledStream(TaskCompletionSource readStarted) => _readStarted = readStarted;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            _readStarted.TrySetResult();
+            await new TaskCompletionSource().Task.WaitAsync(cancellationToken);
+            return 0;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private sealed class GateHandler : HttpMessageHandler

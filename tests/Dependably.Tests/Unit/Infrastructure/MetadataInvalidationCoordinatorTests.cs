@@ -62,6 +62,64 @@ public sealed class MetadataInvalidationCoordinatorTests
     }
 
     /// <summary>
+    /// A packument is cached once per public base it was requested through, and an invalidation
+    /// names only the package. Every base's copy of both paths must go; the same bases' copies of
+    /// another package must stay.
+    /// </summary>
+    [Fact]
+    public void Npm_EvictsEveryPublicBaseVariant_AndLeavesOtherPackagesVariants()
+    {
+        var h = TestMetadataInvalidation.Build();
+        string[] bases = ["https://repo.example.test", "https://repo.example.test:1", "http://localhost"];
+        foreach (string publicBase in bases)
+        {
+            h.Npm.Set(new NpmPackumentKey(OrgA, "@scope/pkg") { PublicBase = publicBase }, [1], Ttl);
+            h.Npm.Set(new NpmPackumentKey(OrgA, "@scope/pkg") { IsProxy = true, PublicBase = publicBase }, [2], Ttl);
+            h.Npm.Set(new NpmPackumentKey(OrgA, "@scope/other") { PublicBase = publicBase }, [3], Ttl);
+        }
+
+        h.Coordinator.Invalidate(MetadataInvalidation.ForNpm(OrgA, "@scope/pkg"));
+
+        foreach (string publicBase in bases)
+        {
+            Assert.False(h.Npm.TryGet(new NpmPackumentKey(OrgA, "@scope/pkg") { PublicBase = publicBase }, out _));
+            Assert.False(h.Npm.TryGet(
+                new NpmPackumentKey(OrgA, "@scope/pkg") { IsProxy = true, PublicBase = publicBase }, out _));
+            Assert.True(h.Npm.TryGet(new NpmPackumentKey(OrgA, "@scope/other") { PublicBase = publicBase }, out _));
+        }
+    }
+
+    [Fact]
+    public void NuGet_EvictsEveryPublicBaseVariant_AndLeavesOtherPackagesVariants()
+    {
+        var h = TestMetadataInvalidation.Build();
+        string[] bases = ["https://nuget.example.test", "http://127.0.0.1:8080"];
+        foreach (string publicBase in bases)
+        {
+            h.NuGet.Set(new NuGetRegistrationKey(OrgA, "acme.core", SemVer2: true) { PublicBase = publicBase }, [1], Ttl);
+            h.NuGet.Set(new NuGetRegistrationKey(OrgA, "acme.core", SemVer2: false)
+            {
+                IsProxy = true,
+                PublicBase = publicBase,
+            }, [2], Ttl);
+            h.NuGet.Set(new NuGetRegistrationKey(OrgA, "acme.other", SemVer2: true) { PublicBase = publicBase }, [3], Ttl);
+        }
+
+        h.Coordinator.Invalidate(MetadataInvalidation.ForNuGet(OrgA, "Acme.Core"));
+
+        foreach (string publicBase in bases)
+        {
+            Assert.False(h.NuGet.TryGet(
+                new NuGetRegistrationKey(OrgA, "acme.core", SemVer2: true) { PublicBase = publicBase }, out _));
+            Assert.False(h.NuGet.TryGet(
+                new NuGetRegistrationKey(OrgA, "acme.core", SemVer2: false) { IsProxy = true, PublicBase = publicBase },
+                out _));
+            Assert.True(h.NuGet.TryGet(
+                new NuGetRegistrationKey(OrgA, "acme.other", SemVer2: true) { PublicBase = publicBase }, out _));
+        }
+    }
+
+    /// <summary>
     /// npm's rendered packument is not content-negotiated: the full and abbreviated
     /// ("corgi", <c>application/vnd.npm.install-v1+json</c>) documents are distinguished inside
     /// the upstream-fetch cache, keyed by URL + Accept, not in the rendered-response cache. This
@@ -185,44 +243,77 @@ public sealed class MetadataInvalidationCoordinatorTests
     public void NuGetRegistrationKey_HasExactlyTwoVariantAxes()
         => AssertVariantAxes<NuGetRegistrationKey>("SemVer2", "IsProxy");
 
-    // ── Maven: artifact-level always, version-level only for a SNAPSHOT ────────
+    // ── Maven: artifact-level always, version-level only for a SNAPSHOT, × local/proxy ──
 
     [Fact]
-    public void Maven_SnapshotPublishEvictsArtifactLevelAndVersionLevelDocuments()
+    public void Maven_SnapshotPublishEvictsArtifactLevelAndVersionLevelDocuments_BothVariants()
     {
         var h = TestMetadataInvalidation.Build();
-        var artifactLevel = new MavenMetadataKey(OrgA, "com.example", "widget");
-        var versionLevel = new MavenMetadataKey(OrgA, "com.example", "widget", "1.0-SNAPSHOT");
-        h.Maven.Set(artifactLevel, [1], Ttl);
-        h.Maven.Set(versionLevel, [2], Ttl);
+        var evicted = MavenVariants(OrgA, "com.example", "widget")
+            .Concat(MavenVariants(OrgA, "com.example", "widget", "1.0-SNAPSHOT"))
+            .ToArray();
+        foreach (var key in evicted)
+        {
+            h.Maven.Set(key, [1], Ttl);
+        }
 
         h.Coordinator.Invalidate(
             MetadataInvalidation.ForMaven(OrgA, "com.example", "widget", "1.0-SNAPSHOT"));
 
-        Assert.False(h.Maven.TryGet(artifactLevel, out _));
-        Assert.False(h.Maven.TryGet(versionLevel, out _));
+        Assert.All(evicted, key => Assert.False(h.Maven.TryGet(key, out _)));
     }
 
     /// <summary>
     /// A release publish changes the version list but no snapshot build list, so the
-    /// version-level document of an unrelated in-flight SNAPSHOT must survive. The adversarial
-    /// twin of the test above: "evict everything under this artifact" would pass that one and
-    /// fail this.
+    /// version-level document of an unrelated in-flight SNAPSHOT must survive in both variants.
+    /// The adversarial twin of the test above: "evict everything under this artifact" would pass
+    /// that one and fail this.
     /// </summary>
     [Fact]
     public void Maven_ReleasePublishLeavesUnrelatedSnapshotVersionDocumentIntact()
     {
         var h = TestMetadataInvalidation.Build();
-        var artifactLevel = new MavenMetadataKey(OrgA, "com.example", "widget");
-        var snapshotDoc = new MavenMetadataKey(OrgA, "com.example", "widget", "2.0-SNAPSHOT");
-        h.Maven.Set(artifactLevel, [1], Ttl);
-        h.Maven.Set(snapshotDoc, [2], Ttl);
+        var artifactLevel = MavenVariants(OrgA, "com.example", "widget");
+        var snapshotDoc = MavenVariants(OrgA, "com.example", "widget", "2.0-SNAPSHOT");
+        foreach (var key in artifactLevel.Concat(snapshotDoc))
+        {
+            h.Maven.Set(key, [1], Ttl);
+        }
 
         h.Coordinator.Invalidate(MetadataInvalidation.ForMaven(OrgA, "com.example", "widget"));
 
-        Assert.False(h.Maven.TryGet(artifactLevel, out _));
-        Assert.True(h.Maven.TryGet(snapshotDoc, out _));
+        Assert.All(artifactLevel, key => Assert.False(h.Maven.TryGet(key, out _)));
+        Assert.All(snapshotDoc, key => Assert.True(h.Maven.TryGet(key, out _)));
     }
+
+    /// <summary>
+    /// A peer replica receives coordinates, not keys, so the message path must expand to the
+    /// proxy variant exactly as the local path does.
+    /// </summary>
+    [Fact]
+    public void Maven_PeerMessageEvictsBothVariants()
+    {
+        var h = TestMetadataInvalidation.Build();
+        var receiver = new MetadataInvalidationReceiver(
+            h.Coordinator, NullLogger<MetadataInvalidationReceiver>.Instance);
+        var evicted = MavenVariants(OrgA, "com.example", "widget");
+        var survivor = new MavenMetadataKey(OrgB, "com.example", "widget") { IsProxy = true };
+        foreach (var key in evicted.Append(survivor))
+        {
+            h.Maven.Set(key, [1], Ttl);
+        }
+
+        string payload = MetadataInvalidationCodec.Encode(
+            MetadataInvalidation.ForMaven(OrgA, "com.example", "widget"), origin: "peer");
+
+        Assert.True(receiver.Apply(payload, selfOrigin: "self"));
+        Assert.All(evicted, key => Assert.False(h.Maven.TryGet(key, out _)));
+        Assert.True(h.Maven.TryGet(survivor, out _));
+    }
+
+    [Fact]
+    public void MavenMetadataKey_HasExactlyOneVariantAxis()
+        => AssertVariantAxes<MavenMetadataKey>("IsProxy");
 
     [Fact]
     public void Maven_LeavesOtherCoordinatesIntact()
@@ -502,6 +593,13 @@ public sealed class MetadataInvalidationCoordinatorTests
         new(orgId, normalizedId, SemVer2: true),
         new(orgId, normalizedId, SemVer2: false) { IsProxy = true },
         new(orgId, normalizedId, SemVer2: true) { IsProxy = true },
+    ];
+
+    private static MavenMetadataKey[] MavenVariants(
+        string orgId, string groupId, string artifactId, string? version = null) =>
+    [
+        new(orgId, groupId, artifactId, version),
+        new(orgId, groupId, artifactId, version) { IsProxy = true },
     ];
 
     private static MergedRepodataCache MergedFixture() =>

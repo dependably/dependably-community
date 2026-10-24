@@ -72,7 +72,7 @@ public sealed class UserErasureTests : IAsyncLifetime
         await throttle.TryConsumeAsync(lockoutKey, AccountSendThrottle.PurposePasswordReset, default);
     }
 
-    // Seeds one row in each of the seven restrict-FK tables attributing to userId, plus a
+    // Seeds one row in each of the ten restrict-FK tables attributing to userId, plus a
     // trusted device, and an activity + audit_log + audit_event row carrying the user's source
     // IP (and, for audit_event, user agent). suffix keeps unique keys distinct per user.
     private async Task SeedUserFootprintAsync(string userId, string suffix)
@@ -99,6 +99,15 @@ public sealed class UserErasureTests : IAsyncLifetime
         await conn.ExecuteAsync(
             "INSERT INTO install_script_allowlist (id, org_id, ecosystem, name, created_by) VALUES (@id, 'o1', 'npm', @name, @u)",
             new { id = "isa-" + suffix, name = "isa-" + suffix, u = userId });
+        await conn.ExecuteAsync(
+            "INSERT INTO license_allowlist (id, org_id, license_spdx, created_by) VALUES (@id, 'o1', @spdx, @u)",
+            new { id = "la-" + suffix, spdx = "MIT-" + suffix, u = userId });
+        await conn.ExecuteAsync(
+            "INSERT INTO license_blocklist (id, org_id, license_spdx, created_by) VALUES (@id, 'o1', @spdx, @u)",
+            new { id = "lb-" + suffix, spdx = "GPL-" + suffix, u = userId });
+        await conn.ExecuteAsync(
+            "INSERT INTO package_name_grant (id, org_id, ecosystem, purl_name, grantee_kind, grantee_id, created_by) VALUES (@id, 'o1', 'npm', @name, 'user', @u, @u)",
+            new { id = "png-" + suffix, name = "grant-" + suffix, u = userId });
         await conn.ExecuteAsync(
             "INSERT INTO mfa_trusted_devices (id, user_id, realm, tenant_id, token_hash, expires_at) VALUES (@id, @u, 'tenant', 'o1', @th, '2999-01-01T00:00:00Z')",
             new { id = "dev-" + suffix, u = userId, th = "devhash-" + suffix });
@@ -146,6 +155,9 @@ public sealed class UserErasureTests : IAsyncLifetime
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM claim WHERE id = 'c-u1' AND created_by IS NULL", new { }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM claim_history WHERE id = 'ch-u1' AND actor_id IS NULL", new { }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM install_script_allowlist WHERE id = 'isa-u1' AND created_by IS NULL", new { }));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM license_allowlist WHERE id = 'la-u1' AND created_by IS NULL", new { }));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM license_blocklist WHERE id = 'lb-u1' AND created_by IS NULL", new { }));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM package_name_grant WHERE id = 'png-u1' AND created_by IS NULL", new { }));
 
         // Half B: the live trusted-device credential is gone; the retained forensic rows have
         // their IP scrubbed. (login_attempts/account_send_throttle erasure is covered by the
@@ -167,6 +179,9 @@ public sealed class UserErasureTests : IAsyncLifetime
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM reserved_namespace WHERE id = 'rn-u2' AND created_by = @u", new { u = _u2 }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM quarantine WHERE id = 'q-u2' AND decided_by = @u", new { u = _u2 }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM claim_history WHERE id = 'ch-u2' AND actor_id = @u", new { u = _u2 }));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM license_allowlist WHERE id = 'la-u2' AND created_by = @u", new { u = _u2 }));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM license_blocklist WHERE id = 'lb-u2' AND created_by = @u", new { u = _u2 }));
+        Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM package_name_grant WHERE id = 'png-u2' AND created_by = @u", new { u = _u2 }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM mfa_trusted_devices WHERE user_id = @u", new { u = _u2 }));
         Assert.Equal(1, await CountAsync("SELECT COUNT(*) FROM activity WHERE id = 'act-u2' AND source_ip = '203.0.113.9'", new { }));
         Assert.Equal(1, await CountAsync(

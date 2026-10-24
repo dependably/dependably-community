@@ -108,21 +108,32 @@
     if (h.overall === 'healthy') return $t('system.dashboard.health.overallSummary.healthy')
     if (h.overall === 'down') return $t('system.dashboard.health.overallSummary.down')
     // Degraded: compute the cause.
-    const badJobs = (h.jobs ?? []).filter(j => j.status === 'stale' || j.status === 'failing')
+    const badJobs = (h.jobs ?? []).filter(j => j.status === 'stale' || j.status === 'failing' || j.status === 'degraded')
     if (badJobs.length > 0) {
-      const detail = badJobs.length === 1
-        ? `1 background job ${badJobs[0].status}`
-        : `${badJobs.length} background jobs ${badJobs.some(j => j.status === 'failing') ? 'failing/stale' : 'stale'}`
+      const count = badJobs.length
+      const hasUnhealthy = badJobs.some(j => j.status === 'failing' || j.status === 'degraded')
+      let detail
+      if (count > 1) {
+        detail = hasUnhealthy
+          ? $t('system.dashboard.health.overallSummary.detailJobsMixed', { values: { count } })
+          : $t('system.dashboard.health.overallSummary.detailJobStale', { values: { count } })
+      } else if (badJobs[0].status === 'failing') {
+        detail = $t('system.dashboard.health.overallSummary.detailJobFailing', { values: { count } })
+      } else if (badJobs[0].status === 'degraded') {
+        detail = $t('system.dashboard.health.overallSummary.detailJobDegraded', { values: { count } })
+      } else {
+        detail = $t('system.dashboard.health.overallSummary.detailJobStale', { values: { count } })
+      }
       return $t('system.dashboard.health.overallSummary.degraded', { values: { detail } })
     }
     if (h.storage?.stagingBelowThreshold) {
-      return $t('system.dashboard.health.overallSummary.degraded', { values: { detail: 'staging disk low' } })
+      return $t('system.dashboard.health.overallSummary.degraded', { values: { detail: $t('system.dashboard.health.overallSummary.detailStagingLow') } })
     }
-    return $t('system.dashboard.health.overallSummary.degraded', { values: { detail: 'stale snapshots' } })
+    return $t('system.dashboard.health.overallSummary.degraded', { values: { detail: $t('system.dashboard.health.overallSummary.detailStaleSnapshots') } })
   }
 
-  // Non-ok jobs (stale, failing) to display in the compact list.
-  $: badJobs = (health?.jobs ?? []).filter(j => j.status === 'stale' || j.status === 'failing')
+  // Non-ok jobs (stale, failing, degraded) to display in the compact list.
+  $: badJobs = (health?.jobs ?? []).filter(j => j.status === 'stale' || j.status === 'failing' || j.status === 'degraded')
   $: allJobsOk = (health?.jobs ?? []).every(j => j.status === 'ok' || j.status === 'disabled')
   $: okJobCount = (health?.jobs ?? []).filter(j => j.status === 'ok').length
 
@@ -531,7 +542,7 @@
   }
   .outcome-success { color: var(--success); }
   .outcome-server_error, .outcome-failing { color: var(--danger); }
-  .outcome-cancelled, .outcome-stale { color: var(--warning); }
+  .outcome-cancelled, .outcome-stale, .outcome-degraded { color: var(--warning); }
 
   .muted { color: var(--text2); font-size: 13px; }
 </style>

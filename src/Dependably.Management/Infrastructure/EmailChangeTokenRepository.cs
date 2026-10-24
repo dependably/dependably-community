@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
@@ -52,42 +53,76 @@ public sealed class EmailChangeTokenRepository
         string expires = ExpiryFor(_time.GetUtcNow()).ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await TenantMintGate.RequireMintableAsync(conn, _db.Provider, orgId, tx, ct);
 
-        await conn.ExecuteAsync(
+        await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM email_change_tokens WHERE user_id = @userId AND org_id = @orgId AND consumed_at IS NULL",
-            new { userId, orgId });
+            new { userId, orgId }, transaction: tx, cancellationToken: ct));
 
-        await conn.ExecuteAsync(
+        await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO email_change_tokens (id, user_id, org_id, new_email, token_hash, expires_at)
             VALUES (@id, @userId, @orgId, @newEmail, @hash, @expires)
             """,
-            new { id, userId, orgId, newEmail = EmailNormalizer.Normalize(newEmail), hash, expires });
+            new { id, userId, orgId, newEmail = EmailNormalizer.Normalize(newEmail), hash, expires },
+            transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
 
         return raw;
     }
 
     /// <summary>
-    /// Atomically consumes a change token, returning the pending record or null when the token is
-    /// unknown, already redeemed, or expired. The conditional UPDATE is the whole guard: concurrent
-    /// requests carrying the same token both reach it and exactly one matches.
+    /// Atomically consumes a change token and nothing else, returning the pending record or null
+    /// when the token is unknown, already redeemed, or expired. See
+    /// <see cref="RedeemAsync{TResult}"/>, which this delegates to.
     /// </summary>
-    public async Task<EmailChangeTokenRecord?> ConsumeAsync(string rawToken, CancellationToken ct = default)
+    public async Task<EmailChangeTokenRecord?> ConsumeAsync(string rawToken, CancellationToken ct = default) =>
+        (await RedeemAsync(rawToken, static (_, _, _) => Task.FromResult(true), ct))?.Credential;
+
+    /// <summary>
+    /// Consumes a change token and runs <paramref name="redeem"/> (the address write the link
+    /// authorizes) in the same transaction, so the link is spent exactly when that write commits.
+    ///
+    /// <para>
+    /// The transaction runs <see cref="TenantMintGate"/> before it consumes anything: a suspension
+    /// deletes only the pending links, so a link consumed just before the suspension's revoke and
+    /// applied just after it would leave the moved address in place when the tenant is restored.
+    /// A refused redemption throws <see cref="Dependably.Storage.TenantNotReadyException"/> and
+    /// leaves the link pending. The conditional UPDATE is the single-winner guard: concurrent
+    /// requests carrying the same token both reach it and exactly one matches.
+    /// </para>
+    /// </summary>
+    public async Task<CredentialRedemption<EmailChangeTokenRecord, TResult>?> RedeemAsync<TResult>(
+        string rawToken,
+        Func<EmailChangeTokenRecord, DbConnection, DbTransaction, Task<TResult>> redeem,
+        CancellationToken ct = default)
     {
         string hash = HashToken(rawToken);
         string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
         // xtenant: keyed by the SHA-256 of the change token, same rationale as
-        // PasswordResetTokenRepository.ConsumeAsync — the token itself is the tenant binding.
-        int rowsAffected = await conn.ExecuteAsync(
+        // PasswordResetTokenRepository.RedeemAsync — the token itself is the tenant binding.
+        string? orgId = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT org_id FROM email_change_tokens WHERE token_hash = @hash AND consumed_at IS NULL AND expires_at > @now",
+            new { hash, now }, transaction: tx, cancellationToken: ct));
+        if (orgId is null)
+        {
+            return null;
+        }
+
+        await TenantMintGate.RequireMintableAsync(conn, _db.Provider, orgId, tx, ct);
+
+        // xtenant: keyed by the SHA-256 of the change token, as above.
+        int rowsAffected = await conn.ExecuteAsync(new CommandDefinition(
             """
             UPDATE email_change_tokens SET consumed_at = @now
             WHERE token_hash = @hash AND consumed_at IS NULL AND expires_at > @now
             """,
-            new { now, hash });
-
+            new { now, hash }, transaction: tx, cancellationToken: ct));
         if (rowsAffected == 0)
         {
             return null;
@@ -97,16 +132,20 @@ public sealed class EmailChangeTokenRepository
         // the caller scopes every downstream write to.
         var (Id, UserId, OrgId, NewEmail, CurrentEmail) =
             await conn.QuerySingleAsync<(string Id, string UserId, string OrgId, string NewEmail, string CurrentEmail)>(
-            """
-            SELECT ect.id, ect.user_id AS UserId, ect.org_id AS OrgId,
-                   ect.new_email AS NewEmail, u.email AS CurrentEmail
-            FROM email_change_tokens ect
-            JOIN users u ON u.id = ect.user_id
-            WHERE ect.token_hash = @hash
-            """,
-            new { hash });
+            new CommandDefinition(
+                """
+                SELECT ect.id, ect.user_id AS UserId, ect.org_id AS OrgId,
+                       ect.new_email AS NewEmail, u.email AS CurrentEmail
+                FROM email_change_tokens ect
+                JOIN users u ON u.id = ect.user_id
+                WHERE ect.token_hash = @hash
+                """,
+                new { hash }, transaction: tx, cancellationToken: ct));
 
-        return new EmailChangeTokenRecord(Id, UserId, OrgId, NewEmail, CurrentEmail);
+        var consumed = new EmailChangeTokenRecord(Id, UserId, OrgId, NewEmail, CurrentEmail);
+        var result = await redeem(consumed, conn, tx);
+        await tx.CommitAsync(ct);
+        return new CredentialRedemption<EmailChangeTokenRecord, TResult>(consumed, result);
     }
 
     /// <summary>

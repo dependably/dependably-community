@@ -548,6 +548,49 @@ public sealed class OciUpstreamResolverTests : IAsyncLifetime
         Assert.Contains("tag=22.04", row.Purl);
     }
 
+    [Theory]
+    [InlineData(true, 1)]
+    [InlineData(false, 0)]
+    public async Task FetchManifestAsync_TagPull_QueuesTheImageForThePullingOrgsScanner(bool enabled, int expectedJobs)
+    {
+        // A tenant's first pull of a proxied tag queues the image for that tenant's scanner, keyed
+        // to the shared cache_artifact row; with scanning off it queues nothing.
+        byte[] manifestBytes = Encoding.UTF8.GetBytes(
+            """{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}""");
+        var upstreamResp = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(manifestBytes) };
+        upstreamResp.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("application/vnd.docker.distribution.manifest.v2+json");
+        var http = new SingleResponseFactory(upstreamResp);
+        var opts = Options.Create(DefaultOptions());
+        var authSvc = new OciUpstreamAuthService(http, opts, new StubAirGap(false),
+            NullLogger<OciUpstreamAuthService>.Instance, TimeProvider.System);
+        var enqueuer = new Dependably.Infrastructure.OciScan.OciScanEnqueuer(
+            new Dependably.Infrastructure.OciScan.OciScanOptions { Enabled = enabled },
+            new Dependably.Infrastructure.OciScan.OciScanRepository(_db), TimeProvider.System,
+            NullLogger<Dependably.Infrastructure.OciScan.OciScanEnqueuer>.Instance);
+        var resolver = new OciUpstreamResolver(http, authSvc, opts, new TieredBlobStorage(_cacheBlobs, new InMemoryBlobStore()),
+            _db, new StubAirGap(false), NewRecorder(), _cacheRecorder, _cacheArtifacts,
+            NullLogger<OciUpstreamResolver>.Instance, TimeProvider.System,
+            Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured(), enqueuer);
+
+        Assert.NotNull(await resolver.FetchManifestAsync(_orgId, "library/ubuntu", "24.04", isDigest: false, default));
+
+        await using var conn = await _db.OpenAsync(default);
+        var jobs = (await conn.QueryAsync<(string OwnerKind, string Repository, string Digest)>(
+            """
+            SELECT j.owner_kind, j.repository, j.digest
+            FROM oci_scan_jobs j
+            JOIN cache_artifact ca ON ca.id = j.cache_artifact_id
+            WHERE j.org_id = @orgId
+            """,
+            new { orgId = _orgId })).AsList();
+        Assert.Equal(expectedJobs, jobs.Count);
+        if (enabled)
+        {
+            Assert.Equal(("cache_artifact", "library/ubuntu", "sha256:" + Sha256Hex(manifestBytes)), jobs[0]);
+        }
+    }
+
     /// <summary>
     /// Pins the reported bug directly: the packages-list version count (sums
     /// <c>package_versions WHERE origin='uploaded'</c> plus the cache-plane join) and the package

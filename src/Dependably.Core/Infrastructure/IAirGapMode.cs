@@ -8,17 +8,35 @@ namespace Dependably.Infrastructure;
 /// Configured via the <c>AIR_GAPPED</c> environment variable. Read once at startup; the
 /// setting does not change at runtime.
 ///
-/// <c>DISABLE_BACKGROUND_JOBS</c> allows disabling individual background workers
-/// (comma-separated job names) without full air-gap mode. <see cref="IsJobDisabled"/> merges
-/// three signals — a full air-gap suppresses all outbound jobs, individual names in
-/// <see cref="DisabledJobs"/> suppress specific ones in any deployment mode, and edge mode
-/// (<c>DEPLOYMENT_MODE=edge</c>) force-disables every job outside the cache-only allowlist
-/// (<see cref="BackgroundJobs.EdgeAllowed"/>) while still honoring explicit denylist entries on top.
+/// <c>DISABLE_BACKGROUND_JOBS</c> disables background workers without full air-gap mode: either
+/// every job (<c>true</c>), or a comma-separated list of job names (parsed by
+/// <see cref="DisableBackgroundJobsSetting"/>, which fails startup on an unrecognised value).
+/// <see cref="IsJobDisabled"/> merges four signals — a full air-gap and the whole-set switch each
+/// suppress every job except the local housekeeping jobs in
+/// <see cref="BackgroundJobs.HousekeepingExemptFromWholeSet"/> (and air-gap alone also spares the
+/// database-only jobs in <see cref="BackgroundJobs.AirGapExempt"/>), individual names in <see cref="DisabledJobs"/> suppress
+/// specific ones in any deployment mode, and edge mode (<c>DEPLOYMENT_MODE=edge</c>) force-disables
+/// every job outside the cache-only allowlist (<see cref="BackgroundJobs.EdgeAllowed"/>) while
+/// still honoring the operator's switch and named entries on top.
 /// </summary>
 public interface IAirGapMode
 {
     bool IsEnabled { get; }
+
+    /// <summary>
+    /// The jobs <c>DISABLE_BACKGROUND_JOBS</c> disables. Under the whole-set switch this is
+    /// <see cref="BackgroundJobs.DisabledByWholeSet"/>; <see cref="IsJobDisabled"/> is the
+    /// authority, because it also covers a job name the registry does not list.
+    /// </summary>
     IReadOnlySet<string> DisabledJobs { get; }
+
+    /// <summary>
+    /// True when <c>DISABLE_BACKGROUND_JOBS</c> switches off the whole job set (<c>true</c>,
+    /// <c>1</c> or <c>all</c>) rather than naming jobs. A reporting signal: enforcement reads
+    /// <see cref="IsJobDisabled"/>.
+    /// </summary>
+    bool DisablesAllJobs => false;
+
     bool IsJobDisabled(string jobName);
 }
 
@@ -45,12 +63,14 @@ internal static class BackgroundJobs
             "oci-staging-janitor",
             "oci-reference-graph-backfill",
             "oci-blob-sweep",
+            "oci-scan-sweep",
             "tenant-hard-delete",
             "blob-size-poller",
             "tenant-count-poller",
             "stats-refresh",
             "saml-cert-expiry",
             "license-backfill",
+            "npm-manifest-rescan",
             "usage-rollup-hourly",
             "usage-rollup-daily",
             "usage-storage-snapshot",
@@ -80,21 +100,65 @@ internal static class BackgroundJobs
             "blob-size-poller",
             "healthcheck-pinger",
         };
+
+    /// <summary>
+    /// Local jobs that <c>AIR_GAPPED=true</c> and the whole-set switch
+    /// (<c>DISABLE_BACKGROUND_JOBS=true</c>) leave running. None makes an outbound call, and
+    /// stopping the disk-bounding ones would not reduce egress: it would leave the proxy cache and
+    /// the staging volume growing without bound. <c>npm-manifest-rescan</c> is a one-shot pass over
+    /// stored npm tarballs that reads local blobs and the database only; stopping it would leave a
+    /// tarball with several top-level manifests unflagged for the install-script and licence gates.
+    /// Naming one in a <c>DISABLE_BACKGROUND_JOBS</c> list still stops it, because that is an
+    /// explicit operator decision about that job.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> HousekeepingExemptFromWholeSet =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "cache-eviction",
+            "oci-staging-janitor",
+            "npm-manifest-rescan",
+        };
+
+    /// <summary>
+    /// Jobs that <c>AIR_GAPPED=true</c> leaves running because they make no outbound call at all.
+    /// Unlike <see cref="HousekeepingExemptFromWholeSet"/>, the whole-set switch
+    /// (<c>DISABLE_BACKGROUND_JOBS=true</c>), a named entry and edge mode still stop them.
+    ///
+    /// <para><c>oci-scan-sweep</c> reads and writes the database only. Its point under air-gap is
+    /// the rematch: an air-gapped scanner matches against sideloaded OSV dumps, and without a
+    /// periodic rematch an image would keep the verdict of the dumps it was first scanned
+    /// against. A re-extraction it queues that needs an evicted proxied blob reaches
+    /// <c>OciUpstreamResolver</c>, which refuses under air-gap before any fetch.</para>
+    /// </summary>
+    internal static readonly IReadOnlySet<string> AirGapExempt =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "oci-scan-sweep",
+        };
+
+    /// <summary>
+    /// The jobs the whole-set switch disables: every <see cref="Known"/> job except
+    /// <see cref="HousekeepingExemptFromWholeSet"/>.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> DisabledByWholeSet =
+        new HashSet<string>(Known.Except(HousekeepingExemptFromWholeSet, StringComparer.OrdinalIgnoreCase),
+            StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed class AirGapMode : IAirGapMode
 {
-    // Delegates to the shared registry so DISABLE_BACKGROUND_JOBS validation stays in sync
-    // with any new jobs registered in BackgroundJobs.Known.
-    private static readonly IReadOnlySet<string> KnownJobNames = BackgroundJobs.Known;
-
     public bool IsEnabled { get; }
     public IReadOnlySet<string> DisabledJobs { get; }
+    public bool DisablesAllJobs { get; }
 
     // True when DEPLOYMENT_MODE=edge — flips IsJobDisabled from a pure denylist to an
     // allowlist inversion (only BackgroundJobs.EdgeAllowed run; every other Known job is off).
     private readonly bool _isEdge;
 
+    /// <exception cref="InvalidOperationException">
+    /// <c>DISABLE_BACKGROUND_JOBS</c> holds a value <see cref="DisableBackgroundJobsSetting"/> does
+    /// not recognise; the host does not start.
+    /// </exception>
     public AirGapMode(IConfiguration config, ILogger<AirGapMode>? logger = null)
     {
         string? raw = config["AIR_GAPPED"];
@@ -106,19 +170,18 @@ public sealed class AirGapMode : IAirGapMode
             "edge",
             StringComparison.OrdinalIgnoreCase);
 
-        string disableRaw = config["DISABLE_BACKGROUND_JOBS"] ?? "";
-        var parsed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string token in disableRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (!KnownJobNames.Contains(token))
-            {
-                logger?.LogWarning("DISABLE_BACKGROUND_JOBS contains unknown job name '{JobName}'. Known names: {KnownNames}",
-                    token, string.Join(", ", KnownJobNames));
-            }
+        var disabled = DisableBackgroundJobsSetting.FromConfiguration(config);
+        DisablesAllJobs = disabled.AllJobs;
+        DisabledJobs = disabled.Names;
 
-            parsed.Add(token);
+        if (DisablesAllJobs)
+        {
+            logger?.LogInformation(
+                "DISABLE_BACKGROUND_JOBS disables every background job except the local housekeeping jobs " +
+                "{HousekeepingJobs}. Request-time upstream fetches are not affected; set AIR_GAPPED=true to " +
+                "stop those too.",
+                string.Join(", ", BackgroundJobs.HousekeepingExemptFromWholeSet.Order(StringComparer.Ordinal)));
         }
-        DisabledJobs = parsed;
 
         if (IsEnabled)
         {
@@ -134,10 +197,38 @@ public sealed class AirGapMode : IAirGapMode
     }
 
     public bool IsJobDisabled(string jobName) =>
-        // Air-gap disables every outbound job; the explicit denylist disables named jobs in any
-        // mode; edge mode additionally force-disables everything outside the cache-only allowlist.
-        // Explicit DISABLE_BACKGROUND_JOBS entries still add on top of the edge allowlist.
-        IsEnabled
-        || DisabledJobs.Contains(jobName)
+        // The explicit list disables named jobs in any mode. Air-gap and the whole-set switch
+        // disable every job, named or not, except the local housekeeping jobs that bound disk use;
+        // air-gap alone also spares the database-only jobs in AirGapExempt. Edge mode additionally
+        // force-disables everything outside the cache-only allowlist; the operator's switch and
+        // named entries still add on top of it.
+        DisabledJobs.Contains(jobName)
+        || (IsEnabled && !BackgroundJobs.HousekeepingExemptFromWholeSet.Contains(jobName)
+            && !BackgroundJobs.AirGapExempt.Contains(jobName))
+        || (DisablesAllJobs && !BackgroundJobs.HousekeepingExemptFromWholeSet.Contains(jobName))
         || (_isEdge && !BackgroundJobs.EdgeAllowed.Contains(jobName));
+}
+
+/// <summary>
+/// The <c>disabled_reason</c> reported for a background job on the instance surface. One label
+/// per cause, in precedence order, so an operator can tell which setting to change.
+/// </summary>
+public static class BackgroundJobDisabledReason
+{
+    public const string AirGapped = "AIR_GAPPED=true";
+    public const string AllJobs = "DISABLE_BACKGROUND_JOBS=true";
+    public const string Named = "DISABLE_BACKGROUND_JOBS";
+    public const string Edge = "DEPLOYMENT_MODE=edge";
+
+    /// <summary>Null when the job runs.</summary>
+    public static string? For(IAirGapMode airGap, string jobName)
+    {
+        ArgumentNullException.ThrowIfNull(airGap);
+        bool wholeSetApplies = !BackgroundJobs.HousekeepingExemptFromWholeSet.Contains(jobName);
+        return !airGap.IsJobDisabled(jobName) ? null
+            : airGap.IsEnabled && wholeSetApplies && !BackgroundJobs.AirGapExempt.Contains(jobName) ? AirGapped
+            : airGap.DisablesAllJobs && wholeSetApplies ? AllJobs
+            : airGap.DisabledJobs.Contains(jobName) ? Named
+            : Edge;
+    }
 }

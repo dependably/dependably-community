@@ -276,4 +276,282 @@ public class NpmPublishBodyParserTests : IDisposable
         byte[] staged = await File.ReadAllBytesAsync(result.TarballPath!);
         Assert.Equal(tarball, staged);
     }
+
+    // ── attachment data value shapes ─────────────────────────────────────────
+
+    private static byte[] BodyWithAttachment(string attachmentJson, string extraTopLevel = "") =>
+        Encoding.UTF8.GetBytes(
+            "{\"name\":\"left-pad\",\"versions\":{\"1.0.0\":{\"name\":\"left-pad\",\"version\":\"1.0.0\"}}" +
+            extraTopLevel +
+            $",\"_attachments\":{{\"left-pad-1.0.0.tgz\":{attachmentJson}}}}}");
+
+    private void AssertNothingStaged()
+    {
+        Assert.Empty(Directory.GetFiles(_staging));
+    }
+
+    private async Task<NpmPublishBodyParser.NpmParseResult> ParseFailureAsync(
+        byte[] body, NpmPublishBodyParser.NpmParseErrorKind kind, string detailFragment, long cap = 500L * 1024 * 1024)
+    {
+        var result = await ParseAsync(body, cap);
+
+        Assert.Equal(kind, result.ErrorKind);
+        Assert.Contains(detailFragment, result.ErrorDetail);
+        Assert.Null(result.Envelope);
+        Assert.Null(result.TarballPath);
+        AssertNothingStaged();
+        return result;
+    }
+
+    [Fact]
+    public async Task Parse_WhitespaceAroundTheDataColonAndValue_StillResolves()
+    {
+        byte[] payload = Encoding.ASCII.GetBytes("tarball bytes");
+        string b64 = Convert.ToBase64String(payload);
+
+        var result = await ParseAsync(BodyWithAttachment($"{{\"data\"  \r\n:\t \"{b64}\",\"length\":{payload.Length}}}"));
+
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, result.ErrorKind);
+        Assert.Equal(payload, await File.ReadAllBytesAsync(result.TarballPath!));
+        Assert.Equal("", (string?)result.Envelope?["_attachments"]?["left-pad-1.0.0.tgz"]?["data"]);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("12345")]
+    [InlineData("{\"nested\":true}")]
+    [InlineData("[\"QUJD\"]")]
+    public async Task Parse_DataThatIsNotAString_Returns422AsMissing(string dataLiteral)
+    {
+        await ParseFailureAsync(
+            BodyWithAttachment($"{{\"data\":{dataLiteral},\"length\":3}}"),
+            NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape,
+            "data is required");
+    }
+
+    [Fact]
+    public async Task Parse_BodyTruncatedInsideTheDataValue_Returns422AsMissing()
+    {
+        byte[] body = Encoding.UTF8.GetBytes("{\"name\":\"left-pad\",\"_attachments\":{\"left-pad-1.0.0.tgz\":{\"data\":\"QUJDRE");
+
+        await ParseFailureAsync(body, NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape, "data is required");
+    }
+
+    [Fact]
+    public async Task Parse_BodyTruncatedRightAfterTheDataColon_Returns422AsMissing()
+    {
+        byte[] body = Encoding.UTF8.GetBytes("{\"name\":\"left-pad\",\"_attachments\":{\"left-pad-1.0.0.tgz\":{\"data\":");
+
+        await ParseFailureAsync(body, NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape, "data is required");
+    }
+
+    [Fact]
+    public async Task Parse_DataKeyWrittenWithAUnicodeEscape_IsStillTheAttachmentData()
+    {
+        byte[] payload = Encoding.ASCII.GetBytes("escaped key");
+        string b64 = Convert.ToBase64String(payload);
+
+        var result = await ParseAsync(BodyWithAttachment($"{{\"d\\u0061ta\":\"{b64}\",\"length\":{payload.Length}}}"));
+
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, result.ErrorKind);
+        Assert.Equal(payload, await File.ReadAllBytesAsync(result.TarballPath!));
+    }
+
+    [Fact]
+    public async Task Parse_Base64SlashAndPlusWrittenAsJsonEscapes_DecodeToTheOriginalBytes()
+    {
+        byte[] payload = { 0xFB, 0xEF, 0xBE, 0xFF, 0xFF, 0xFF, 0x3E, 0x3F, 0x41 };
+        string b64 = Convert.ToBase64String(payload);
+        Assert.Contains('+', b64);
+        Assert.Contains('/', b64);
+
+        string slashShort = b64.Replace("+", "\\u002B").Replace("/", "\\/");
+        var viaShortAndUpper = await ParseAsync(BodyWithAttachment($"{{\"data\":\"{slashShort}\",\"length\":{payload.Length}}}"));
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, viaShortAndUpper.ErrorKind);
+        Assert.Equal(payload, await File.ReadAllBytesAsync(viaShortAndUpper.TarballPath!));
+
+        string lowerHex = b64.Replace("+", "\\u002b").Replace("/", "\\u002f");
+        var viaLowerHex = await ParseAsync(BodyWithAttachment($"{{\"data\":\"{lowerHex}\",\"length\":{payload.Length}}}"));
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, viaLowerHex.ErrorKind);
+        Assert.Equal(payload, await File.ReadAllBytesAsync(viaLowerHex.TarballPath!));
+    }
+
+    [Theory]
+    [InlineData("QUJD\\u00e9QUJD")]
+    [InlineData("QUJD\\u20acQUJD")]
+    [InlineData("QUJD\\u00zzQUJD")]
+    [InlineData("QUJD\\\"QUJD")]
+    [InlineData("QUJD\\\\QUJD")]
+    [InlineData("QUJD\\bQUJD")]
+    [InlineData("QUJD\\fQUJD")]
+    public async Task Parse_EscapeThatDecodesToANonBase64Character_Returns422(string dataValue)
+    {
+        await ParseFailureAsync(
+            BodyWithAttachment($"{{\"data\":\"{dataValue}\"}}"),
+            NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape,
+            "Invalid base64");
+    }
+
+    [Fact]
+    public async Task Parse_WhitespaceEscapesInsideBase64_AreDecodedThenIgnoredByTheBase64Decoder()
+    {
+        var result = await ParseAsync(BodyWithAttachment("{\"data\":\"QUJD\\nREVG\\r\\tR0g=\",\"length\":8}"));
+
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, result.ErrorKind);
+        Assert.Equal("ABCDEFGH", Encoding.ASCII.GetString(await File.ReadAllBytesAsync(result.TarballPath!)));
+    }
+
+    [Fact]
+    public async Task Parse_EscapeThatNeverCompletesAcrossTheDecodeWindowBoundary_Returns422()
+    {
+        // The value fills the first 48 KiB decode window up to the backslash-u pair, so the escape
+        // starts in one window and the value ends two characters into the next.
+        string value = new string('A', 48 * 1024 - 2) + "\\u00";
+
+        await ParseFailureAsync(
+            BodyWithAttachment("{\"data\":\"" + value + "\"}"),
+            NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape,
+            "Invalid base64");
+    }
+
+    [Fact]
+    public async Task Parse_EscapeCutOffAtTheEndOfTheValue_Returns422()
+    {
+        await ParseFailureAsync(
+            BodyWithAttachment("{\"data\":\"QUJD\\u00\"}"),
+            NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape,
+            "Invalid base64");
+    }
+
+    [Theory]
+    [InlineData("QUJDR")]
+    [InlineData("QUJ")]
+    [InlineData("Q")]
+    public async Task Parse_Base64OfAnImpossibleLength_Returns422(string dataValue)
+    {
+        await ParseFailureAsync(
+            BodyWithAttachment($"{{\"data\":\"{dataValue}\"}}"),
+            NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape,
+            "Invalid base64");
+    }
+
+    [Fact]
+    public async Task Parse_EmptyDataString_ProducesAnEmptyTarballRatherThanAnError()
+    {
+        var result = await ParseAsync(BodyWithAttachment("{\"data\":\"\",\"length\":0}"));
+
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, result.ErrorKind);
+        Assert.Equal(0, result.TarballSize);
+        Assert.Empty(await File.ReadAllBytesAsync(result.TarballPath!));
+    }
+
+    // ── declared length, cap boundary, and envelope shape ────────────────────
+
+    [Fact]
+    public async Task Parse_NoDeclaredLength_AcceptsTheDecodedSize()
+    {
+        byte[] payload = Encoding.ASCII.GetBytes("no length field");
+        string b64 = Convert.ToBase64String(payload);
+
+        var result = await ParseAsync(BodyWithAttachment($"{{\"data\":\"{b64}\"}}"));
+
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, result.ErrorKind);
+        Assert.Equal(payload.LongLength, result.TarballSize);
+    }
+
+    [Fact]
+    public async Task Parse_DeclaredLengthAboveTheCap_Returns413EvenWhenTheBodyFits()
+    {
+        byte[] payload = Encoding.ASCII.GetBytes("tiny");
+        string b64 = Convert.ToBase64String(payload);
+
+        await ParseFailureAsync(
+            BodyWithAttachment($"{{\"data\":\"{b64}\",\"length\":999999999}}"),
+            NpmPublishBodyParser.NpmParseErrorKind.TooLarge,
+            "declared length 999999999 exceeds",
+            cap: 4096);
+    }
+
+    [Fact]
+    public async Task Parse_BodyExactlyAtTheCap_IsAccepted_AndOneByteOverIsRejected()
+    {
+        byte[] payload = Encoding.ASCII.GetBytes("boundary");
+        byte[] body = BodyWithAttachment($"{{\"data\":\"{Convert.ToBase64String(payload)}\",\"length\":{payload.Length}}}");
+
+        var atCap = await ParseAsync(body, cap: body.Length);
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, atCap.ErrorKind);
+        File.Delete(atCap.TarballPath!);
+
+        await ParseFailureAsync(
+            body, NpmPublishBodyParser.NpmParseErrorKind.TooLarge, "exceeds the npm publish limit", cap: body.Length - 1);
+    }
+
+    [Fact]
+    public async Task Parse_AttachmentsPresentButEmpty_Returns422()
+    {
+        byte[] body = Encoding.UTF8.GetBytes("{\"name\":\"left-pad\",\"_attachments\":{}}");
+
+        await ParseFailureAsync(body, NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape, "exactly one entry");
+    }
+
+    [Fact]
+    public async Task Parse_AttachmentsThatIsNotAnObject_Returns422()
+    {
+        byte[] body = Encoding.UTF8.GetBytes("{\"name\":\"left-pad\",\"_attachments\":\"oops\"}");
+
+        await ParseFailureAsync(body, NpmPublishBodyParser.NpmParseErrorKind.AttachmentShape, "exactly one entry");
+    }
+
+    [Fact]
+    public async Task Parse_MalformedJsonAfterTheDataValue_Returns422AndLeavesNothingStaged()
+    {
+        byte[] payload = Encoding.ASCII.GetBytes("abc");
+        string body = "{\"name\":\"left-pad\",\"_attachments\":{\"left-pad-1.0.0.tgz\":{\"data\":\""
+            + Convert.ToBase64String(payload) + "\",\"length\":3}";
+
+        await ParseFailureAsync(Encoding.UTF8.GetBytes(body), NpmPublishBodyParser.NpmParseErrorKind.InvalidJson, "Invalid JSON");
+    }
+
+    [Fact]
+    public async Task Parse_MalformedJsonBeforeTheDataValue_Returns422()
+    {
+        byte[] body = Encoding.UTF8.GetBytes("{\"name\": left-pad, \"_attachments\":{\"a.tgz\":{\"data\":\"QUJD\"}}}");
+
+        await ParseFailureAsync(body, NpmPublishBodyParser.NpmParseErrorKind.InvalidJson, "Invalid JSON");
+    }
+
+    [Fact]
+    public async Task Parse_EmptyBody_Returns422()
+    {
+        await ParseFailureAsync(Array.Empty<byte>(), NpmPublishBodyParser.NpmParseErrorKind.InvalidJson, "Invalid JSON");
+    }
+
+    [Fact]
+    public async Task Parse_HugeTokenBeforeTheAttachment_IsReadThroughTheGrowingBuffer()
+    {
+        // A single string token longer than the 32 KiB scan buffer must not stall the locator.
+        string readme = new('x', 100_000);
+        byte[] payload = Encoding.ASCII.GetBytes("after a huge readme");
+        string b64 = Convert.ToBase64String(payload);
+
+        var result = await ParseAsync(BodyWithAttachment(
+            $"{{\"data\":\"{b64}\",\"length\":{payload.Length}}}",
+            extraTopLevel: $",\"readme\":\"{readme}\",\"keywords\":[\"pad\",[\"nested\"]]"));
+
+        Assert.Equal(NpmPublishBodyParser.NpmParseErrorKind.None, result.ErrorKind);
+        Assert.Equal(payload, await File.ReadAllBytesAsync(result.TarballPath!));
+        Assert.Equal(readme, (string?)result.Envelope?["readme"]);
+        Assert.Equal("nested", (string?)result.Envelope?["keywords"]?[1]?[0]);
+    }
+
+    [Fact]
+    public async Task Parse_SuccessLeavesOnlyTheTarballStaged()
+    {
+        byte[] payload = Encoding.ASCII.GetBytes("keeper");
+        var result = await ParseAsync(BodyWithAttachment($"{{\"data\":\"{Convert.ToBase64String(payload)}\"}}"));
+
+        string staged = Assert.Single(Directory.GetFiles(_staging));
+        Assert.Equal(result.TarballPath, staged);
+        Assert.EndsWith(".tmp", staged);
+    }
 }

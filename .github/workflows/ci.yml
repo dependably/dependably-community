@@ -31,11 +31,12 @@ jobs:
       - name: Check for string interpolation in Dapper calls (SQL injection prevention)
         run: ci/check-sql-interp.sh src
 
-      # SchemaPostgres tests require a live Postgres (TEST_POSTGRES_CONNECTION) and throw loudly
-      # without one — they run only in GitLab's dedicated schema-integrity job. Exclude them here
-      # so the offline unit suite stays green, matching the test class's stated design intent.
+      # SchemaPostgres and RedisLive tests require a live Postgres (TEST_POSTGRES_CONNECTION) or
+      # Redis (TEST_REDIS_CONNECTION) and throw loudly without one — they run only in GitLab's
+      # dedicated schema-integrity and redis-smoke jobs. Exclude them here so the offline unit
+      # suite stays green, matching the test classes' stated design intent.
       - name: Test (unit + compliance + security)
-        run: dotnet test --no-build -c Release --verbosity normal --filter "Category!=Integration&Category!=SchemaPostgres" --collect:"XPlat Code Coverage"
+        run: dotnet test --no-build -c Release --verbosity normal --filter "Category!=Integration&Category!=SchemaPostgres&Category!=RedisLive" --collect:"XPlat Code Coverage"
 
       - name: Upload unit coverage
         if: always()

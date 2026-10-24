@@ -6,6 +6,7 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Protocol.Hex;
 using Dependably.Tests.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
@@ -132,6 +133,84 @@ public sealed class HexRefreshSurfacesTests : IAsyncLifetime
         using var retiredDoc = JsonDocument.Parse(await retired.Content.ReadAsStringAsync());
         Assert.Equal("blocked", retiredDoc.RootElement.GetProperty("verdict").GetString());
         Assert.Contains("deprecat", retiredDoc.RootElement.GetProperty("blockedReason").GetString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RefreshPass_RetirementUpstreamAfterCaching_ReachesTheServedIndex_AndBlockAllHidesIt()
+    {
+        // A release cached before upstream retired it: the org's own signed /packages resource
+        // advertises what hex_release records for a held release, so the retirement reaches Mix
+        // and Rebar3 only once the refresh writes it there.
+        string name = NewName();
+        StubPackage(name);
+        string orgId = await OrgIdAsync();
+        await SeedCachedReleaseAsync(orgId, name, "1.1.0");
+        using var client = _factory.CreateClientWithBearer(await _factory.CreateToken("pull"));
+        using var orgKey = HexRegistrySigner.ParsePublicKeyPem(await client.GetStringAsync("/hex/public_key"));
+
+        Assert.Null((await ServedReleaseAsync(client, orgKey, name, "1.1.0"))!.Retired);
+
+        await RefreshServiceForTest().RunRefreshPassAsync(CancellationToken.None);
+
+        var served = await ServedReleaseAsync(client, orgKey, name, "1.1.0");
+        Assert.Equal(new HexRetirementStatus(HexRetirementReason.Security, "CVE-2026-9"), served!.Retired);
+
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync("UPDATE org_settings SET block_deprecated = 'block_all' WHERE org_id = @orgId", new { orgId });
+        }
+
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+        Assert.Null(await ServedReleaseAsync(client, orgKey, name, "1.1.0"));
+    }
+
+    // The background job is disabled in the test host; this builds the same service from the
+    // host's own registrations with the job enabled and no delay between groups.
+    private DeprecationRefreshService RefreshServiceForTest()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["DEPRECATION_REFRESH_BATCH_DELAY_MS"] = "0" })
+            .Build();
+        return ActivatorUtilities.CreateInstance<DeprecationRefreshService>(
+            _factory.Services, NSubstitute.Substitute.For<IAirGapMode>(), (IConfiguration)config);
+    }
+
+    private async Task SeedCachedReleaseAsync(string orgId, string name, string version)
+    {
+        string caId = Guid.NewGuid().ToString("N");
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using (var conn = await store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash, purl)
+                VALUES (@id, 'hex', @name, @version, @filename, @blobKey, @contentHash, @purl)
+                """,
+                new
+                {
+                    id = caId,
+                    name,
+                    version,
+                    filename = $"{name}-{version}.tar",
+                    blobKey = $"proxy/{caId}/{name}-{version}.tar",
+                    contentHash = new string('a', 64),
+                    purl = $"pkg:hex/{name}@{version}",
+                });
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)", new { orgId, caId });
+        }
+
+        await _factory.Services.GetRequiredService<Dependably.Infrastructure.Hex.HexReleaseRepository>().UpsertCachedAsync(caId,
+            new Dependably.Infrastructure.Hex.HexReleaseFacts(new string('b', 64), [], name, ["mix"], null, null, null, false, null));
+    }
+
+    private static async Task<HexRelease?> ServedReleaseAsync(HttpClient client, RSA orgKey, string name, string version)
+    {
+        var resp = await client.GetAsync($"/hex/packages/{name}");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var package = HexRegistryCodec.DecodePackage(HexRegistrySigner.OpenResource(await resp.Content.ReadAsByteArrayAsync(), orgKey));
+        return package.Releases.SingleOrDefault(r => r.Version == version);
     }
 
     [Fact]

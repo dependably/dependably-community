@@ -147,7 +147,7 @@ public sealed class NpmPackumentReviewRegressionTests : IAsyncLifetime
         var notModified = await client.SendAsync(revalidate);
         Assert.Equal(HttpStatusCode.NotModified, notModified.StatusCode);
 
-        Assert.True(packumentCache.TryGet(new NpmPackumentKey(orgId, pkg) { IsProxy = true }, out byte[]? cached)
+        Assert.True(packumentCache.TryGet(new NpmPackumentKey(orgId, pkg) { IsProxy = true, PublicBase = "http://localhost" }, out byte[]? cached)
             && cached is not null,
             "a revalidating request must populate the rendered cache, not bypass it");
 

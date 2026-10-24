@@ -216,7 +216,9 @@ public sealed class PyPiProxyFetcher(
 
         // Walk upstreams in priority order; the first whose simple index resolves the file wins.
         // The matched upstream's auth header rides along, but ONLY when the resolved href stayed
-        // on the upstream's own host. A PEP 503 simple index may name an absolute href to any
+        // on the upstream's own origin (scheme, host and port), so an http:// href on the
+        // configured https:// host is fetched anonymously rather than over plaintext with the
+        // credential. A PEP 503 simple index may name an absolute href to any
         // host (see ResolvePyPiHref's doc comment) — a hostile or merely mirror-like upstream
         // (Artifactory-style proxies commonly link straight to files.pythonhosted.org) can name a
         // third-party host in its own response. Attaching this upstream's stored credential there
@@ -226,7 +228,7 @@ public sealed class PyPiProxyFetcher(
             var resolved = await ResolveUpstreamPyPiUrlAsync(source, parsed.PurlName, file, ct);
             if (resolved is not null)
             {
-                string? authorizationHeader = UpstreamHostPin.IsSameHost(source.Url, resolved.Value.Url)
+                string? authorizationHeader = UpstreamHostPin.IsSameOrigin(source.Url, resolved.Value.Url)
                     ? source.AuthorizationHeader
                     : null;
                 return (resolved.Value.Url, resolved.Value.Sha256Hex, authorizationHeader);

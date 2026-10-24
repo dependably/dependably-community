@@ -37,9 +37,19 @@ public sealed class QuarantineRepository
     /// <see cref="BlockGateService"/> uses <see cref="QuarantineUpsertResult.Inserted"/> to raise
     /// an alert only on the fresh-insert case.
     /// </summary>
+    /// <param name="reopenDecidedGate">
+    /// When set, a row already decided under this gate is reopened as pending under
+    /// <paramref name="gate"/>, with its decision metadata cleared, instead of being left alone.
+    /// The one narrow exception to "never resurrect a decided row": an OCI digest approved past the
+    /// <c>unscanned</c> arm that another arm later refuses. That approval was a decision about a
+    /// different arm, and a refusal that cannot reach the queue would be invisible.
+    /// </param>
+#pragma warning disable S107 // org, identity, gate, detail, version and reopen gate are independent facts of one row
     public async Task<QuarantineUpsertResult> UpsertPendingAsync(
         string orgId, string ecosystem, string purl, string gate,
-        string? detail, string? packageVersionId, CancellationToken ct = default)
+        string? detail, string? packageVersionId, string? reopenDecidedGate = null,
+        CancellationToken ct = default)
+#pragma warning restore S107
     {
         string candidateId = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
@@ -51,11 +61,27 @@ public sealed class QuarantineRepository
                 gate = excluded.gate,
                 detail = excluded.detail,
                 package_version_id = COALESCE(excluded.package_version_id, quarantine.package_version_id),
+                state = 'pending',
+                decided_by = CASE WHEN quarantine.state = 'pending' THEN quarantine.decided_by ELSE NULL END,
+                decided_at = CASE WHEN quarantine.state = 'pending' THEN quarantine.decided_at ELSE NULL END,
+                note = CASE WHEN quarantine.state = 'pending' THEN quarantine.note ELSE NULL END,
                 updated_at = excluded.updated_at
             WHERE quarantine.state = 'pending'
+               OR (@reopenGate IS NOT NULL AND quarantine.gate = @reopenGate AND excluded.gate <> @reopenGate)
             RETURNING id
             """,
-            new { id = candidateId, orgId, packageVersionId, ecosystem, purl, gate, detail, now = NowIso() }))
+            new
+            {
+                id = candidateId,
+                orgId,
+                packageVersionId,
+                ecosystem,
+                purl,
+                gate,
+                detail,
+                now = NowIso(),
+                reopenGate = reopenDecidedGate,
+            }))
             .ToList();
 
         if (returned.Count > 0)
@@ -416,6 +442,21 @@ public sealed class QuarantineRepository
         long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM quarantine WHERE org_id = @orgId AND purl = @purl AND state = 'approved'",
             new { orgId, purl });
+        return count > 0;
+    }
+
+    /// <summary>
+    /// True when the purl has an approved review recorded under exactly <paramref name="gate"/>.
+    /// The arm-scoped form of <see cref="HasApprovedForPurlAsync"/>: an approval past the OCI
+    /// <c>unscanned</c> arm waives that arm only, so it is read back by gate rather than by purl
+    /// alone, and a row since reopened under another gate no longer counts.
+    /// </summary>
+    public async Task<bool> HasApprovedForGateAsync(string orgId, string purl, string gate, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        long count = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM quarantine WHERE org_id = @orgId AND purl = @purl AND gate = @gate AND state = 'approved'",
+            new { orgId, purl, gate });
         return count > 0;
     }
 }

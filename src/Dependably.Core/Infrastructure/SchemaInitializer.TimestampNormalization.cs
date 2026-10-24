@@ -33,8 +33,9 @@ namespace Dependably.Infrastructure;
 /// timestamp parser (SQLite's <c>strftime</c>, Postgres's <c>::timestamptz</c> cast) to do the
 /// UTC shift, filtered to rows that are not already canonical. This is a single index-free scan
 /// per column per boot, but a cheap one: it matches nothing on a database with no legacy rows,
-/// and is ~100x faster than a per-row round trip on one that has them (see
-/// <c>SchemaInitializerTimestampNormalizationTests</c> for a measured comparison).</item>
+/// and issues the same fixed statement list however large the legacy backlog is, never a round
+/// trip per row (<c>SchemaInitializerTimestampNormalizationTests</c> and
+/// <c>TimestampNormalizationPostgresTests</c> pin this by counting statements).</item>
 /// <item><c>package_versions.published_at</c>, <c>packages.upstream_latest_published_at</c>, and
 /// <c>cache_artifact.published_at</c> are microsecond precision
 /// (<see cref="UtcTimestamp.PreciseFormat"/>), and neither SQLite's <c>strftime</c> nor a
@@ -64,8 +65,8 @@ namespace Dependably.Infrastructure;
 /// </summary>
 public sealed partial class SchemaInitializer
 {
-    // internal (not private) so timing/perf tests can invoke the sweep directly against a
-    // pre-seeded connection without paying for a full fresh-schema InitializeAsync() pass.
+    // internal (not private) so tests can invoke the sweep directly against a pre-seeded
+    // (or statement-counting) connection without a full fresh-schema InitializeAsync() pass.
     internal async Task NormalizeLegacyDateTimeOffsetColumnsAsync(DbConnection conn)
     {
         bool isPostgres = _db.Provider == DbProvider.Postgres;

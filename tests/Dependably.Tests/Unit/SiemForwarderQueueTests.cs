@@ -21,17 +21,33 @@ public class SiemForwarderQueueTests
             ["SIEM_QUEUE_CAPACITY"] = capacity?.ToString()
         }).Build();
 
+    /// <summary>
+    /// Counts sends. The consumer calls it on its own thread while the test reads the count from
+    /// another, so the count is atomic.
+    /// </summary>
     private sealed class CountingForwarder : ISiemForwarder
     {
-        public int Calls { get; private set; }
+        private int _calls;
+        public int Calls => Volatile.Read(ref _calls);
         public Func<SiemEvent, Task>? Behavior { get; set; }
         public string Name => "counting";
         public Task SendAsync(SiemEvent ev, CancellationToken ct = default)
         {
-            Calls++;
+            Interlocked.Increment(ref _calls);
             return Behavior?.Invoke(ev) ?? Task.CompletedTask;
         }
     }
+
+    /// <summary>
+    /// Runs the queue's live consumer loop (the token is not cancelled, so this is not the shutdown
+    /// drain) on the calling thread, after the test has buffered its events.
+    /// <see cref="Microsoft.Extensions.Hosting.BackgroundService.StartAsync"/> followed by an enqueue
+    /// resumes the consumer on a thread-pool thread while xUnit polls from its own threads, so a pool
+    /// blocked by sibling test classes stalls the consumer under the poll's real-time ceiling.
+    /// Buffered events are instead delivered before the loop first yields.
+    /// </summary>
+    private static Task RunConsumerInline(SiemForwarderQueue queue, CancellationToken stoppingToken) =>
+        queue.ExecuteAsyncForTests(stoppingToken);
 
     private static SiemEvent Sample(string id = "e1") => new(
         Id: id, Action: "login.success", Scope: "tenant", OrgId: "o1",
@@ -44,14 +60,15 @@ public class SiemForwarderQueueTests
         var fwd = new CountingForwarder();
         var q = new SiemForwarderQueue(
             fwd, new FakeTimeProvider(TestTime.KnownNow), Cfg(), NullLogger<SiemForwarderQueue>.Instance);
-        using var cts = new CancellationTokenSource();
-        var run = q.StartAsync(cts.Token);
-
         Assert.True(q.TryEnqueue(Sample()));
-        await WaitAsync(() => fwd.Calls == 1);
+
+        using var cts = new CancellationTokenSource();
+        var consumer = RunConsumerInline(q, cts.Token);
+        await WaitAsync(() => q.DeliveredCount == 1);
 
         await cts.CancelAsync();
-        try { await q.StopAsync(CancellationToken.None); } catch { }
+        await consumer;
+        Assert.Equal(1, fwd.Calls);
         Assert.Equal(1, q.DeliveredCount);
     }
 
@@ -101,14 +118,14 @@ public class SiemForwarderQueueTests
         };
         var clock = new FakeTimeProvider(TestTime.KnownNow);
         var q = new SiemForwarderQueue(fwd, clock, Cfg(), NullLogger<SiemForwarderQueue>.Instance, NoBackoff);
-        using var cts = new CancellationTokenSource();
-        await q.StartAsync(cts.Token);
+        Assert.True(q.TryEnqueue(Sample()));
 
-        q.TryEnqueue(Sample());
+        using var cts = new CancellationTokenSource();
+        var consumer = RunConsumerInline(q, cts.Token);
         await WaitAsync(() => q.DeliveredCount == 1);
 
         await cts.CancelAsync();
-        try { await q.StopAsync(CancellationToken.None); } catch { }
+        await consumer;
         Assert.Equal(2, attempts);
         Assert.Equal(0, q.FailedCount);
     }

@@ -29,7 +29,7 @@ namespace Dependably.Tests.Compliance;
 /// that each mint their own guard is covered independently — each mint site gets its own forward
 /// window — but a <c>RetireUnbound</c> that happens to sit within the window of BOTH mints while
 /// only truly belonging to one would pass for both; no consumer in this repo has that shape today.
-/// <b>The likeliest way consumer number eight diverges is not on this list of near-misses: an
+/// <b>The likeliest way the next consumer diverges is not on this list of near-misses: an
 /// inline mint that never goes through a <c>GuardFor</c>-named helper at all</b> — a fill that
 /// calls <c>_fillGuards.GetOrAdd(key, static _ =&gt; new CancellationTokenSource())</c> directly,
 /// ties the result to a cache entry, and never retires it on the throwing path. This gate keys
@@ -76,8 +76,8 @@ public sealed partial class CacheFillGuardLifecycleComplianceTests
     // catch a single project root silently vanishing while the others keep the total comfortably
     // above the floor — confirmed directly by renaming src/Dependably.Core out of the glob: the
     // total scanned count stays at 184 (Dependably + Dependably.Management + Dependably.Edge,
-    // still >= MinimumFilesScanned) while 431 files, and five of the seven real CacheFillGuard
-    // consumers living under Core, silently drop out of the scan. RequiredRootMinimums below (and
+    // still >= MinimumFilesScanned) while 431 files, and the CacheFillGuard consumers living
+    // under Core, silently drop out of the scan. RequiredRootMinimums below (and
     // AssertRequiredRootsWereScanned) is the check that actually closes that gap, by naming the
     // specific roots this gate depends on and requiring each to contribute its own floor. A
     // regression in the matching regexes that silently stops matching real call sites within files
@@ -85,9 +85,9 @@ public sealed partial class CacheFillGuardLifecycleComplianceTests
     // assert the regex/join logic still matches a known-good literal, independent of any real file.
     private const int MinimumFilesScanned = 50;
 
-    // The project roots known to hold every current CacheFillGuard consumer (Core: six of seven —
+    // The project roots known to hold every current CacheFillGuard consumer (eight in all. Core:
     // BlocklistRepository, UserTokenVersionStore, SubdomainTenantResolver,
-    // InstallScriptAllowlistService, ReservedNamespaceService; Management: the seventh,
+    // InstallScriptAllowlistService, ReservedNamespaceListCache, OrgRepository; Management:
     // JwtRevocationRepository and SystemAdminTokenVersionStore). Minimums are set well below each
     // root's actual current file count (431 / 182) so an unrelated file removed elsewhere in the
     // same root never trips this — it exists to catch the root itself silently disappearing from

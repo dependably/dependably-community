@@ -2,6 +2,9 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.Usage;
 using Dependably.Tests.Infrastructure;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit.Infrastructure;
@@ -208,6 +211,62 @@ public sealed class UsagePostureRepositoryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Sweep_evicts_the_resolver_cache_for_exactly_the_orgs_it_wrote_so_the_new_posture_applies_at_once()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var resolver = new SubdomainTenantResolver(
+            _db,
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["BASE_URL"] = "https://example.com" })
+                .Build(),
+            cache);
+        var invalidations = new RecordingInvalidator(resolver);
+        var repo = new UsagePostureRepository(_db, _clock, tenantCache: invalidations);
+
+        // A mixed fleet: o1 trips its egress cap, o3's caps were cleared while it was enforced, and
+        // o2 is capped but under, so the sweep leaves it alone.
+        await SetCapsAsync("o1", (UsageCapMeters.EgressBytes, 10));
+        await SeedHourlyAsync("o1", UsageMeters.EgressBytes, "2026-09-24T11:00:00Z", 10);
+        await SetPostureAsync("o3", UsagePostures.UploadsRefused);
+        await SetCapsAsync("o2", (UsageCapMeters.EgressBytes, 1000));
+        await SeedHourlyAsync("o2", UsageMeters.EgressBytes, "2026-09-24T11:00:00Z", 1);
+
+        // Each subdomain was resolved, and cached, before the sweep.
+        Assert.Equal(UsagePostures.Normal, (await ResolveAsync(resolver, "one")).UsagePosture);
+        Assert.Equal(UsagePostures.Normal, (await ResolveAsync(resolver, "two")).UsagePosture);
+        Assert.Equal(UsagePostures.UploadsRefused, (await ResolveAsync(resolver, "three")).UsagePosture);
+
+        Assert.Equal(2, await repo.RecomputeAsync());
+
+        Assert.Equal(["one", "three"], invalidations.Slugs.Order(StringComparer.Ordinal));
+        Assert.Equal(UsagePostures.UploadsRefused, (await ResolveAsync(resolver, "one")).UsagePosture);
+        Assert.Equal(UsagePostures.Normal, (await ResolveAsync(resolver, "three")).UsagePosture);
+
+        // A pass that writes nothing evicts nothing.
+        invalidations.Slugs.Clear();
+        Assert.Equal(0, await repo.RecomputeAsync());
+        Assert.Empty(invalidations.Slugs);
+    }
+
+    private static Task<TenantContext> ResolveAsync(SubdomainTenantResolver resolver, string slug)
+    {
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Host = new HostString(slug + ".example.com");
+        return resolver.ResolveAsync(ctx);
+    }
+
+    private sealed class RecordingInvalidator(ITenantSlugCacheInvalidator inner) : ITenantSlugCacheInvalidator
+    {
+        public List<string> Slugs { get; } = [];
+
+        public void InvalidateSlug(string slug)
+        {
+            Slugs.Add(slug);
+            inner.InvalidateSlug(slug);
+        }
+    }
+
+    [Fact]
     public async Task A_cap_lifted_mid_sweep_is_not_overwritten_by_the_sweeps_stale_posture()
     {
         // o1 was refused, and its usage has since grown past 110 % of the egress cap.
@@ -218,7 +277,7 @@ public sealed class UsagePostureRepositoryTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         var changes = await _repo.EvaluateFleetAsync(conn);
         Assert.Equal(
-            new UsagePostureRepository.PostureChange("o1", UsagePostures.UploadsRefused, UsagePostures.DownloadsThrottled),
+            new UsagePostureRepository.PostureChange("o1", "one", UsagePostures.UploadsRefused, UsagePostures.DownloadsThrottled),
             Assert.Single(changes));
 
         // Between the sweep's read and its write, the operator lifts the cap (the usage-limits
@@ -226,9 +285,9 @@ public sealed class UsagePostureRepositoryTests : IAsyncLifetime
         await SetCapsAsync("o1", (UsageCapMeters.EgressBytes, null));
         Assert.Equal(UsagePostures.Normal, await _repo.RecomputeForOrgAsync("o1"));
 
-        int written = await UsagePostureRepository.ApplyFleetAsync(conn, changes);
+        var written = await UsagePostureRepository.ApplyFleetAsync(conn, changes);
 
-        Assert.Equal(0, written);
+        Assert.Empty(written);
         Assert.Equal(UsagePostures.Normal, await _repo.GetPostureAsync("o1"));
     }
 
@@ -240,9 +299,9 @@ public sealed class UsagePostureRepositoryTests : IAsyncLifetime
         await SetPostureAsync("o1", UsagePostures.UploadsRefused);
 
         await using var conn = await _db.OpenAsync();
-        int written = await UsagePostureRepository.ApplyFleetAsync(conn, await _repo.EvaluateFleetAsync(conn));
+        var written = await UsagePostureRepository.ApplyFleetAsync(conn, await _repo.EvaluateFleetAsync(conn));
 
-        Assert.Equal(1, written);
+        Assert.Equal("o1", Assert.Single(written).OrgId);
         Assert.Equal(UsagePostures.DownloadsThrottled, await _repo.GetPostureAsync("o1"));
     }
 

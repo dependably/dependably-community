@@ -36,8 +36,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
     private readonly OrgAccessGuard _guard;
     private readonly AuditRepository _audit;
     private readonly ProblemResults _problems;
-    private readonly CacheArtifactRepository _cacheArtifacts;
-    private readonly TenantArtifactAccessRepository _tenantAccess;
+    private readonly ManualBlockFanout _fanout;
 
     // Constructor injection of independently-registered DI services — each parameter is a
     // distinct collaborator, not a candidate for further bundling.
@@ -59,8 +58,7 @@ public sealed class QuarantineController : OrgScopedControllerBase
         _guard = guard;
         _audit = audit;
         _problems = problems;
-        _cacheArtifacts = cacheArtifacts;
-        _tenantAccess = tenantAccess;
+        _fanout = new ManualBlockFanout(packages, cacheArtifacts, tenantAccess, quarantine);
     }
 
     /// <summary>
@@ -187,7 +185,24 @@ public sealed class QuarantineController : OrgScopedControllerBase
             "denied" => "blocked",
             _ => null,
         };
-        await ApplyManualBlockOverrideAsync(orgId, entry, manualState, ct);
+
+        // An approval past the OCI 'unscanned' arm is scoped to that arm: the gate reads it back
+        // by gate (QuarantineRepository.HasApprovedForGateAsync), and setting the manual allow
+        // here would short-circuit every arm, so a KEV or malicious finding that lands on the
+        // digest after the approval would be waived forever. The decision is recorded only.
+        // A prior deny of the same row set a manual block; the approval lifts that block (back to
+        // no override, never to allow) so the arm-scoped approval is what the gate then reads.
+        if (req.Decision == "approved" && entry.Gate == BlockGateService.UnscannedGate)
+        {
+            if (entry.State == "denied" && await DenyOwnsManualBlockAsync(orgId, entry, ct))
+            {
+                await ApplyManualBlockOverrideAsync(orgId, entry, null, userId, ct);
+            }
+        }
+        else
+        {
+            await ApplyManualBlockOverrideAsync(orgId, entry, manualState, userId, ct);
+        }
 
         await _audit.LogAsync("quarantine_decision", orgId, userId,
             actorKind: ActorKinds.User,
@@ -203,6 +218,23 @@ public sealed class QuarantineController : OrgScopedControllerBase
             sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
 
         return Ok(new { id = entry.Id, state = req.Decision });
+    }
+
+    // True when the manual block on this entry's coordinate was set by the deny being reversed,
+    // rather than by an operator's own block. The review row is unique per (org, purl), so a
+    // second quarantine row cannot be the other source; the other source is the version
+    // block endpoint, which resolves a pending row as "resolved via manual" and writes a
+    // package_version_blocked audit row. Either trace, or an audit row at or after the deny, means
+    // the block is not this deny's to lift. A deny with neither trace owns its block.
+    private async Task<bool> DenyOwnsManualBlockAsync(string orgId, QuarantineEntry entry, CancellationToken ct)
+    {
+        if (entry.Note is { } note && note.StartsWith("resolved via manual", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string since = (entry.DecidedAt ?? entry.UpdatedAt).ToUtcIsoMillis();
+        return !await _audit.HasActionSinceAsync(orgId, entry.Purl, "package_version_blocked", since, ct);
     }
 
     // Applies the pending→decided transition, or an already-decided entry's re-decide/reset.
@@ -240,18 +272,15 @@ public sealed class QuarantineController : OrgScopedControllerBase
     }
 
     // Flips the manual block-gate override to match the decision: on the version row when one
-    // exists, or (for a version-less proxy entry, which has no package_versions row) on every
-    // matching tenant_artifact_access row instead — the cache-hit serve gate reads its override
-    // from there via BlockGateRequest.ForProxyCacheFacts.
+    // exists, or (for a version-less proxy entry, which has no package_versions row) on the
+    // matching tenant_artifact_access rows instead — the cache-hit serve gate reads its override
+    // from there via BlockGateRequest.ForProxyCacheFacts. ManualBlockFanout decides the rest of the
+    // coverage, the same way the direct block/unblock endpoints do: a PyPI denial spreads to every
+    // spelling on both planes and resolves their pending entries, while an approval stays on the
+    // uploaded version (or the proxied artifact) the entry names.
     private async Task ApplyManualBlockOverrideAsync(
-        string orgId, QuarantineEntry entry, string? manualState, CancellationToken ct)
+        string orgId, QuarantineEntry entry, string? manualState, string? userId, CancellationToken ct)
     {
-        if (entry.PackageVersionId is { } versionId)
-        {
-            await _packages.SetManualBlockStateAsync(versionId, manualState, ct);
-            return;
-        }
-
         // TryParseCacheCoordinate (not TryParse) is required: RPM/apk purls carry an ?arch=…
         // qualifier and apk an alpine/ namespace, and Maven uses a group/artifact path separator —
         // none of which appear in cache_artifact.name/version. A raw TryParse leaves those on and
@@ -259,15 +288,18 @@ public sealed class QuarantineController : OrgScopedControllerBase
         var parsed = PurlParser.TryParseCacheCoordinate(entry.Purl);
         if (parsed is null)
         {
+            if (entry.PackageVersionId is { } versionId)
+            {
+                await _packages.SetManualBlockStateAsync(versionId, manualState, ct);
+            }
+
             return;
         }
 
-        var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, entry.Ecosystem, parsed.Name, ct);
-        foreach (var proxyEntry in proxyEntries.Where(
-            e => string.Equals(e.Version, parsed.Version, StringComparison.OrdinalIgnoreCase)))
-        {
-            await _tenantAccess.SetManualBlockStateAsync(orgId, proxyEntry.Id, manualState, ct);
-        }
+        await _fanout.ApplyAsync(new ManualBlockDecision(
+            orgId, entry.Ecosystem, parsed.Name, parsed.Version, manualState, userId,
+            entry.PackageVersionId is null ? ManualBlockOrigin.ProxiedEntry : ManualBlockOrigin.UploadedEntry,
+            entry.PackageVersionId), ct);
     }
 }
 

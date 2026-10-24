@@ -5,6 +5,7 @@ using Dependably.Infrastructure.RowLevelSecurity;
 using Dependably.Protocol;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
+using Dependably.Tests.Infrastructure.Seeding;
 using Npgsql;
 
 namespace Dependably.Tests.Integration;
@@ -147,6 +148,54 @@ public sealed class RowLevelSecurityPostgresTests
         await using var none = await db.Store(new FixedAmbient(AmbientTenantKind.None, null)).OpenAsync();
         var ex = await Assert.ThrowsAsync<PostgresException>(() => none.QueryAsync<string>("SELECT id FROM package_versions"));
         Assert.Equal(PostgresRowLevelSecurityInstaller.NoTenantContextSqlState, ex.SqlState);
+    }
+
+    [Fact]
+    public async Task EpssScoresReplace_RunsAsTheRlsRoleWithNoTenant_AndStoresTheFile()
+    {
+        await using var db = await RlsDatabase.CreateInitializedAsync();
+        var repo = new VulnerabilityRepository(db.Store(new FixedAmbient(AmbientTenantKind.None, null)), TimeProvider.System);
+        var scores = new Dictionary<string, EpssScore>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["CVE-2080-0001"] = new EpssScore(0.4, 0.5),
+            ["CVE-2080-0002"] = new EpssScore(0.6, null),
+        };
+
+        // The refresh pass declares no scope, so this runs as the non-owner role; a statement that
+        // role has no grant for (TRUNCATE, ALTER) would fail every daily replace.
+        await repo.ReplaceEpssScoresAsync(scores, "2026-10-05");
+        scores["CVE-2080-0001"] = new EpssScore(0.9, 0.95);
+        await repo.ReplaceEpssScoresAsync(scores, "2026-10-06");
+
+        Assert.Equal(2, await repo.CountEpssScoresAsync());
+        var stored = await repo.GetStoredEpssScoresAsync(["CVE-2080-0001"]);
+        Assert.Equal(new EpssScore(0.9, 0.95), stored["CVE-2080-0001"]);
+    }
+
+    [Fact]
+    public async Task EpssFill_RunsAsTheRlsRoleWithNoTenant_AndFillsOnlyUnscoredAdvisories()
+    {
+        await using var db = await RlsDatabase.CreateInitializedAsync();
+        var store = db.Store(new FixedAmbient(AmbientTenantKind.None, null));
+        var repo = new VulnerabilityRepository(store, TimeProvider.System);
+        await VulnerabilitySeeder.InsertVulnAsync(store, "GHSA-rls-fill-1", aliases: """["CVE-2081-0001","CVE-2081-0002"]""");
+        await VulnerabilitySeeder.InsertVulnAsync(store, "GHSA-rls-fill-2", aliases: """["CVE-2081-0001"]""", epssScore: 0.2);
+        await repo.ReplaceEpssScoresAsync(
+            new Dictionary<string, EpssScore>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["CVE-2081-0001"] = new EpssScore(0.4, 0.5),
+                ["CVE-2081-0002"] = new EpssScore(0.6, 0.7),
+            },
+            "2026-10-06");
+
+        // The refresh pass declares no scope, so this runs as the non-owner role on plain DML.
+        Assert.Equal(1, await repo.FillMissingEpssFromStoredScoresAsync());
+
+        await using var conn = await store.OpenAsync();
+        Assert.Equal((0.6, 0.7), await conn.QuerySingleAsync<(double?, double?)>(
+            "SELECT epss_score, epss_percentile FROM vulnerabilities WHERE osv_id = 'GHSA-rls-fill-1'"));
+        Assert.Equal(0.2, await conn.ExecuteScalarAsync<double>(
+            "SELECT epss_score FROM vulnerabilities WHERE osv_id = 'GHSA-rls-fill-2'"));
     }
 
     [Fact]
@@ -499,6 +548,60 @@ public sealed class RowLevelSecurityPostgresTests
         Assert.Equal(1, remaining);
     }
 
+    [Fact]
+    public async Task AliasDonorSweep_RunOnAScanTickWithNoScope_ResolvesEveryTenantsLinks()
+    {
+        await using var db = await RlsDatabase.CreateInitializedAsync();
+        await db.SeedTwoTenantsAsync();
+        var clock = TestTime.Frozen();
+        var storeA = db.Store(new FixedAmbient(AmbientTenantKind.Tenant, OrgA));
+        var storeB = db.Store(new FixedAmbient(AmbientTenantKind.Tenant, OrgB));
+        var repoA = new VulnerabilityRepository(storeA, clock);
+        var repoB = new VulnerabilityRepository(storeB, clock);
+
+        async Task<string> UpsertAsync(string osvId, string? severity, double? score, params string[] aliases) =>
+            await repoA.UpsertVulnerabilityAsync(
+                new OsvAdvisory(osvId, aliases, null, severity, score,
+                    [new OsvAffectedPackage("pkg:npm/left-pad", "npm", "left-pad", ["1.0.0"])],
+                    "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", IsHydrated: true),
+                "npm", "left-pad");
+
+        string verA = await PackageSeeder.InsertVersionAsync(storeA, "pa-1", "1.0.0", "pkg:npm/left-pad@1.0.0");
+        string verB = await PackageSeeder.InsertVersionAsync(storeB, "pb-1", "1.0.0", "pkg:npm/left-pad@1.0.0");
+        string pysec = await UpsertAsync("PYSEC-2026-1", null, null, "GHSA-aaaa-bbbb-cccc");
+        string ghsa = await UpsertAsync("GHSA-aaaa-bbbb-cccc", "MEDIUM", 5.0);
+        foreach (var (repo, ver) in new[] { (repoA, verA), (repoB, verB) })
+        {
+            await repo.LinkVersionVulnAsync(ver, pysec);
+            await repo.LinkVersionVulnAsync(ver, ghsa);
+        }
+
+        async Task<string?> BorrowedSeverityAsync(string versionId)
+        {
+            await using var owner = await db.Store().OpenCrossTenantAsync("test: read borrowed severity");
+            return await owner.ExecuteScalarAsync<string?>(
+                "SELECT alias_severity FROM package_version_vulns WHERE package_version_id = @versionId AND vuln_id = @pysec",
+                new { versionId, pysec });
+        }
+
+        Assert.Equal("MEDIUM", await BorrowedSeverityAsync(verA));
+        Assert.Equal("MEDIUM", await BorrowedSeverityAsync(verB));
+
+        // Org A's fetch changes the donor; under its tenant it re-resolves only its own links.
+        clock.Advance(TimeSpan.FromHours(1));
+        await UpsertAsync("GHSA-aaaa-bbbb-cccc", "CRITICAL", 9.8);
+        Assert.Equal("CRITICAL", await BorrowedSeverityAsync(verA));
+        Assert.Equal("MEDIUM", await BorrowedSeverityAsync(verB));
+
+        // The scan tick declares no scope, so its connection is the non-owner role with no tenant.
+        clock.Advance(TimeSpan.FromMinutes(10));
+        var tick = new VulnerabilityRepository(db.Store(new FixedAmbient(AmbientTenantKind.None, null)), clock);
+        Assert.True(await tick.ReconcileAliasDonorsAsync() >= 1);
+
+        Assert.Equal("CRITICAL", await BorrowedSeverityAsync(verB));
+        Assert.Equal(0, await tick.ReconcileAliasDonorsAsync());
+    }
+
     // The default must never make a deployment unbootable: a defaulted enforce on a database the
     // backstop cannot run on (here, an owner role without CREATEROLE) boots with it off instead.
     [Fact]
@@ -687,9 +790,10 @@ public sealed class RowLevelSecurityPostgresTests
         /// <summary>A database that has not been booted yet, so a test can boot it itself.</summary>
         public static async Task<RlsDatabase> CreateAsync(bool ownerCanCreateRoles, bool explicitEnforce)
         {
-            string superuser = Environment.GetEnvironmentVariable("TEST_POSTGRES_CONNECTION")
+            string superuser = DisposableTestDatabaseGuard.EnsureDisposable(
+                Environment.GetEnvironmentVariable("TEST_POSTGRES_CONNECTION")
                 ?? throw new InvalidOperationException(
-                    "TEST_POSTGRES_CONNECTION must be set to run Category=SchemaPostgres tests.");
+                    "TEST_POSTGRES_CONNECTION must be set to run Category=SchemaPostgres tests."));
 
             var db = new RlsDatabase(superuser, Guid.NewGuid().ToString("N")[..12], explicitEnforce);
             string createRole = ownerCanCreateRoles ? " CREATEROLE" : "";

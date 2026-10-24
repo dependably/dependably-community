@@ -4,8 +4,10 @@ using Xunit.Abstractions;
 namespace Dependably.Tests.Compliance;
 
 /// <summary>
-/// Static check: a <see cref="System.Diagnostics.Metrics.MeterListener"/> filtered only by
-/// <c>DependablyMeter.MeterName</c> + instrument name captures emissions from EVERY parallel
+/// Static check: a <see cref="System.Diagnostics.Metrics.MeterListener"/> that selects the shared
+/// meter, either by <c>DependablyMeter.MeterName</c> or by matching a Dependably instrument name
+/// literal (<c>instrument.Name == "dependably.…"</c> / <c>instrument.Name is "dependably.…"</c>),
+/// captures emissions from EVERY parallel
 /// test in the process, because <c>DependablyMeter.Meter</c> is a deliberately static,
 /// process-wide taxonomy (<c>Dependably.Core/Infrastructure/Observability/DependablyMeter.cs</c>).
 /// A test class that attaches such a listener and asserts exact counts must serialize against
@@ -18,7 +20,9 @@ namespace Dependably.Tests.Compliance;
 /// A listener scoped to a fresh, per-test <see cref="System.Diagnostics.Metrics.Meter"/>
 /// instance (not the shared <c>DependablyMeter.Meter</c>) is immune to cross-talk by
 /// construction and is not flagged — the gate only fires when the file both attaches a
-/// <c>MeterListener</c> and filters on <c>DependablyMeter.MeterName</c>.
+/// <c>MeterListener</c> and selects the shared meter by <c>DependablyMeter.MeterName</c> or by a
+/// <c>"dependably.</c> instrument-name literal. Tag-name literals such as
+/// <c>"dependably.outcome"</c> are not instrument selectors and do not trip the gate.
 /// </summary>
 [Trait("Category", "Compliance")]
 public sealed partial class MeterListenerIsolationComplianceTests
@@ -26,11 +30,19 @@ public sealed partial class MeterListenerIsolationComplianceTests
     private readonly ITestOutputHelper _output;
     public MeterListenerIsolationComplianceTests(ITestOutputHelper output) => _output = output;
 
-    [GeneratedRegex(@"new\s+MeterListener\b", RegexOptions.None)]
+    // Matches `new MeterListener`, `new System.Diagnostics.Metrics.MeterListener`, and the
+    // target-typed form `MeterListener _x = new();`.
+    [GeneratedRegex(@"new\s+(System\.Diagnostics\.Metrics\.)?MeterListener\b|\bMeterListener\s+\w+\s*=\s*new\s*\(", RegexOptions.None)]
     private static partial Regex MeterListenerRegex();
 
+    // Selection by name literal: an instrument (`Name == "dependably.x"`, `Name is "dependably.x" or ...`)
+    // or the shared meter itself (`Meter.Name == "dependably"`, DependablyMeter.MeterName's value).
+    // An instrument name matches process-wide regardless of which Meter instance emits it.
+    [GeneratedRegex("""\bName\s*(==|is)\s*"dependably[."]""", RegexOptions.None)]
+    private static partial Regex InstrumentNameLiteralRegex();
+
     [Fact]
-    public void MeterListenersFilteredByDependablyMeterName_LiveInSerializedCollection()
+    public void MeterListenersOnSharedMeter_LiveInSerializedCollection()
     {
         string testsRoot = Path.Combine(SourceRoots.RepoRoot(), "tests");
         var violations = new List<string>();
@@ -47,7 +59,9 @@ public sealed partial class MeterListenerIsolationComplianceTests
             // attaches a MeterListener — the MeterListenerRegex() guard below already excludes it,
             // this comment just documents why it's safe to not special-case it.
             string content = File.ReadAllText(file);
-            if (!MeterListenerRegex().IsMatch(content) || !content.Contains("DependablyMeter.MeterName"))
+            bool selectsSharedMeter = content.Contains("DependablyMeter.MeterName")
+                || InstrumentNameLiteralRegex().IsMatch(content);
+            if (!MeterListenerRegex().IsMatch(content) || !selectsSharedMeter)
             {
                 continue;
             }
@@ -56,7 +70,7 @@ public sealed partial class MeterListenerIsolationComplianceTests
             {
                 violations.Add(
                     $"{Path.GetRelativePath(SourceRoots.RepoRoot(), file)}: attaches a MeterListener " +
-                    "filtered by DependablyMeter.MeterName without [Collection(\"MeterSensitive\")] — " +
+                    "selecting the shared meter (DependablyMeter.MeterName or a \"dependably.*\" instrument-name literal) without [Collection(\"MeterSensitive\")] — " +
                     "it will capture emissions from every other parallel test against the process-wide " +
                     "static meter. Add [Collection(\"MeterSensitive\")] to the test class.");
             }

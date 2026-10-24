@@ -98,19 +98,30 @@ public sealed partial class OciUpstreamResolver
         }
 
         string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+        // With the org's scan enforcement at warn or block, a manifest is capped at the size the
+        // blob route also treats as the largest manifest (the spec recommends 4 MB), so the two
+        // routes never disagree about whether a body is a manifest and a body larger than that
+        // cannot be a manifest the gate would miss. At off the metadata cap applies, as before.
+        bool enforced = (await _orgs.GetSettingsAsync(orgId, ct))?.OciScanEnforcement is "warn" or "block";
+        long cap = enforced ? OciManifestParser.ManifestSniffMaxBytes : UpstreamClient.MaxMetadataResponseBytes;
         byte[] bytes;
         try
         {
-            // Manifests are small JSON documents (the spec recommends ≤ 4 MB); cap the buffered
-            // read so a hostile upstream cannot materialise an arbitrarily large body in memory.
-            bytes = await UpstreamClient.ReadBodyCappedAsync(
-                resp, UpstreamClient.MaxMetadataResponseBytes, url, ct);
+            bytes = await UpstreamClient.ReadBodyCappedAsync(resp, cap, url, ct);
         }
         catch (UpstreamResponseTooLargeException ex)
         {
+            if (enforced)
+            {
+                _logger.LogWarning(ex,
+                    "OCI manifest {Repository}:{Reference} from {Host} exceeded the {CapBytes}-byte manifest cap that applies under scan enforcement; refusing.",
+                    repository, reference, upstream.Host, cap);
+                throw new OciManifestTooLargeException(reference, upstream.Host, cap);
+            }
+
             _logger.LogWarning(ex,
-                "OCI manifest {Repository}:{Reference} from {Host} exceeded the metadata cap; refusing.",
-                repository, reference, upstream.Host);
+                "OCI manifest {Repository}:{Reference} from {Host} exceeded the {CapBytes}-byte metadata cap; refusing.",
+                repository, reference, upstream.Host, cap);
             return null;
         }
         string digest = ResolveDigest(resp, repository, reference, bytes, out string? sha256Hex);
@@ -167,12 +178,15 @@ public sealed partial class OciUpstreamResolver
 
         await using var conn = await _db.OpenAsync(ct);
 
+        // A manifest fetched through the manifest route is authoritative about its media type, so
+        // it corrects a row the blob route stored first under a generic type.
         // xtenant: (digest, org_id) PK is tenant-scoped.
         await conn.ExecuteAsync(
             """
             INSERT INTO oci_blobs (digest, org_id, media_type, size_bytes, blob_key, origin, cached_at)
             VALUES (@digest, @orgId, @mediaType, @sizeBytes, @blobKey, 'proxy', @now)
             ON CONFLICT(digest, org_id) DO UPDATE SET
+                media_type = excluded.media_type,
                 upstream_checked_at = @now
             """,
             new
@@ -257,8 +271,57 @@ public sealed partial class OciUpstreamResolver
     private sealed record FetchedManifest(byte[] Bytes, string MediaType, string Digest, string Sha256Hex);
 
     private readonly record struct OciCatalogEntry(
-        string Repository, string Tag, string Digest, string Sha256Hex, long SizeBytes, string BlobKey,
+        string Repository, string? Tag, string Digest, string Sha256Hex, long SizeBytes, string BlobKey,
         string? UpstreamUrl);
+
+    /// <summary>
+    /// Catalogues, and queues for this org's scanner, a proxied manifest the org pulled by digest
+    /// and holds no catalogue row for. Called by the OCI pull gate under scan enforcement only,
+    /// because tag pulls are the only ones catalogued otherwise, and an image the gate can never
+    /// see scanned would be refused forever. A digest that is a platform child of an index the org
+    /// already holds in this repository is not an image of its own (it inherits the index's verdict through the
+    /// reference graph) and is left alone, as is a manifest this org did not proxy: a hosted one
+    /// is catalogued by <see cref="OciUploadService.CatalogueDigestPushAsync"/>.
+    /// Returns true when a catalogue row was written.
+    /// </summary>
+    public async Task<bool> CatalogueDigestPullAsync(
+        string orgId, string repository, string digest, CancellationToken ct)
+    {
+        string[] parts = digest.Split(':', DigestSplitParts);
+        if (parts.Length != DigestSplitParts || parts[0] != "sha256")
+        {
+            return false;
+        }
+
+        (string? BlobKey, long SizeBytes, string? Origin) row;
+        bool isChild;
+        await using (var conn = await _db.OpenAsync(ct))
+        {
+            // xtenant: (digest, org_id) PK is tenant-scoped.
+            row = await conn.QuerySingleOrDefaultAsync<(string? BlobKey, long SizeBytes, string? Origin)>(
+                "SELECT blob_key AS BlobKey, size_bytes AS SizeBytes, origin AS Origin " +
+                "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+                new { digest, orgId });
+            // A child only when an index this org holds IN THIS REPOSITORY lists it, the same
+            // owner lookup the pull gate resolves through; an edge whose parent lives in another
+            // repository leaves the digest unowned here, so it is catalogued and queued itself.
+            isChild = await OciReferenceGraph.IsPlatformOfHeldImageAsync(conn, orgId, repository, digest);
+        }
+
+        if (row.BlobKey is null || row.Origin != "proxy" || isChild)
+        {
+            return false;
+        }
+
+        string? host = await MatchUpstreamHostAsync(orgId, repository, ct);
+        await RecordCatalogVersionAsync(
+            orgId,
+            new OciCatalogEntry(
+                repository, Tag: null, digest, parts[1].ToLowerInvariant(), row.SizeBytes, row.BlobKey,
+                host is null ? null : $"https://{host}/v2/{repository}/manifests/{digest}"),
+            ct);
+        return true;
+    }
 
     /// <summary>
     /// Records the pulled image in the shared package catalogue: a <c>packages</c> row (so the
@@ -318,6 +381,15 @@ public sealed partial class OciUpstreamResolver
                     upstreamIntegrityValue: null,
                     upstreamIntegrityAlgorithm: null,
                     ct: ct);
+
+                // Every cataloguing of a tag reaches here, revalidations included; the queue holds
+                // one job per (image, org), so only this org's first pull of the image queues one.
+                if (_scanEnqueuer is not null)
+                {
+                    await _scanEnqueuer.EnqueueAsync(
+                        orgId, Dependably.Infrastructure.OciScan.OciScanOwner.Proxied(cacheArtifactId),
+                        entry.Repository, entry.Digest, ct);
+                }
             }
 
             // The manifest's license was stamped onto oci_blobs before this row existed; project it
@@ -402,7 +474,7 @@ public sealed partial class OciUpstreamResolver
         // registry serving a layer declares its length. Streaming is for the case that has a
         // number to check first.
         long? declaredLength = resp.Content.Headers.ContentLength;
-        var mirror = declaredLength is null
+        var mirror = declaredLength is null || sink?.Mirrors?.Invoke(mediaType, declaredLength) == false
             ? null
             : await TryBeginMirrorAsync(sink, mediaType, declaredLength, repository, digest, ct);
 

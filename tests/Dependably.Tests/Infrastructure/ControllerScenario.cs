@@ -299,7 +299,8 @@ public sealed class ControllerScenario : IAsyncDisposable
 
     public async Task<ControllerScenarioResult> BuildAsync(
         IInviteMailer? mailer = null,
-        Dependably.Infrastructure.SystemEvents.ISystemEventNotifier? systemEvents = null)
+        Dependably.Infrastructure.SystemEvents.ISystemEventNotifier? systemEvents = null,
+        ITenantSlugCacheInvalidator? tenantCache = null)
     {
         EnsureNotBuilt();
 
@@ -394,7 +395,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             Mfa: Substitute.For<Dependably.Infrastructure.Identity.IMfaEnrollmentService>(),
             SystemMfa: Substitute.For<Dependably.Infrastructure.Identity.ISystemMfaEnrollmentService>()));
 
-        var license = new LicenseController(licenses, orgs, guard, problems, audit) { ControllerContext = ctx };
+        var license = new LicenseController(licenses, orgs, guard, problems, audit, TestMetadataInvalidation.Coordinator()) { ControllerContext = ctx };
         var jobRuns = new BackgroundJobRunRepository(db);
         var instance = new InstanceController(orgs, audit, guard, noAirGap, jobRuns,
             NullLogger<InstanceController>.Instance, new ConfigurationBuilder().Build())
@@ -416,7 +417,7 @@ public sealed class ControllerScenario : IAsyncDisposable
         var system = new SystemController(orgs, systemAdmins, systemTokens, db, audit, problems,
             new ConfigurationBuilder().Build(),
             Clock, envelope, NullLogger<SystemController>.Instance,
-            tenantCache: null, requireMfa: null, systemEvents: systemEvents)
+            tenantCache: tenantCache, requireMfa: null, systemEvents: systemEvents)
         { ControllerContext = ctx };
         var systemObservability = new SystemObservabilityController(orgs, audit, problems, Clock)
         { ControllerContext = ctx };
@@ -499,7 +500,7 @@ public sealed class ControllerScenario : IAsyncDisposable
             new RequireMfaMode(new ConfigurationBuilder().Build()),
             anchorStatusResolver,
             sbomSignatureVerifier,
-            new Dependably.Infrastructure.Caching.OrgCacheEpochStore())
+            TestMetadataInvalidation.Coordinator())
         { ControllerContext = ctx };
         var policy = new PolicyController(
             orgSettingsRepo, licenses, guard,

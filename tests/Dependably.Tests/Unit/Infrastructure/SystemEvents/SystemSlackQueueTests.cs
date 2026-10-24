@@ -8,6 +8,7 @@ using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Localization;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
@@ -18,6 +19,16 @@ namespace Dependably.Tests.Unit.Infrastructure.SystemEvents;
 /// Structural sibling of <c>AlertSlackQueueTests</c>: success, no-op when disabled/unset,
 /// terminal-failure retry arithmetic driven by a <see cref="FakeTimeProvider"/>, and the overflow
 /// drop path. Unlike the per-org queue there is no auto-disable to cover.
+///
+/// Every test that runs the consumer loop buffers its events first and then drives the loop with
+/// <see cref="RunConsumerInline"/> rather than <see cref="Microsoft.Extensions.Hosting.BackgroundService.StartAsync"/>
+/// followed by <see cref="SystemSlackQueue.Notify"/>. Both of the latter resume the consumer on a
+/// thread-pool thread — <c>StartAsync</c> schedules <c>ExecuteAsync</c> there, and a reader parked
+/// on an empty channel is woken there — while xUnit runs the test's own polling on its dedicated
+/// threads. When sibling test classes block pool threads the consumer simply does not run, the
+/// poll's real-time ceiling keeps counting, and the test fails with nothing wrong in the queue.
+/// Buffered events are instead processed on the test's own thread before the loop first yields,
+/// so the outcome no longer depends on a pool thread being free.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class SystemSlackQueueTests : IAsyncLifetime
@@ -64,42 +75,140 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
     private static readonly TimeSpan[] NoBackoff =
         [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero];
 
-    private static async Task WaitAsync(Func<bool> condition, TimeSpan? timeout = null)
+    /// <summary>
+    /// Runs the queue's live consumer loop (not the shutdown drain: the token is not cancelled) on
+    /// the calling thread. Call it after <see cref="SystemSlackQueue.Notify"/> has buffered every
+    /// event the test needs: the loop then reads and delivers them before its first real yield.
+    /// The returned task completes once <paramref name="stoppingToken"/> is cancelled and the loop
+    /// has drained; see <see cref="StopAsync"/>.
+    /// </summary>
+    private static Task RunConsumerInline(SystemSlackQueue queue, CancellationToken stoppingToken) =>
+        queue.ExecuteAsyncForTests(stoppingToken);
+
+    /// <summary>
+    /// Stops a loop started by <see cref="RunConsumerInline"/> and awaits its exit, so nothing the
+    /// loop does can land after the test's assertions.
+    /// </summary>
+    private static async Task StopAsync(CancellationTokenSource cts, Task consumer)
     {
-        // now-ok: polling deadline awaiting real async completion of the queue's consumer loop
-        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(3));
-        while (!condition() && DateTimeOffset.UtcNow < deadline)
+        await cts.CancelAsync();
+        await consumer;
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="expected"/> events have reached a terminal outcome.
+    /// <see cref="SystemSlackQueue.ProcessedCount"/> is the one counter every outcome advances — sent,
+    /// failed, skipped, or disabled — and only after the outcome columns are written, so a delivery
+    /// that went wrong ends the wait at once instead of leaving it to run out. The test then asserts
+    /// on which outcome it was. A skipped delivery or a consumer loop that has exited fails here
+    /// with its cause; the real-time ceiling is a backstop for a hang, never the expected way out.
+    /// </summary>
+    private static async Task WaitForProcessedAsync(
+        SystemSlackQueue queue, long expected, Task consumer, CapturingLogger<SystemSlackQueue> queueLog)
+    {
+        // now-ok: polling deadline backstopping a hung consumer loop; the expected path never reaches it
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(3);
+        while (queue.ProcessedCount < expected)
         {
+            if (queueLog.SkippedDeliveries() is { Count: > 0 } skipped)
+            {
+                throw new InvalidOperationException(
+                    "The queue skipped a delivery: " + string.Join(" | ", skipped));
+            }
+
+            if (consumer.IsCompleted)
+            {
+                throw new InvalidOperationException(
+                    $"The consumer loop exited ({consumer.Status}) after {queue.ProcessedCount} of {expected} events.",
+                    consumer.Exception);
+            }
+
+            // now-ok: polling deadline backstopping a hung consumer loop
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    $"Processed {queue.ProcessedCount} of {expected} events (delivered {queue.DeliveredCount}, " +
+                    $"failed {queue.FailedCount}). Queue warnings: {string.Join(" | ", queueLog.Warnings())}");
+            }
+
             await Task.Delay(20);
         }
-
-        if (!condition())
-        {
-            throw new TimeoutException("Condition never satisfied.");
-        }
     }
 
-    /// <summary>Routes by URL substring: "good" → 200, "bad" → 502. Captures the last request body.</summary>
+    /// <summary>
+    /// Records what the queue logs at warning level and above, exception included.
+    /// <see cref="NullLogger{T}"/> would discard the one line that explains a delivery the queue
+    /// decided not to make.
+    /// </summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _warnings = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (IsEnabled(logLevel))
+            {
+                _warnings.Enqueue(exception is null
+                    ? formatter(state, exception)
+                    : $"{formatter(state, exception)} ({exception.GetType().Name}: {exception.Message})");
+            }
+        }
+
+        public IReadOnlyList<string> Warnings() => [.. _warnings];
+
+        /// <summary>The queue's "could not load the Slack settings" warnings.</summary>
+        public IReadOnlyList<string> SkippedDeliveries() =>
+            [.. _warnings.Where(w => w.Contains("skipping delivery", StringComparison.Ordinal))];
+    }
+
+    /// <summary>
+    /// Returns 200 when the URL contains "good" and the body does not contain
+    /// <c>failWhenBodyContains</c>, and 502 otherwise. Records every (url, body) pair in call order.
+    /// The handler runs on the consumer's thread while the test reads it from its own, so the
+    /// recording is locked, and the body is read synchronously so the stub never yields.
+    /// </summary>
     private sealed class RoutingHandler : DelegatingHandler
     {
-        public string? LastBody { get; private set; }
-        public int Calls { get; private set; }
+        private readonly string? _failWhenBodyContains;
+        private readonly Lock _gate = new();
+        private readonly List<(string Url, string Body)> _requests = [];
 
-        public RoutingHandler() : base(new HttpClientHandler()) { }
+        public RoutingHandler(string? failWhenBodyContains = null) : base(new HttpClientHandler()) =>
+            _failWhenBodyContains = failWhenBodyContains;
 
-        protected override async Task<HttpResponseMessage> SendAsync(
+        public int Calls { get { lock (_gate) { return _requests.Count; } } }
+        public string? LastBody { get { lock (_gate) { return _requests.Count == 0 ? null : _requests[^1].Body; } } }
+        public IReadOnlyList<(string Url, string Body)> Requests { get { lock (_gate) { return [.. _requests]; } } }
+
+        protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Calls++;
-            LastBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+            string body = "";
+            if (request.Content is not null)
+            {
+                using var reader = new StreamReader(request.Content.ReadAsStream(cancellationToken));
+                body = reader.ReadToEnd();
+            }
+
             string url = request.RequestUri?.ToString() ?? "";
-            return url.Contains("good")
-                ? new HttpResponseMessage(HttpStatusCode.OK)
-                : new HttpResponseMessage(HttpStatusCode.BadGateway);
+            lock (_gate)
+            {
+                _requests.Add((url, body));
+            }
+
+            bool succeeds = url.Contains("good", StringComparison.Ordinal)
+                && (_failWhenBodyContains is null || !body.Contains(_failWhenBodyContains, StringComparison.Ordinal));
+            return Task.FromResult(new HttpResponseMessage(succeeds ? HttpStatusCode.OK : HttpStatusCode.BadGateway));
         }
     }
 
-    private static SlackWebhookClient BuildClient(RoutingHandler handler) =>
+    private static SlackWebhookClient BuildClient(HttpMessageHandler handler) =>
         new(new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) });
 
     private OrgRepository Orgs => new(_db);
@@ -111,21 +220,19 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
     {
         var handler = new RoutingHandler();
         var client = BuildClient(handler);
+        var queueLog = new CapturingLogger<SystemSlackQueue>();
         await EnableSlackAsync("https://good.example.com/hook");
 
-        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance);
-        using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
-
+        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), queueLog);
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
-        // Wait on ProcessedCount, not DeliveredCount: DeliveredCount is bumped mid-delivery, before
-        // the status columns are written, so waiting on it races the very write asserted below.
-        // ProcessedCount is incremented only after the outcome record is durably written.
-        await WaitAsync(() => queue.ProcessedCount == 1);
 
-        await cts.CancelAsync();
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        using var cts = new CancellationTokenSource();
+        var consumer = RunConsumerInline(queue, cts.Token);
+        await WaitForProcessedAsync(queue, 1, consumer, queueLog);
+        await StopAsync(cts, consumer);
 
+        Assert.Equal(1, queue.DeliveredCount);
+        Assert.Empty(queueLog.Warnings());
         var orgs = new OrgRepository(_db);
         Assert.Equal("sent", await orgs.GetInstanceSettingAsync("system_slack_last_status"));
         Assert.Equal("", await orgs.GetInstanceSettingAsync("system_slack_last_error"));
@@ -138,18 +245,18 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
     {
         var handler = new RoutingHandler();
         var client = BuildClient(handler);
+        var queueLog = new CapturingLogger<SystemSlackQueue>();
         await EnableSlackAsync("https://good.example.com/hook");
 
-        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance);
-        using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
-
+        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), queueLog);
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
-        await WaitAsync(() => queue.DeliveredCount == 1);
 
-        await cts.CancelAsync();
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        using var cts = new CancellationTokenSource();
+        var consumer = RunConsumerInline(queue, cts.Token);
+        await WaitForProcessedAsync(queue, 1, consumer, queueLog);
+        await StopAsync(cts, consumer);
 
+        Assert.Equal(1, queue.DeliveredCount);
         Assert.NotNull(handler.LastBody);
         using var doc = JsonDocument.Parse(handler.LastBody!);
         Assert.Equal(JsonValueKind.Object, doc.RootElement.ValueKind);
@@ -161,26 +268,30 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
 
     // ── Disabled / unconfigured: silent no-op ───────────────────────────────────
 
+    /// <summary>
+    /// Waits for the event to be processed rather than for a fixed interval: a fixed interval
+    /// passes whether the queue declined the event or simply had not reached it yet.
+    /// </summary>
     [Fact]
     public async Task Notify_SlackDisabled_NoHttpCall_NoOutcomeRecorded()
     {
         var handler = new RoutingHandler();
         var client = BuildClient(handler);
+        var queueLog = new CapturingLogger<SystemSlackQueue>();
         // No EnableSlackAsync call — instance has no system_slack_* rows (off by default).
 
-        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance);
-        using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
-
+        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), queueLog);
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
-        await Task.Delay(200);
 
-        await cts.CancelAsync();
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        using var cts = new CancellationTokenSource();
+        var consumer = RunConsumerInline(queue, cts.Token);
+        await WaitForProcessedAsync(queue, 1, consumer, queueLog);
+        await StopAsync(cts, consumer);
 
         Assert.Equal(0, handler.Calls);
         Assert.Equal(0, queue.DeliveredCount);
         Assert.Equal(0, queue.FailedCount);
+        Assert.Empty(queueLog.Warnings());
         var orgs = new OrgRepository(_db);
         Assert.Null(await orgs.GetInstanceSettingAsync("system_slack_last_status"));
     }
@@ -190,65 +301,75 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
     {
         var handler = new RoutingHandler();
         var client = BuildClient(handler);
+        var queueLog = new CapturingLogger<SystemSlackQueue>();
         var orgs = new OrgRepository(_db);
         await orgs.SetInstanceSettingAsync("system_slack_enabled", "1");
         // No webhook URL row at all.
 
-        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance);
-        using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
-
+        var queue = new SystemSlackQueue(Orgs, client, Clock, RealLocalizer(), BuildCfg(), queueLog);
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
-        await Task.Delay(200);
 
-        await cts.CancelAsync();
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        using var cts = new CancellationTokenSource();
+        var consumer = RunConsumerInline(queue, cts.Token);
+        await WaitForProcessedAsync(queue, 1, consumer, queueLog);
+        await StopAsync(cts, consumer);
 
         Assert.Equal(0, handler.Calls);
+        Assert.Equal(0, queue.DeliveredCount);
+        Assert.Equal(0, queue.FailedCount);
+        Assert.Empty(queueLog.Warnings());
     }
 
     // ── Terminal failure + mixed partial-failure fan-out ────────────────────────
 
     /// <summary>
-    /// Two events go through the same queue in sequence: one delivers ("good"), the other
-    /// exhausts its retry budget 502ing before the terminal failure is recorded — a mixed
-    /// partial-failure scenario across sequential deliveries on the single-reader queue. The
-    /// chain runs on <see cref="NoBackoff"/>: the subject is which outcome each event reaches,
-    /// not the pacing between attempts.
+    /// Two events go through the same queue in sequence: one delivers, the other exhausts its
+    /// retry budget 502ing before the terminal failure is recorded — a mixed partial-failure
+    /// scenario across sequential deliveries on the single-reader queue. Which event fails is a
+    /// property of the event (the handler 502s any message naming the doomed tenant), not of the
+    /// moment the instance webhook setting is changed, so both events are buffered up front and
+    /// nothing has to wait for the first to finish before the second is sent. The chain runs on
+    /// <see cref="NoBackoff"/>: the subject is which outcome each event reaches, not the pacing
+    /// between attempts.
     /// </summary>
     [Fact]
     public async Task Notify_SequentialEvents_OneSucceedsOneFails_IndependentOutcomes()
     {
-        var handler = new RoutingHandler();
+        var handler = new RoutingHandler(failWhenBodyContains: "doomed");
         var client = BuildClient(handler);
         var slackClock = new FakeTimeProvider(Clock.GetUtcNow());
+        var queueLog = new CapturingLogger<SystemSlackQueue>();
         await EnableSlackAsync("https://good.example.com/hook");
 
         var queue = new SystemSlackQueue(
-            Orgs, client, slackClock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance,
-            NoBackoff);
-        using var cts = new CancellationTokenSource();
-        _ = queue.StartAsync(cts.Token);
-
+            Orgs, client, slackClock, RealLocalizer(), BuildCfg(), queueLog, NoBackoff);
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
-        await WaitAsync(() => queue.DeliveredCount == 1);
+        queue.Notify(new SystemEventRecord("tenant.deleted", "doomed", null, "ops@example.com"));
 
-        var orgs = new OrgRepository(_db);
-        await orgs.SetInstanceSettingAsync("system_slack_webhook_url", "https://bad.example.com/hook");
-        queue.Notify(new SystemEventRecord("tenant.deleted", "acme", null, "ops@example.com"));
-
-        // Wait until BOTH events are fully processed (ProcessedCount == 2), not merely until
-        // FailedCount == 1: the failure counter is bumped before the "failed" status columns are
-        // written, so waiting on it races the status/error writes asserted below.
-        await WaitAsync(() => queue.ProcessedCount == 2);
-
-        await cts.CancelAsync();
-        try { await queue.StopAsync(CancellationToken.None); } catch { }
+        using var cts = new CancellationTokenSource();
+        var consumer = RunConsumerInline(queue, cts.Token);
+        await WaitForProcessedAsync(queue, 2, consumer, queueLog);
+        await StopAsync(cts, consumer);
 
         Assert.Equal(1, queue.DeliveredCount);
         Assert.Equal(1, queue.FailedCount);
+
+        // In order: the first event's single successful attempt, then the second event's four
+        // failing attempts — its failure did not touch the first, and the first did not stop the
+        // second from running its whole retry budget.
+        var requests = handler.Requests;
+        Assert.Equal(5, requests.Count);
+        Assert.Contains("acme", requests[0].Body);
+        Assert.All(requests.Skip(1), r => Assert.Contains("doomed", r.Body));
+
+        var orgs = new OrgRepository(_db);
         Assert.Equal("failed", await orgs.GetInstanceSettingAsync("system_slack_last_status"));
-        Assert.NotNull(await orgs.GetInstanceSettingAsync("system_slack_last_error"));
+        Assert.Contains("502", await orgs.GetInstanceSettingAsync("system_slack_last_error"));
+
+        // The only warning is the second event's own terminal failure; nothing about the first
+        // delivery, or about either settings read, was swallowed along the way.
+        string onlyWarning = Assert.Single(queueLog.Warnings());
+        Assert.StartsWith("System Slack delivery failed after 4 attempts", onlyWarning);
     }
 
     // ── Shutdown drain (channel still buffered when the stopping token is cancelled) ──
@@ -278,45 +399,45 @@ public sealed class SystemSlackQueueTests : IAsyncLifetime
     /// <summary>
     /// Reproduces the shutdown-drop defect deterministically by invoking <c>ExecuteAsync</c>
     /// directly (via the <see cref="SystemSlackQueue.ExecuteAsyncForTests"/> test hook) with an
-    /// already-cancelled token — <see cref="BackgroundService.StartAsync"/> itself short-circuits
-    /// and never calls <c>ExecuteAsync</c> at all in that case, so it cannot exercise the real
-    /// race being tested (a stopping token cancelled while the read loop is genuinely running,
-    /// mid-shutdown, with an event still buffered). Two events are buffered before the drain runs;
-    /// a <see cref="SequencedHandler"/> forces the first event to exhaust its retry budget failing
-    /// and the second to succeed on its first attempt — the drain must record both outcomes
-    /// independently instead of losing either to the pre-cancelled token. The chain runs on
-    /// <see cref="NoBackoff"/>; <see cref="SequencedHandler"/>'s call ordering, not the intervals
-    /// between attempts, is what makes the mixed outcome deterministic.
+    /// already-cancelled token — <see cref="Microsoft.Extensions.Hosting.BackgroundService.StartAsync"/>
+    /// itself short-circuits and never calls <c>ExecuteAsync</c> at all in that case, so it cannot
+    /// exercise the real race being tested (a stopping token cancelled while the read loop is
+    /// genuinely running, mid-shutdown, with an event still buffered). Two events are buffered
+    /// before the drain runs; a <see cref="SequencedHandler"/> forces the first event to exhaust
+    /// its retry budget failing and the second to succeed on its first attempt — the drain must
+    /// record both outcomes independently instead of losing either to the pre-cancelled token.
+    /// The chain runs on <see cref="NoBackoff"/>; <see cref="SequencedHandler"/>'s call ordering,
+    /// not the intervals between attempts, is what makes the mixed outcome deterministic.
+    /// Awaiting the drain itself is the completion signal: it returns only once both buffered
+    /// events have been delivered, so nothing is polled against a clock.
     /// </summary>
     [Fact]
     public async Task ExecuteAsync_CancelledMidRun_DrainsMixedSuccessAndFailure()
     {
         var handler = new SequencedHandler(failFirstNCalls: 4);
-        var client = new SlackWebhookClient(new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) });
+        var client = BuildClient(handler);
         var slackClock = new FakeTimeProvider(Clock.GetUtcNow());
+        var queueLog = new CapturingLogger<SystemSlackQueue>();
         var orgs = new OrgRepository(_db);
         await EnableSlackAsync("https://hook.example.com/hook");
 
         var queue = new SystemSlackQueue(
-            Orgs, client, slackClock, RealLocalizer(), BuildCfg(), NullLogger<SystemSlackQueue>.Instance,
-            NoBackoff);
+            Orgs, client, slackClock, RealLocalizer(), BuildCfg(), queueLog, NoBackoff);
 
         // Buffer both events before the worker ever starts reading.
         queue.Notify(new SystemEventRecord("tenant.created", "acme", null, "ops@example.com"));
         queue.Notify(new SystemEventRecord("tenant.deleted", "acme", null, "ops@example.com"));
 
         // Drives ExecuteAsync directly with an already-cancelled token — the exact state the
-        // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
-        var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
+        // stopping token is in by the time BackgroundService.StopAsync signals cancellation. The
+        // first event exhausts its retry budget inside the drain itself; on NoBackoff that costs
+        // no time at all, real or virtual, so nothing has to drive the clock through it.
+        await queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
-        // The first event exhausts its retry budget inside the drain itself. On NoBackoff that
-        // costs no time at all, real or virtual, so nothing has to drive the clock through it.
-        await WaitAsync(() => queue.DeliveredCount == 1 && queue.FailedCount == 1);
-
-        await executeTask;
-
+        Assert.Equal(2, queue.ProcessedCount);
         Assert.Equal(1, queue.DeliveredCount);
         Assert.Equal(1, queue.FailedCount);
+        Assert.DoesNotContain(queueLog.Warnings(), w => w.Contains("skipping delivery", StringComparison.Ordinal));
         // The single instance-wide outcome columns reflect whichever event was recorded last —
         // the second, successfully-delivered one — while the per-event counters above already
         // prove both outcomes were independently reached.

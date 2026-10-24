@@ -410,6 +410,19 @@ public static class DependablyMeter
             description: "Downloads blocked by the block_kev proxy policy. Attributes: ecosystem.");
 
     /// <summary>
+    /// Threat-feed fetches that were attempted but not applied, so the stored copy was kept:
+    /// the source could not be fetched, returned nothing, or returned under half the stored
+    /// size; the accepted EPSS file could not be stored; or the alias-index reconcile that precedes
+    /// them failed. Attributes: <c>reason</c>,
+    /// one of <c>kev_fetch_failed</c>, <c>kev_empty</c>, <c>kev_shrunk</c>, <c>epss_fetch_failed</c>,
+    /// <c>epss_empty</c>, <c>epss_shrunk</c>, <c>epss_replace_failed</c>, <c>epss_fill_failed</c>, <c>alias_reconcile_failed</c>.
+    /// </summary>
+    public static readonly Counter<long> ThreatFeedRejections =
+        Meter.CreateCounter<long>(
+            "dependably.threat_feed.rejections",
+            description: "Threat-feed fetches not applied; the stored copy was kept. Attributes: reason.");
+
+    /// <summary>
     /// Upstream requests shed because the connection-pool wait-queue depth exceeded the
     /// process limit. The request is rejected immediately with 503 rather than queued
     /// indefinitely. No attributes — cardinality stays at 1.
@@ -461,6 +474,16 @@ public static class DependablyMeter
         Meter.CreateCounter<long>(
             "dependably.security.install_script_blocks",
             description: "Downloads blocked by the block_install_scripts proxy policy. Attributes: ecosystem.");
+
+    /// <summary>
+    /// OCI image pulls refused because the org holds no complete scan result for the image under
+    /// <c>oci_scan_enforcement = 'block'</c>. Attributes: <c>ecosystem</c>. Why the result is
+    /// incomplete (absent, partial, no scanner) is in the refusal's activity detail, not here.
+    /// </summary>
+    public static readonly Counter<long> UnscannedBlocks =
+        Meter.CreateCounter<long>(
+            "dependably.security.unscanned_blocks",
+            description: "OCI image pulls refused for want of a complete scan result under oci_scan_enforcement 'block'. Attributes: ecosystem.");
 
     /// <summary>
     /// Downloads blocked because the artifact's SPDX license fails the tenant's license policy
@@ -518,7 +541,10 @@ public static class DependablyMeter
 
     /// <summary>
     /// Rendered-metadata invalidations this replica broadcast to its peers after a mutation.
-    /// Attributes: <c>ecosystem</c> (npm|pypi|nuget|maven|rpm) and <c>outcome</c>
+    /// Attributes: <c>scope</c> (<c>ecosystem</c> for a message naming one ecosystem's caches,
+    /// <c>org</c> for an org-wide invalidation after a reservation, proxy-settings or licence-mode
+    /// change), <c>ecosystem</c> (npm|pypi|nuget|maven|rpm, on <c>scope=ecosystem</c> measurements
+    /// only — an org-wide measurement carries no <c>ecosystem</c>) and <c>outcome</c>
     /// (<c>success</c> when the broker accepted the message, <c>server_error</c> when the
     /// broadcast was dropped and the peers fall back to TTL expiry). A rising
     /// <c>server_error</c> rate is the operator's signal that cross-replica convergence has
@@ -527,18 +553,20 @@ public static class DependablyMeter
     public static readonly Counter<long> MetadataInvalidationsPublished =
         Meter.CreateCounter<long>(
             "dependably.metadata.invalidations_published",
-            description: "Rendered-metadata invalidations broadcast to peer replicas. Attributes: ecosystem, outcome (success|server_error).");
+            description: "Rendered-metadata invalidations broadcast to peer replicas. Attributes: scope (ecosystem|org), ecosystem (scope=ecosystem only), outcome (success|server_error).");
 
     /// <summary>
     /// Rendered-metadata invalidations received from a peer replica and applied to this replica's
     /// caches. Messages this replica published itself are not counted — it evicted before
     /// broadcasting — so the counter measures genuine cross-replica fan-out. Attributes:
-    /// <c>ecosystem</c>. No per-tenant or per-package labels (cardinality budget).
+    /// <c>scope</c> and <c>ecosystem</c>, exactly as on the published counter (no
+    /// <c>ecosystem</c> on an org-wide measurement). No per-tenant or per-package labels
+    /// (cardinality budget).
     /// </summary>
     public static readonly Counter<long> MetadataInvalidationsReceived =
         Meter.CreateCounter<long>(
             "dependably.metadata.invalidations_received",
-            description: "Rendered-metadata invalidations received from a peer replica and applied locally. Attributes: ecosystem.");
+            description: "Rendered-metadata invalidations received from a peer replica and applied locally. Attributes: scope (ecosystem|org), ecosystem (scope=ecosystem only).");
 
     // ── Foundation instruments — declared here; emission wired in follow-up ──
 
@@ -632,6 +660,17 @@ public static class DependablyMeter
     private static int _rowLevelSecurityEnforced;
 
     /// <summary>
+    /// Seconds since the instance-wide oldest OSV match among scanned OCI images of orgs whose
+    /// scanner claims rematch jobs, or NaN when there is none; written by OciScanSweepService.
+    /// </summary>
+    private static double _ociScanOldestMatchAgeSeconds = double.NaN;
+    /// <summary>
+    /// Seconds the instance-wide oldest still-pending OCI moving-tag hold has lasted, or NaN when
+    /// no tag is holding a pending digest; written by OciScanSweepService.
+    /// </summary>
+    private static double _ociTagPendingHoldAgeSeconds = double.NaN;
+
+    /// <summary>
     /// Current advisory-inventory snapshot, grouped by (ecosystem, severity); written by
     /// AdvisoryInventoryPoller. A poll replaces the whole snapshot rather than upserting
     /// per-key, so a combination that drops to zero rows disappears from the gauge instead
@@ -663,6 +702,30 @@ public static class DependablyMeter
             "dependably.db.rls_enforced",
             observeValue: () => Volatile.Read(ref _rowLevelSecurityEnforced),
             description: "1 when Postgres row-level security backs the tenant filter (DB_ROW_LEVEL_SECURITY=enforce), 0 otherwise.");
+
+        // No attributes: tenant attribution belongs on the sweep's per-org log line, not on a metric.
+        Meter.CreateObservableGauge(
+            "dependably.oci.scan.oldest_match_age",
+            observeValues: () =>
+            {
+                double age = Volatile.Read(ref _ociScanOldestMatchAgeSeconds);
+                return double.IsNaN(age) ? Array.Empty<Measurement<double>>() : new[] { new Measurement<double>(age) };
+            },
+            unit: "s",
+            description: "Age in seconds of the oldest OSV match among scanned OCI images of orgs whose scanner "
+                + "claims rematch jobs. Updated by the oci-scan-sweep job; absent when no such image exists.");
+
+        // No attributes, for the same reason: which org and tag is on the version page.
+        Meter.CreateObservableGauge(
+            "dependably.oci.tag_pending_hold_age",
+            observeValues: () =>
+            {
+                double age = Volatile.Read(ref _ociTagPendingHoldAgeSeconds);
+                return double.IsNaN(age) ? Array.Empty<Measurement<double>>() : new[] { new Measurement<double>(age) };
+            },
+            unit: "s",
+            description: "Age in seconds of the oldest OCI moving-tag hold still waiting to promote a newer digest "
+                + "(release age, or a scan that has not passed). Updated by the oci-scan-sweep job; absent when no tag is holding.");
 
         Meter.CreateObservableGauge(
             "dependably.tenants.count",
@@ -708,6 +771,22 @@ public static class DependablyMeter
     /// </summary>
     public static void RecordBlobStoreSize(string tier, long bytes)
         => BlobStoreSizes[tier] = bytes;
+
+    /// <summary>
+    /// Records the instance-wide oldest OSV match age for the observable gauge
+    /// <c>dependably.oci.scan.oldest_match_age</c>; null clears it. Called by
+    /// <c>OciScanSweepService</c> once per pass.
+    /// </summary>
+    public static void RecordOciScanOldestMatchAge(double? seconds)
+        => Volatile.Write(ref _ociScanOldestMatchAgeSeconds, seconds ?? double.NaN);
+
+    /// <summary>
+    /// Records the instance-wide oldest pending moving-tag hold age for the observable gauge
+    /// <c>dependably.oci.tag_pending_hold_age</c>; null clears it. Called by
+    /// <c>OciScanSweepService</c> once per pass.
+    /// </summary>
+    public static void RecordOciTagPendingHoldAge(double? seconds)
+        => Volatile.Write(ref _ociTagPendingHoldAgeSeconds, seconds ?? double.NaN);
 
     /// <summary>
     /// Records the active tenant count for the observable gauge

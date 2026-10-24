@@ -7,6 +7,7 @@ using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Api.PyPiProtocol;
 
@@ -73,6 +74,12 @@ public sealed class PyPiSimpleIndexHandler(
         HttpContext httpContext, string orgId, string package, CancellationToken ct)
     {
         SetVaryOnAccept(httpContext);
+
+        // Capture the org policy epoch before reading the settings both paths render with and the
+        // reservation/claim state that picks the path: a proxy-settings PUT or reservation change
+        // that bumps the epoch after these reads must expire the document rendered from them, not
+        // let it bind to the fresh epoch.
+        var epochToken = cache.CaptureOrgEpochToken(orgId);
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         var token = await httpContext.Request.ResolveTokenAsync(tokens, orgId, ct);
 
@@ -107,13 +114,13 @@ public sealed class PyPiSimpleIndexHandler(
         if (passthroughAllowed)
         {
             return await ServeProxySimpleIndexAsync(
-                new SimpleIndexRequest(httpContext, orgId, purlName, pkg, settings!, token, wantsJson), ct);
+                new SimpleIndexRequest(httpContext, orgId, purlName, pkg, settings!, token, wantsJson), epochToken, ct);
         }
 
         // Passthrough disabled or name is claim-local — return only local versions.
         return pkg is null
             ? new NotFoundResult()
-            : await ServeLocalSimpleIndexAsync(httpContext, orgId, purlName, pkg, settings!, wantsJson, ct);
+            : await ServeLocalSimpleIndexAsync(httpContext, orgId, purlName, pkg, settings!, wantsJson, epochToken, ct);
     }
 
     // Bundles the per-request context threaded through the proxy simple-index path — the
@@ -123,7 +130,8 @@ public sealed class PyPiSimpleIndexHandler(
         HttpContext HttpContext, string OrgId, string PurlName, Package? Pkg,
         OrgSettings Settings, TokenRecord? Token, bool WantsJson);
 
-    private async Task<IActionResult> ServeProxySimpleIndexAsync(SimpleIndexRequest req, CancellationToken ct)
+    private async Task<IActionResult> ServeProxySimpleIndexAsync(
+        SimpleIndexRequest req, IChangeToken? epochToken, CancellationToken ct)
     {
         // The negotiated representation is part of the key, so the JSON form is cached
         // alongside the HTML form instead of re-fetching upstream on every request. IsProxy keeps
@@ -144,7 +152,7 @@ public sealed class PyPiSimpleIndexHandler(
             return result is ContentResult cr && cr.Content is not null
                 ? Encoding.UTF8.GetBytes(cr.Content)
                 : null;
-        }, ct);
+        }, ct, epochToken);
 
         if (proxyBytes is not null)
         {
@@ -155,9 +163,12 @@ public sealed class PyPiSimpleIndexHandler(
         return await ProxyUpstreamSimpleIndexAsync(req, ct);
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "The parameter list is the call's declared inputs; a bundling type would hide which of them each "
+                        + "caller supplies.")]
     private async Task<IActionResult> ServeLocalSimpleIndexAsync(
         HttpContext httpContext, string orgId, string purlName, Package pkg,
-        OrgSettings settings, bool wantsJson, CancellationToken ct)
+        OrgSettings settings, bool wantsJson, IChangeToken? epochToken, CancellationToken ct)
     {
         // The negotiated representation is part of the key, so both forms are cached without
         // one ever being served under the other's content type. IsProxy stays false: this body
@@ -165,14 +176,13 @@ public sealed class PyPiSimpleIndexHandler(
         var localCacheKey = new PyPiSimpleIndexKey(orgId, purlName) { WantsJson = wantsJson };
         string contentType = ContentTypeFor(wantsJson);
 
-        // Capture the invalidation generation AND the org policy epoch token before reading any
-        // policy-dependent state below — mirroring RenderedResponseCache.GetOrRebuildAsync. A
-        // proxy-settings PUT that commits its DB write and invalidates the org's epoch between
-        // this read and the Set below must not be lost: binding the Set to the token captured
-        // here means it is already expired the instant it lands, instead of picking up whichever
-        // epoch happens to be live once the write actually runs.
+        // Capture the invalidation generation before reading any state below, so a publish that
+        // evicts this key mid-read discards the Set. The org policy epoch token was captured by
+        // the caller before it read the settings this document renders with: a proxy-settings
+        // PUT that commits and invalidates the org's epoch after that read must not be lost, and
+        // binding the Set to that token means it is already expired the instant it lands, instead
+        // of picking up whichever epoch happens to be live once the write actually runs.
         long generation = cache.GetGeneration(localCacheKey);
-        var epochToken = cache.CaptureEpochToken(localCacheKey);
         if (cache.TryGet(localCacheKey, out byte[]? localHit) && localHit is not null)
         {
             return ServeNotModifiedOrSetCacheHeaders(httpContext, localHit, "private, max-age=300")
@@ -434,10 +444,13 @@ public sealed class PyPiSimpleIndexHandler(
     // Returns the combined list of uploaded package_versions and synthetic PackageVersion
     // objects projected from global-plane proxy cache entries for the given package. Used by
     // both the local-only and proxy-passthrough renderers so proxy-cached versions appear in
-    // the index even when no package_versions row exists for them.
+    // the index even when no package_versions row exists for them. Proxied rows that an uploaded
+    // version shadows are kept: the index is file-level, and each file keeps its own gate state
+    // and its claim on its file name.
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
     {
-        return await inventory.ListServeableVersionsAsync(orgId, packageId, ecosystem, purlName, ct);
+        return await inventory.ListServeableVersionsAsync(
+            orgId, packageId, ecosystem, purlName, includeShadowed: true, ct: ct);
     }
 }

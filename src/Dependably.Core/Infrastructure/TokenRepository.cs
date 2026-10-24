@@ -45,6 +45,15 @@ public class TokenRepository
     private static string TokenResolveCacheKey(string tokenHashHex) => "token-resolve:" + tokenHashHex;
 
     /// <summary>
+    /// Drops the cached resolution of the token whose stored hash is <paramref name="tokenHashHex"/>,
+    /// so a revoked token is refused on its next request rather than when the entry lapses. Every
+    /// path that deletes a token row calls it after the delete commits. The cache is
+    /// process-local: another replica keeps its own entry for at most <see cref="TokenResolveCacheTtl"/>.
+    /// </summary>
+    internal static void EvictResolution(IMemoryCache cache, string tokenHashHex) =>
+        cache.Remove(TokenResolveCacheKey(tokenHashHex));
+
+    /// <summary>
     /// Resolves a raw token string to a TokenRecord via indexed lookup on the stored SHA-256 hash.
     /// Returns null if not found or expired. A confirmed service-token hit is cached for
     /// <see cref="TokenResolveCacheTtl"/> keyed on the token's own hash; user-token hits and every
@@ -216,6 +225,10 @@ public class TokenRepository
         await conn.BeginTenantSerializedAsync(_db.Provider, orgId, ct);
         try
         {
+            // A suspension that committed while this request was in flight has already revoked the
+            // tenant's tokens; a token inserted after that would survive the revoke.
+            await TenantMintGate.RequireMintableAsync(conn, _db.Provider, orgId, tx: null, ct);
+
             // max_active_tokens_per_tenant is an instance-wide, non-secret setting, so it is read
             // directly here rather than through OrgRepository's envelope-aware accessor; both
             // resolve the raw value through InstanceSettingDefaults.ParseMaxActiveTokensPerTenant
@@ -351,12 +364,29 @@ public class TokenRepository
     /// <summary>
     /// Deletes a service token scoped to its org. Returns the number of rows removed (0 when
     /// the id does not belong to <paramref name="orgId"/>), so callers reject cross-tenant deletes.
+    /// The token's cached resolution is dropped after the delete, so the revoke takes effect on
+    /// the token's next request.
     /// </summary>
     public async Task<int> DeleteServiceTokenAsync(string tokenId, string orgId, CancellationToken ct = default)
     {
-        await using var conn = await _db.OpenAsync(ct);
-        return await conn.ExecuteAsync(
-            "DELETE FROM service_tokens WHERE id = @id AND org_id = @orgId", new { id = tokenId, orgId });
+        List<string> hashes;
+        await using (var conn = await _db.OpenAsync(ct))
+        {
+            hashes = (await conn.QueryAsync<string>(
+                "DELETE FROM service_tokens WHERE id = @id AND org_id = @orgId RETURNING token_hash",
+                new { id = tokenId, orgId })).AsList();
+        }
+
+        // Service-token resolutions are the ones ResolveAsync caches.
+        if (_cache is not null)
+        {
+            foreach (string hash in hashes)
+            {
+                EvictResolution(_cache, hash);
+            }
+        }
+
+        return hashes.Count;
     }
 
     public async Task<IReadOnlyList<ServiceTokenRecord>> ListServiceTokensAsync(string orgId, CancellationToken ct = default)

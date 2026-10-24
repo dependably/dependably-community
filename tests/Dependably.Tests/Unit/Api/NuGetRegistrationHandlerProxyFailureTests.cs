@@ -24,7 +24,9 @@ namespace Dependably.Tests.Unit.Api;
 /// instead — the exception the pipeline middleware maps to 502/503 rather than the silent,
 /// non-retryable 404 that makes <c>dotnet restore</c> report NU1101 for a package that
 /// genuinely exists. Multi-upstream fallback (a failure on upstream #1 must not stop upstream
-/// #2 from being tried) is pinned alongside the failure classification.
+/// #2 from being tried) is pinned alongside the failure classification, as is the origin pin on
+/// externalized registration pages: a page <c>@id</c> is upstream-controlled, so it is fetched with
+/// the source's credential only when it shares the source's scheme, host and port.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
@@ -154,6 +156,68 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
         // otherwise still be classified as refused here by coincidence.
         Assert.Equal("Bearer test-bearer-token", _upstreams.AuthorizationSeenFor(UpstreamA, "refused-pkg"));
     }
+
+    // ── Externalized page origin pin ─────────────────────────────────────────────
+
+    [Theory]
+    // A hostile index downgrading the page to plaintext on the configured https host.
+    [InlineData("http://upstream-a.nuget.test/pages/origin-pkg/page1.json")]
+    // An explicit different port on the configured host: a different service.
+    [InlineData("https://upstream-a.nuget.test:8443/pages/origin-pkg/page1.json")]
+    public async Task RegistrationIndex_ExternalizedPageOffTheSourceOrigin_IsNotFetchedWithTheCredential(string pageUrl)
+    {
+        const string id = "origin-pkg";
+        await SeedAuthenticatedUpstreamAsync(UpstreamA, "page-pin-secret");
+        _upstreams.Stub(UpstreamA, id, 200, ExternalizedIndex(pageUrl));
+        _upstreams.StubUrl(pageUrl, 200, PageDocument(pageUrl, id, "1.0.0-from-page"));
+
+        var handler = BuildHandler();
+        var result = await handler.RegistrationIndexAsync(BuildContext(), _orgId, id, semVer2: false, CancellationToken.None);
+
+        // Refused outright, not fetched anonymously: the page URL was never requested at all, so
+        // the credential cannot have crossed to it.
+        Assert.False(_upstreams.WasRequested(pageUrl));
+        Assert.Null(_upstreams.AuthorizationSeenForUrl(pageUrl));
+        // The index itself was fetched with the credential, so the refusal is the pin, not a
+        // missing credential.
+        Assert.Equal("Bearer page-pin-secret", _upstreams.AuthorizationSeenFor(UpstreamA, id));
+
+        // The client is never pointed at the off-origin page either: the unfetchable page is
+        // dropped from the served document rather than left externalized.
+        var fileResult = Assert.IsType<FileContentResult>(result);
+        string body = System.Text.Encoding.UTF8.GetString(fileResult.FileContents);
+        Assert.DoesNotContain("/pages/origin-pkg/page1.json", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("1.0.0-from-page", body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("https://upstream-a.nuget.test/pages/origin-pkg/page1.json")]
+    // The default port spelled out is the same origin.
+    [InlineData("https://upstream-a.nuget.test:443/pages/origin-pkg/page1.json")]
+    public async Task RegistrationIndex_ExternalizedPageOnTheSourceOrigin_IsFetchedWithTheCredential(string pageUrl)
+    {
+        const string id = "origin-pkg";
+        await SeedAuthenticatedUpstreamAsync(UpstreamA, "page-pin-secret");
+        _upstreams.Stub(UpstreamA, id, 200, ExternalizedIndex(pageUrl));
+        _upstreams.StubUrl(pageUrl, 200, PageDocument(pageUrl, id, "1.0.0-from-page"));
+
+        var handler = BuildHandler();
+        var result = await handler.RegistrationIndexAsync(BuildContext(), _orgId, id, semVer2: false, CancellationToken.None);
+
+        Assert.Equal("Bearer page-pin-secret", _upstreams.AuthorizationSeenForUrl(pageUrl));
+        var fileResult = Assert.IsType<FileContentResult>(result);
+        Assert.Contains("1.0.0-from-page", System.Text.Encoding.UTF8.GetString(fileResult.FileContents), StringComparison.Ordinal);
+    }
+
+    private static string ExternalizedIndex(string pageUrl) =>
+        $$"""{"count":1,"items":[{"@id":"{{pageUrl}}","count":1,"lower":"1.0.0","upper":"1.0.0"}]}""";
+
+    private static string PageDocument(string pageUrl, string id, string version) =>
+        $$$"""
+        {"@id":"{{{pageUrl}}}","count":1,"lower":"{{{version}}}","upper":"{{{version}}}","items":[
+        {"@id":"x","catalogEntry":{"id":"{{{id}}}","version":"{{{version}}}","listed":true}}
+        ]}
+        """;
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -336,8 +400,20 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
         private readonly ConcurrentDictionary<string, (int Status, string Body)> _responses = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, string> _authSeen = new(StringComparer.OrdinalIgnoreCase);
 
+        private readonly ConcurrentDictionary<string, bool> _requested = new(StringComparer.OrdinalIgnoreCase);
+
         public void Stub(string baseUrl, string id, int status, string body)
             => _responses[IndexUrl(baseUrl, id)] = (status, body);
+
+        // Keyed on the parsed form, which is how the request URI arrives (a spelled-out default
+        // port is dropped), so the stub matches whatever spelling the test wrote.
+        public void StubUrl(string url, int status, string body)
+            => _responses[new Uri(url).ToString()] = (status, body);
+
+        public bool WasRequested(string url) => _requested.ContainsKey(new Uri(url).ToString());
+
+        public string? AuthorizationSeenForUrl(string url)
+            => _authSeen.TryGetValue(new Uri(url).ToString(), out string? header) ? header : null;
 
         /// <summary>
         /// The Authorization header value the request for this coordinate carried, or null when
@@ -353,6 +429,7 @@ public sealed class NuGetRegistrationHandlerProxyFailureTests : IAsyncLifetime
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             string url = request.RequestUri!.ToString();
+            _requested[url] = true;
             if (request.Headers.Authorization is { } auth)
             {
                 _authSeen[url] = auth.ToString();

@@ -7,6 +7,1205 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-23
+
+Version 0.14.0 was not published. When upgrading from v0.13.3, read this section together with
+the 0.14.0 section below.
+
+**Upgrade notes**
+
+- Startup now enforces the v0.13.3 upgrade floor. A database below it is refused before anything
+  changes, and the error says why. A Postgres database created by 0.2.2 to 0.4.4 is recognized
+  and upgrades directly, but a boot that has already failed partway on such a database leaves it
+  unrecognizable; set `UPGRADE_FLOOR_OVERRIDE=true` for that boot and remove it afterwards. The
+  override applies the schema to any below-floor database and logs an error. See
+  [Supported upgrade path](OPERATIONS.md#supported-upgrade-path).
+- Two new settings, neither of which needs changing: `THREAT_FEED_FETCH_TIMEOUT_SECONDS`
+  (default `300`) caps each KEV and EPSS fetch, and `NPM_MANIFEST_RESCAN_SCHEDULE` (default
+  `*/5 * * * *`) is how often `npm-manifest-rescan` runs until it has read every stored tarball.
+- The schema gains the nullable column `oci_scan_jobs.first_deferred_at` and the table
+  `oci_manifest_pushes`. Both are additive. On upgraded Postgres databases whose foreign keys
+  drifted from the schema, the first boot replaces those keys once, inside the existing
+  lock-bounded retrofit pass.
+- The image scanner API refuses a scan result or rematch with more than 250,000 findings with
+  `422` (`error.ociScan.findingsMax`). `POST /api/v1/oci-scan/{job}/heartbeat` and `/fail` now
+  declare `200`, `409` and `422` in the OpenAPI document, and `/result` declares `204`, `409`,
+  `422` and `503`.
+- `GET /api/v1/lookup` with no `version` answers `422` with `reason: passthrough_off` for an
+  organization with proxy passthrough off. Adding a reserved namespace that is already reserved
+  answers `409` instead of `201`.
+- Upgrade a master before its edge nodes. Until the master states each organization's scan
+  enforcement setting, an upgraded edge treats every organization as unstated: it asks the master
+  for manifests while the master is up, and never refuses a pull because of it.
+- For contributors: `CredentialMintGateComplianceTests` requires every insert into a credential
+  table (one with a `token_hash` and a tenant column) to run the tenant mint gate. Opt out with
+  `// mint-ok: <reason>`.
+
+### Security
+
+- **OCI respects proxy passthrough off and the per-organization air-gap setting.** OCI checked
+  only the instance-wide `AIR_GAPPED` setting. An organization with proxy passthrough off, or
+  air-gapped in its settings, still had every image pull, tag list and tag
+  revalidation sent to its upstream registries. With the default Docker Hub upstream, that sent
+  the names of its private image repositories to Docker Hub. Such an organization now gets no
+  upstream requests from OCI at all, including token exchanges and the image scanner's reads of
+  images it does not hold. An image it does not hold returns `404` `MANIFEST_UNKNOWN` or
+  `BLOB_UNKNOWN`, with a message naming the setting, and `tags/list` returns local tags only.
+  An organization with no settings row keeps the default, passthrough on.
+
+- The web frontend's `dompurify` dependency moves to 3.4.17, past the critical advisories
+  GHSA-p98j-92pf-mc4p and its four related entries that affect 3.4.16 and earlier.
+
+- **npm tarballs are scanned the way npm extracts them.** The scan behind the install-script gate,
+  the licence extractor and the upload validator disagreed with npm's extractor in two ways, so a
+  tarball could show the gates a clean manifest while npm installed one with a `postinstall` hook
+  or a blocked licence. A backslash in an entry name is now read both the POSIX and the Windows
+  way, and the stronger result wins, so `x\y/package.json` counts as a top-level manifest as it
+  does for npm on Linux and macOS. A tar header npm would skip (a bad checksum, a link name on a
+  regular file, a directory with a size) no longer hides the next header from the scan: the
+  archive is read block by block as npm reads it, and any construct whose npm reading the scanner
+  cannot reproduce exactly is unscannable. An unscannable tarball is refused on the proxy path
+  and rejected at publish. Limits are unchanged.
+- **The npm install-script detector fails closed on a read failure.** A tarball that could not be
+  read, or a detector error on the proxy or publish path, recorded no install script. Each now
+  records `npm:unscannable-manifest`. A proxied tarball whose staged copy disappears before the
+  check (a concurrent refusal of the same bytes deleted it) answers `502` and records nothing.
+  Other ecosystems keep their fail-soft detection.
+- **An advisory the scan could not fetch no longer reads as clean.** When OSV's batch query named
+  an advisory but fetching its record failed or ran past its timeout, the version was stamped as
+  checked with no link. A version is now left unchecked and retried unless the instance already
+  holds that advisory; the rest of the batch is stored. An OSV hydration timeout no longer fails
+  the whole batch, so npm bulk audit answers `503` for an unreached source instead of `500`. Under
+  `OSV_MODE=local`, a dump with no feed for an ecosystem no longer reads as checked: the lookup
+  reports `unavailable` with `no_osv_coverage`, the scan leaves the artefact unchecked, and npm
+  bulk audit answers `503`.
+- **Rendered npm packuments and NuGet registration documents are cached per public URL.** Both
+  embed the request's scheme and host in their links, and the cache key carried neither, so one
+  request with a crafted `Host` (or `localhost`) could set the tarball and registration URLs every
+  client received until the entry expired. Each base URL now gets its own entry, and an eviction
+  retires them all.
+- **The package lookup, NuGet symbol forwarding and Go module routes respect the organization's
+  upstream settings.** With proxy passthrough off, `GET /api/v1/lookup` sent the name upstream
+  with the stored credentials; it now sends nothing, answers a version-less lookup with `422`
+  (`reason: passthrough_off`), and keeps the advisory and licence checks when a version is given.
+  An SSQP symbol miss answers `404` without contacting a symbol server when passthrough is off,
+  the organization is air-gapped, or the PDB name is a reserved NuGet name. Go module routes
+  decode bang-encoded names strictly, so an invalid escape answers `404` and is never forwarded.
+- **Redeeming an invite, a password-reset link or an email-change link honours a suspension.**
+  Each consumed the link and wrote the user, password or address as separate steps, so a
+  suspension landing between them could miss the redemption and the result survived the restore.
+  Each is now one transaction that checks the tenant's status, and a suspended tenant's
+  redemption answers `423` and consumes nothing. A forgot-password request for a known email on a
+  replica that has not yet seen the suspension answers `202`, as an unknown email does, and sends
+  nothing.
+- **Password changes and operator resets remove remembered devices in the same transaction.**
+  A changed or reset password committed before the user's remembered devices were deleted, so a
+  failure between the two left a device that skipped the second factor.
+  `POST /api/v1/users/me/password`, `POST /api/v1/system/me/password` and an operator's password
+  reset now commit the password, the session invalidation and the device removal together.
+- **An empty versions map from an upstream no longer clears deprecation marks.** An npm or PyPI
+  answer whose `versions` or `releases` object was present but empty cleared every recorded
+  deprecation for the package, so a hollow mirror answer let versions blocked under
+  `block_deprecated=block_all` serve again. It is now treated as no answer, and the next upstream
+  is asked.
+- **OCI scan enforcement covers more of the pull path.** A manual block on an image index now
+  reaches a platform manifest that was catalogued as its own image first. A `HEAD` on the blob
+  route that misses the cache answers like a hit under enforcement when the blob is labelled or
+  known as a manifest or is at most 4 MiB; a larger non-manifest blob keeps its headers-only
+  answer.
+- **An rpm lookup no longer reads clean for a name its release feed never lists.** As for apk,
+  an rpm lookup now checks that the scoped release feed knows the name, and a name it
+  never lists (a typo, an EPEL package under `Rocky Linux:9`, an AppStream package under a
+  `::baseos` scope) answers `unavailable` with the new reason `name_unknown`.
+
+### Fixed
+
+- **A held OCI tag keeps serving when upstream fetching is off.** A proxied tag older than
+  `Oci:ManifestTagTtl` is normally checked against the upstream before it is served. When upstream
+  fetching is off, whether by the instance `AIR_GAPPED` setting or by the organization's
+  settings, the held digest is now served as a cache hit. Before, it returned `404`, so an
+  air-gapped instance stopped serving a pulled tag an hour after it was last checked.
+
+- **A stalled upstream body no longer wedges a package until restart.** A shared upstream fetch
+  runs once for every client waiting on the same index or artifact, and `HttpClient.Timeout`
+  stops applying once the response headers arrive. An upstream that sent headers and then
+  stalled held that fetch, and every later request for the package, open until the process was
+  restarted. A metadata fetch now has a two-minute overall deadline, and an artifact body fails
+  after sixty seconds with no progress, so a large artifact on a slow but live link still
+  completes. Either expiry is reported as an upstream failure, so a cached copy is served stale
+  where the organization allows it.
+- **The Setup page's twine recipe uploads to the right route.** The generated `.pypirc` pointed
+  `repository` at `/simple/`, the read-only index, so every `twine upload` answered `405`. It now
+  points at `/pypi/legacy/`.
+
+- **An edge node keeps serving an organization that does not gate OCI pulls through a master
+  outage.** An edge trusted a master-stated `off` setting for five minutes and only in memory, so
+  after that, or after a restart, every manifest bypassed the local cache, and during an outage
+  digest manifests (every platform of a multi-arch pull) answered `502`. A newly upgraded edge
+  refused every organization while the master was down. The `off` confirmation is now stored and
+  survives a restart. During an outage only an organization last seen at `warn` or `block` is
+  refused, with a `403` naming that setting; any other is answered from the local cache, digests
+  and fresh tags first, then stale tags. The master states the setting for every organization,
+  `off` included, and to anonymous callers, and an edge records nothing from a response without
+  it.
+- **Package lookups no longer give one advisory another CVE's KEV or EPSS.** A stored advisory
+  covering several CVEs carries KEV if any of them is listed and the highest EPSS among them; the
+  lookup applied that to any advisory sharing one alias, which could answer a false `blocked`. A
+  stored row now enriches an advisory only when its id is one of the advisory's ids, or every CVE
+  it names is. Advisory detail follows the same rule.
+- **An OCI lookup under `block` answers with the pull's verdict.** With `oci_scan_enforcement=block`,
+  `GET /api/v1/lookup` for an image now evaluates the same gate as the pull, without its side
+  effects: an image with no result or a partial result reads `blocked` as `unscanned` unless that
+  arm was approved, a finding over a tolerance reads `blocked` on its arm, and a manual block reads
+  `manual`. Under `off` and `warn` the lookup answers `warn` as before.
+- **Advisory fixes and ids are read from the right record.** A `fixedVersion` for an advisory
+  covering several packages, none matching the queried name, is now `null` instead of the first
+  package's fix. An advisory detail request by a CVE id that matches a GHSA record by alias
+  returns the GHSA id, with the CVE listed once among its aliases.
+- **Version actions on uploaded packages find the version by its ecosystem identity.** Delete,
+  download, block and unblock compared version strings exactly on the uploaded side, so a PyPI
+  `1.0.0-rc1` or a NuGet version in mixed case could act on the proxied copy and leave the
+  uploaded release in place while answering `204`. The uploaded version now matches the way the
+  proxied one does, and wins whenever both match. PEP 440's `1.0` and `1.0.0` stay distinct.
+- **Saving proxy settings no longer fails on the OCI scan setting when the instance runs no
+  scanner.** Every save on the Gates, Signatures and Proxy routing tabs sent the stored
+  `ociScanEnforcement` back, and a stored `warn` or `block` was refused with `422` once
+  `OCI_SCAN_ENABLED` was off. Sending the stored value is now accepted, and the page sends the
+  field only from the Gates tab and only when it changed.
+- **A parked OCI scan job no longer blocks its image for good.** A job that used up its attempts
+  left the image `unscanned`, and unpullable under `block`, until someone intervened.
+  `oci-scan-sweep` now queues a new job for it once it has been parked for
+  `OCI_SCAN_RESCAN_AGE_HOURS`. A result stored with unverified advisories is queued again after
+  the same window for every organization, as a `scan` where the scanner does not take rematch jobs.
+- **The OSV outage window for an image scan starts at its first deferral.** It was measured from
+  when the job was queued, so an image that waited a full window for its first claim got no
+  deferral at all. The per-result advisory fetch budget is also at least the OSV client's timeout
+  plus five seconds, so a hanging source is deferred rather than stored as a gap.
+- **A digest-only push is queued for scanning.** A manifest pushed by digest alone was never
+  catalogued, so under `block` it was refused as `unscanned` while the message said it was
+  queued. It is now catalogued and queued at its first gated pull, under the repository it was
+  pushed to; a platform manifest of a held index still takes the index's verdict.
+- **A push probe no longer triggers a scan refusal.** A `HEAD` from a token that can publish but
+  not pull, on an unscanned image, wrote an activity row, a quarantine entry and a webhook and
+  answered `403`. It now skips the scan gate and answers on the licence check alone. Pull-capable
+  requests stay gated.
+- **The npm manifest rescan finishes in hours, not months, and checks each storage tier on its own.** It ran
+  inside the daily licence backfill at 2,000 tarballs a day, so a large cache took months while
+  already-cached ambiguous tarballs kept serving. It now runs as its own job on
+  `NPM_MANIFEST_RESCAN_SCHEDULE` until it has read everything. An outage of the registry tier
+  while the cache tier answered counted failed reads against uploaded versions and could flag
+  healthy ones as unscannable; each tier now checks its own store. A tarball flagged as ambiguous
+  or unscannable shows a "manifest needs review" badge instead of the install-script badge.
+- **Threat-feed fetches have a deadline.** A KEV or EPSS mirror that sent headers and then
+  trickled the body held the refresh indefinitely. Each fetch now stops at
+  `THREAT_FEED_FETCH_TIMEOUT_SECONDS`, and one stalled EPSS batch fails alone. The marker that
+  keeps advisories from being stamped from a half-applied EPSS file now uses the database clock,
+  so replicas whose clocks differ by minutes no longer defeat it.
+- **A webhook whose secret cannot be decrypted shows as failing.** It was skipped silently and
+  looked healthy. It is now recorded as a delivery failure, without secret material, so it shows
+  as failing and auto-disables on the usual thresholds. It is never sent unsigned.
+- **A Postgres blue-green upgrade keeps the read-model views while data-only migrations run.**
+  Startup dropped `artifact_inventory`, `artifact_license`, `org_storage_bytes` and
+  `org_billable_storage_bytes` before any pending migration, so a v0.13.3 replica still serving
+  failed publish, OCI manifest and inventory requests during a plain data update. Only migrations
+  that restructure tables drop them now. The backfill of per-organization refresh stamps runs in
+  committed batches that resume after a restart, so a large table no longer times out and
+  crash-loops startup.
+- **The Postgres constraint retrofit converges and says what it left.** A constraint that cannot
+  validate is named in the warning with the table, column, the number of violating rows and up to
+  five keys. Orphaned "created by" references are cleared, and two SBOM read-back flags with
+  values outside their vocabulary are reset to their default, before validation; other columns
+  are left for the operator. A foreign key with the expected name but a different definition is
+  replaced. The alias reconcile and donor sweeps stop at the shared boot deadline and finish in the
+  background.
+- **Adding a namespace that is already reserved answers `409`.** It answered `201` with an id that
+  named no stored row, and wrote an audit entry for a change that did not happen. Nothing is
+  written now, and the response uses `error.list.reservedNamespaceDuplicate`.
+- **OCI scan tables are indexed for deletes.** Deleting a cached artefact or a package version
+  scanned `oci_scan_jobs`, `oci_scan_coverage` and `oci_component_vulns` in full. They now have
+  plain indexes on their owner and organization columns, and `oci_scan_coverage.matched_at` uses
+  the `C` collation on Postgres.
+
+### Changed
+
+- **Startup refuses a database below the upgrade floor.** A database whose migration history
+  shows it was never upgraded to v0.13.3 stops startup with an error naming the floor and
+  `UPGRADE_FLOOR_OVERRIDE`, before any schema change. See the upgrade notes above.
+- **OCI scan findings are capped and written in batches.** One scan result or rematch may carry at
+  most 250,000 findings; more is refused with `422`. Findings are inserted many rows per
+  statement instead of one at a time.
+- **OCI image scan enforcement can only be turned on once a scanner has connected.** Setting
+  `oci_scan_enforcement` to `warn` or `block` is now refused (`422`,
+  `error.settings.ociScannerNotSeen`) until the organization's scanner has called the scan API at
+  least once, as well as while `OCI_SCAN_ENABLED` is unset. With no scanner every image is
+  unscanned, so `block` would have refused every OCI pull, and the scanner image is not publicly
+  distributed yet. `GET /api/v1/proxy-settings` gains `oci_scanner_last_seen_at`, and
+  Settings → Gates keeps the control at Off with a note until a scanner has called. An
+  organization already at `warn` or `block` keeps its setting, and a scanner that stops calling
+  still fails closed.
+- **The compose `oci-scanner` service defaults to scanner `0.2.0` instead of `latest`**
+  (`OCI_SCANNER_TAG`), so a scanner upgrade is a deliberate change.
+
+## [0.14.0] - 2026-10-16
+
+**Upgrade notes**
+
+- Upgrade to v0.13.3 first from anything older. A Postgres database created by 0.2.2 to 0.4.4
+  is the one exception and upgrades straight to this release. See
+  [Supported upgrade path](OPERATIONS.md#supported-upgrade-path).
+- An unrecognized `DISABLE_BACKGROUND_JOBS` value now stops startup. Check the value before
+  upgrading.
+- On Linux, check the startup `Stored secret check:` warning once after upgrading and re-enter
+  any secret it names.
+- An OCI upstream whose token service runs on another port of the registry host needs its
+  **Token endpoint** set in Settings → Proxy → Upstream registries.
+- Suspending or deleting a tenant now revokes its API tokens for good, including an edge
+  node's `EDGE_MASTER_TOKEN`. After a restore the tenant issues new tokens.
+- Two API responses change. `GET /api/v1/lookup` with no `version` answers `422` with a `reason`
+  (`name_reserved`, `upstream_not_configured`) instead of `503` for a reserved name or an
+  ecosystem with no upstream. A PyPI file download for a blocklisted or non-allowlisted name that
+  the upstream cannot resolve answers `403` instead of `404`. The lookup's `blockedReason` is now
+  the snake_case wire token.
+
+### Added
+
+- **An OCI image's expanded version row shows its scan detail.** Expanding an image on its
+  package page now lists, from your organization's own scan result, each scanned platform's
+  coverage gaps (shown first, verbatim), the platforms scanned, and the components with findings:
+  the layer and Dockerfile instruction that introduced each one, and each finding's advisory,
+  severity and reachability verdict (`Reachable`, `Not observed`, or `Reachability unknown`; no
+  verdict ever reads as not reachable). The full component inventory is one toggle away. An image
+  with no result says why: not yet queued, queued (with its attempts), given up after N attempts,
+  or no image scanner reporting. The data comes from the new
+  `GET /api/v1/packages/oci/{name}/{digest}/scan` (`read:packages`), which pages one platform's
+  components (`platform`, `affectedOnly`, `offset`, `limit` up to 500), lists at most 50 findings
+  per component beside its full `findingCount`, and returns a scan job's state and attempts but
+  never its error text. A hosted image with no result reads `unscanned` even when a proxied copy
+  of the same digest has one, matching the version row's status badge. Each platform shows when its findings were last matched as well as when it was scanned, so a re-matched image never reads as only as current as its scan.
+
+  The package list and the version page read the same scan results. Each OCI package in
+  `GET /api/v1/packages` carries an `ociScan` object rolled up from the organization's results
+  across the images it holds (the worst `state` wins, `findingCount` is the largest per-image
+  count and `maxScore` the highest score), and each OCI version carries its own (`state` of
+  `scanned`, `unscanned` or `no_feed`, plus `gapCount`, `findingCount` and `maxScore`). A
+  vulnerable image shows its severity and finding count, `unscanned`, `no_feed` and partly
+  scanned images each say so, and only an image scanned with no findings and no coverage gaps
+  reads clean. Other ecosystems omit the field.
+
+- **OCI image findings stay current as OSV moves.** Once an image's last OSV match is older than
+  `OCI_SCAN_RESCAN_AGE_HOURS` (default 24), `oci-scan-sweep` queues a `rematch` job for it. The
+  scanner reads the image's stored components from the new `GET /api/v1/oci-scan/{job}/inventory`
+  and posts fresh findings to `POST /api/v1/oci-scan/{job}/matches`, without reading a manifest or
+  layer: the server answers 404 to image reads for a rematch job. A new advisory raises the same
+  alerts and webhook a first scan does, and one no longer found leaves the image's findings and
+  version links; its alert stays, since one alert covers every digest of the repository. A stored
+  scan from an older extractor is handed back with `POST /api/v1/oci-scan/{job}/reextract` and
+  re-extracted. If OSV is unreachable the rematch fails and retries, and the previous result
+  stays. Only an org whose scanner claims with `?kinds=scan,rematch` gets rematch jobs; the claim
+  response now lists the server's `capabilities`, and a scan result may carry
+  `platforms[].contentGaps` and `components[].verdict`. OCI versions and OCI lookups report the
+  last match as `matchedAt`, and `dependably.oci.scan.oldest_match_age` reports the oldest across
+  the instance.
+
+- **Lookup and npm bulk audit advisories carry `aliases` and a fixed version, and the advisory
+  detail endpoint serves upstream-only advisories.** Each scored and unscored advisory from
+  `GET /api/v1/lookup` now has `aliases` (the other ids the same flaw is published under, never
+  its own id) and `fixedVersion` (the fix for the affected range containing the queried version,
+  `null` when none is published or the ecosystem has no version ordering). The npm bulk audit
+  adds the same two fields to each advisory as `aliases` and `fixed_version`, matching that
+  payload's snake_case; npm ignores them. `GET /api/v1/vulnerabilities/{osvId}` takes
+  `ecosystem`, `name` and `version` together and, for an advisory not stored for the org, serves
+  the public OSV record for that coordinate instead of a 404. A reserved name, an unreached
+  OSV source, or an id the coordinate has no advisory for is still a 404.
+
+- **`GET /api/v1/lookup` now answers for apk, rpm, oci and terraform.** The response gains an
+  `advisorySource` object on every lookup, so a client can tell three cases apart that an empty
+  advisory list cannot: `status: "checked"` (the source was consulted, so no advisories means none),
+  `"unavailable"` (it could not be, with a `reason`), and `"not_applicable"`.
+  - **apk and rpm** query OSV's release-scoped distro feeds (`Alpine:v3.20`, `Rocky Linux:9`,
+    `AlmaLinux:9`, `Red Hat:enterprise_linux:9::baseos`) with the distro's own version ordering, from
+    the remote API or an `OSV_MODE=local` dump. Pass the release as the new `distro` query
+    parameter (`v3.20`, `Rocky Linux:9`). Without it, the release is taken from the org's
+    upstream URLs only when they all name the same one; otherwise the lookup says
+    `reason: "distro_required"` instead of reading as clean. A release OSV does not carry (an
+    unlisted release, or a local dump with no feed for it) says `no_osv_coverage`. `version` must
+    be a full build (`8.5.0-r0`, `1:3.0.7-24.el9`), and an apk name whose release feed has never
+    listed it says `origin_unknown`, since Alpine advisories are filed under the origin package.
+  - **oci** answers from the org's own scan result for the image digest (give the digest as
+    `version`). An image with no result says `no_scan_result`; a partial scan says
+    `scan_incomplete`, and keeps the advisories it did find.
+  - **terraform** has no advisory source and returns `status: "not_applicable"`. That is not a
+    failed check, so a terraform lookup that passes the other checks keeps the verdict `allowed`
+    (it is not downgraded to `warn`).
+
+- **OCI image scanning, off by default (`OCI_SCAN_ENABLED`).** With it on, every pushed image and
+  every image a tenant pulls through the proxy is queued for that tenant's image scanner, an
+  out-of-process service that reads the image's layers, inventories the OS and language packages
+  inside them, and matches them against OSV. The scanner drives a new API under
+  `/api/v1/oci-scan/` with a tenant token carrying the new `scan:oci` capability (the **OCI image
+  scanner** token preset; admins and owners only). It claims queued images, reads only the
+  manifests and blobs of the image it leased, and posts per-package results. Each org sees only
+  its own scanner's results, including for a proxied image cached once for every tenant. An OCI
+  version's status now comes from those results:
+  - `no_feed` while no scanner is live;
+  - `unscanned` until the image is scanned;
+  - `vulnerable` or `clean` once scanned. A score above the org's tolerance reads
+    `vulnerable`. While `oci_scan_enforcement` is `off` or `warn`, such an image still pulls and
+    `GET /api/v1/lookup` for it answers `warn`; at `block` the pull refuses it (see the
+    enforcement entry below);
+  - `partial`, a new status, when the scan could not read or match part of the image and found
+    no advisories in the rest.
+
+  For a pushed image, the advisories also reach the existing alerts, KEV alerts and webhooks.
+  Advisory records are shared by every organization, so Dependably never stores the advisory
+  records a scanner posts. An advisory already stored is linked as stored. Any other advisory is
+  fetched by id from Dependably's own OSV source (OSV.dev, or the sideloaded dumps under
+  `OSV_MODE=local`) and stored from that record. One result fetches at most
+  `OCI_SCAN_ADVISORY_FETCH_MAX` (default 200) such ids, within a third of the lease and never
+  more than two minutes. An id the source does not know, one past the cap or the time budget, and
+  one the source could not answer for is not stored or linked. It is recorded as a coverage gap on
+  the platforms that named it, so the image reads `partial` or `vulnerable`, never `clean`, and the
+  next match asks again. Records fetched before another fetch fails are kept. An id the source
+  reported unknown is not asked about again for six hours. If the source answers none of the ids,
+  the result is refused with 503 and the job is queued again after a backoff of at most 15 minutes.
+  These refusals do not count against `OCI_SCAN_MAX_ATTEMPTS`, so an outage never parks a first
+  scan. After `OCI_SCAN_RESCAN_AGE_HOURS` the result is stored with the gap instead. An OSV
+  request that runs past its HTTP timeout counts as an unreached source, so it defers the result
+  like any other outage; a source that answers some ids and times out on others still stores the
+  partial result. The `oci-scan-sweep` job queues images catalogued before scanning was turned
+  on.
+
+  The claim response's `attempt` must come back as `?attempt=` on
+  `POST /api/v1/oci-scan/{job}/heartbeat`, `/result` and `/fail`. A call without it, or with a
+  value below 1, is answered 422, and a call naming a superseded attempt is answered 409, so a
+  scanner whose lease lapsed cannot extend, fail or close a job a second scanner has re-claimed.
+
+- **The OCI image scanner runs beside Dependably under the compose profile `oci-scan`.**
+  `docker-compose.yml` gains an `oci-scanner` service (the `dependably/oci-scanner` image) that
+  starts only with `--profile oci-scan`; without the profile nothing changes. It shares
+  Dependably's network namespace and calls `http://localhost:8080`, reads its token from the
+  `OCI_SCANNER_TOKEN` compose secret, runs read-only with all capabilities dropped, and waits for
+  Dependably to be healthy. `OCI_SCAN_ENABLED` passes through to Dependably, default `false`. In
+  multi-tenant mode the scanner needs the tenant's own `https://<slug>.<domain>` URL. Use scanner
+  0.2.0 or later: 0.1.0 does not send the claim's `attempt` and cannot complete a job. See
+  [OPERATIONS.md](OPERATIONS.md#oci-image-scanning).
+
+- **`TENANT_DOMAIN` decouples the tenant parent domain from the apex host.** In
+  `DEPLOYMENT_MODE=multi` the system administrator can now run at `master.mydomain.com`
+  (`APEX_HOST`) while tenants resolve at `acme.mydomain.com` instead of
+  `acme.master.mydomain.com`. Unset, tenants stay subdomains of the apex and nothing changes. The
+  bootstrap response gains `tenantDomain`, the apex host never resolves as a tenant, and its label
+  below the tenant domain is reserved as a slug.
+
+- **OCI pulls can be gated on your organization's own image scan results.** A new per-org setting,
+  `oci_scan_enforcement` (Settings → Gates → OCI image scan enforcement, or
+  `PUT /api/v1/proxy-settings`), is `off` by default. At `off` no pull is refused or recorded for
+  its scan; gated OCI responses carry an `X-Dependably-Oci-Scan-Enforcement` header naming the
+  organization's setting, which edge nodes read. At `block`, every path that returns an image
+  manifest (cache hit, upstream miss by `GET` or `HEAD`, stale tag, and manifest bytes on the blob
+  route) applies your existing malicious, KEV, KEV
+  ransomware, SSVC, EPSS, EPSS percentile and CVSS-ceiling gates to your organization's scan of
+  the image, and refuses an image with no complete result as the new `unscanned` arm (403,
+  `X-Dependably-Block-Reason: unscanned`, a `blocked_unscanned` activity row whose detail says
+  `absent`, `partial` or `no_scanner`, a quarantine entry and a `package.blocked` webhook). A first
+  pull is refused but still caches, catalogues and queues the image, a `HEAD` included, so a retry
+  after the scan is answered from it. Approving an `unscanned` entry waives only that arm; a later
+  advisory refuses the image and reopens the entry. A moving tag keeps serving its last passing
+  digest until the new one's scan passes, shown on the version page and in the
+  `dependably.oci.tag_pending_hold_age` gauge. `warn` serves everything and records what `block`
+  would have refused. Each organization's verdict comes from its own scan only. An edge node
+  answers manifests of an organization its master gates through the master, and refuses rather
+  than stale-serves while the master is unreachable. Moving off `off` needs `OCI_SCAN_ENABLED`.
+
+### Security
+
+- **An npm package whose `package.json` repeats a key can no longer slip past the install-script gate.** Node keeps the last of two equal keys, so a manifest with `"scripts":{}` followed by `"scripts":{"postinstall":"..."}` runs its hook on install, but the scanner read the first and reported no script. A manifest with a duplicate key (or a detector failure on an npm tarball) is now refused on the proxy path and rejected at publish, and is recorded as `npm:unscannable-manifest` wherever it reaches the install-script check. A proxied tarball refused for an unreadable or ambiguous manifest also has its staged blob deleted when no other cache row references it, instead of leaving it behind.
+
+- **A token or invite minted while a tenant is being suspended no longer survives the suspension.**
+  A personal access token, service token, invite, password-reset link, email-change link or
+  remembered device whose request was admitted just before the tenant was suspended could commit
+  after the suspension had revoked the tenant's credentials, and then work again when the tenant
+  was restored. Each now re-reads the tenant's status inside its own transaction (locking the
+  organization row on Postgres) and is refused with the same 423 a locked-out tenant gets.
+
+- **.NET cryptography packages moved to 10.0.13 for five denial-of-service advisories.**
+  `System.Security.Cryptography.Pkcs` (CVE-2026-84008, CVE-2026-70162) and
+  `System.Security.Cryptography.Xml` (CVE-2026-96958, CVE-2026-96959, CVE-2026-96960) were at
+  10.0.10. The other Microsoft 10.0.x packages move to 10.0.13 with them. `Microsoft.AspNetCore.OpenApi`
+  10.0.13 already requires a patched `Microsoft.OpenApi` (2.12.2), so its explicit 2.7.5 pin is
+  removed.
+
+- **The shipped images now bundle the 10.0.13 ASP.NET Core runtime.** `System.Security.Cryptography.Xml`
+  (CVE-2026-96958, CVE-2026-96959, CVE-2026-96960) is not a NuGet dependency of any project: a
+  `--self-contained` publish takes it from the ASP.NET Core runtime pack that the build SDK image
+  carries, and the SDK image pin predated 10.0.13, so the community and edge images still shipped the
+  10.0.7 copy. Both Dockerfiles and the CI multi-arch build now pin the SDK image (10.0.402, runtime
+  10.0.13) and the matching `runtime-deps` image by digest. A self-contained publish of `Dependably` and
+  `Dependably.Edge` resolves `System.Security.Cryptography.Xml.dll` from
+  `runtimepack.Microsoft.AspNetCore.App.Runtime.linux-musl-x64/10.0.13`.
+
+- **A refused PyPI file download no longer asks the upstream about the package.** On a cache miss,
+  a download for a file of a reserved-namespace name, a `local_only`-claimed name, a blocklisted
+  or non-allowlisted name, or any name while proxy passthrough is off, first fetched the
+  upstream's simple index for that name, with the upstream credential, and only then refused with
+  its 404 or 403. The request was refused, but the name of an internal package had already been
+  sent to every configured PyPI upstream, which is the disclosure the dependency-confusion guard
+  exists to prevent. The refusals now run first, and nothing is sent upstream for a refused
+  request. One visible change: a blocklisted or non-allowlisted name whose file the upstream
+  cannot resolve (or with no PyPI upstream configured) now answers 403 and records a `blocked`
+  activity row, where it answered 404 before. Allowed fetches and the reserved, `local_only` and
+  passthrough refusals are unchanged.
+- **A reserved name is never sent to a package registry, on any lookup path or ecosystem.** The
+  dependency-confusion guard promises that a name an organization has reserved never reaches a
+  public registry, but several paths asked anyway. Each now checks the reservation first and
+  makes no upstream request:
+  - Maven `maven-metadata.xml` for a reserved group, and for a path whose group-level reading
+    (`g/a/` as group `g.a`) is reserved. Hosted and cached versions of the name still serve,
+    local-only.
+  - The latest-version lookup at first fetch, the package lookup and the daily deprecation
+    refresh, for npm, PyPI, NuGet, Maven, Cargo, Hex and Go (a Go name with an invalid escape
+    counts as reserved). A reserved name records nothing for the organization and marks nothing
+    deprecated or revoked, and a package shared with another organization is not touched for it.
+  - `GET /pypi/{name}/json` and `/pypi/{name}/{version}/json`, which proxied a reserved name that
+    the simple index and the downloads already refused. Locally known versions still serve.
+  - `GET /hex/docs/{name}-{version}.tar.gz` for a name reserved after its package tarball was
+    cached; docs already held for it still serve.
+
+  Adding or removing a reservation also evicts the organization's already-rendered Maven metadata
+  and package-lookup outcomes at once, instead of serving the earlier document for up to five
+  minutes (lookups: two).
+
+  Advisory queries are not registry requests: a lookup with an explicit version, and the
+  vulnerability scan of a hosted version, still ask the advisory source about a reserved name.
+  Under `OSV_MODE=remote` that is OSV.dev; under `OSV_MODE=local` the name stays on the instance.
+
+- **An npm tarball with more than one top-level `package.json` can no longer hide an install
+  script or a blocked licence.** npm extracts with last-write-wins, so it installs the last of
+  several top-level manifests, while Dependably's checks read the first. A tarball whose first
+  manifest was clean and whose later one declared a `postinstall` hook or a blocked licence
+  passed the install-script and licence gates. One shared scan now selects the manifest for the
+  validator, the install-script detector and the licence extractor, and counts every top-level
+  manifest at the root or in any single wrapper directory, including names that differ only by
+  case, and it reads entry names the way npm's extraction does, so `package/./package.json`,
+  `package//package.json`, `..` paths and Windows drive prefixes such as
+  `package/C:package.json` count too, and a name with backslash separators counts under each of
+  the readings npm's extractor can give it. An archive that carries bytes after a lone end-of-archive
+  block is treated as unreadable, because npm keeps extracting there. Publish, import and
+  upload reject such a tarball as invalid content. A proxied tarball that is ambiguous, has no
+  top-level manifest, has more than 100,000 entries, or cannot be read to the end is refused with
+  a 502 on first fetch, before anything is cached or served, whatever the install-script and
+  licence settings. Nothing is re-checked on download. Artefacts stored before this change are
+  rescanned once in the background, in bounded slices that resume after a restart: any whose
+  manifest is ambiguous or unreadable is flagged as having an install script (kind
+  `npm:ambiguous-manifest` or `npm:unscannable-manifest`) and has its tarball-derived licences
+  deleted (those recorded at publish, import or proxy fetch; a licence set any other way is kept),
+  so the install-script and licence gates see it with an unknown licence. The rescan reads only
+  local blobs and the database, so it runs under `AIR_GAPPED=true` and
+  `DISABLE_BACKGROUND_JOBS=true` too, as the job `npm-manifest-rescan`; name that job in
+  `DISABLE_BACKGROUND_JOBS` to stop it. A blob that cannot be read is retried on later runs and flagged as unreadable after three failed attempts, but only while the blob store is answering for other blobs: a tick in which nothing can be read counts no attempts and stops. With both
+  gates at their default of `off`, an already-cached or already-published ambiguous tarball still
+  serves until an operator enables them. The install-script
+  detector now fails closed too, reporting a script for an ambiguous, over-long or unreadable
+  archive, and the licence extractor reports the licence as unknown. Single-manifest tarballs,
+  including DefinitelyTyped wrapper directories, are unaffected.
+
+- **A stale cached upstream answer no longer clears a deprecation mark.** With the metadata cache
+  on (the default on edge nodes: a 120-second TTL and a 24-hour serve-stale window), an upstream
+  outage during a deprecation refresh made the cache serve the last answer it held, and the refresh
+  read that answer as current. If the cached answer predated a deprecation, yank, NuGet unlisting
+  or Hex retirement, the refresh cleared the mark, so under `block_deprecated=block_all` the
+  version became servable for as long as the outage lasted. It could also revoke an npm or PyPI
+  version cached after that answer, and record an out-of-date latest version and versions-behind
+  count. The refresh now treats an answer served stale as no answer from that upstream: it asks the
+  next configured upstream, and when none answers live it records nothing for the package and
+  moves on. This covers npm, PyPI, NuGet (the latest version and the registration index, including
+  each externalized page), Maven and Hex, and the latest version the first fetch of a package
+  seeds. Proxy requests still get the stale answer during an
+  outage, as before. Standard instances leave the metadata cache off unless
+  `Proxy__MetadataCacheTtlSeconds` is set, so only edge nodes and instances that enable it were
+  affected.
+
+- **An upstream credential now goes only to the scheme and port you configured, not just the
+  host.** When an upstream's own index named a follow-up URL, Dependably attached that upstream's
+  credential whenever the host matched. So a hostile or compromised index could name `http://` on
+  your `https://` host and the credential crossed the network in plaintext, or name another port
+  on that host and hand the credential to a different service. Scheme, host and port must all
+  match now. A default port counts as the same port, so `https://feed.example` and
+  `https://feed.example:443` match. A NuGet registration page on another scheme or port is no
+  longer fetched and is removed from the served index. A PyPI file link, Cargo download or RPM
+  package location on another scheme or port is still downloaded and checksum-verified, but
+  without the credential. Terraform already applied this rule.
+
+- **Action for OCI operators whose token service runs on another port of the registry host.** The
+  token-exchange realm in an upstream's `WWW-Authenticate` challenge must now be on the
+  registry's own host *and* port. Before, any port on that host was accepted. A registry on one
+  port with its token service on another, such as a self-hosted GitLab registry on `:5050` whose
+  realm is on `:443`, now fails authentication. The log shows "challenge realm … is not HTTPS on
+  the upstream's own host and port". To keep it working, set the upstream's **Token endpoint** to
+  that realm URL in Settings → Proxy → Upstream registries.
+
+- **Outbound HTTP clients no longer keep cookies.** Every outbound client, including the shared
+  upstream and OCI clients, kept a cookie jar that every organization's requests shared. A session
+  cookie an upstream set after one organization's authenticated request could then be sent with
+  another organization's request to the same host. A cookie without the `Secure` flag could also
+  follow an `http://` link on that host. Cookies are now off on every outbound client. Upstream
+  credentials are sent only as the configured, origin-pinned header.
+
+- **The Go checksum-database passthrough forwards only the paths the Go client uses.**
+  `/go/sumdb/{name}/…` checked a reserved module name only on `lookup/` requests and forwarded
+  every other path to the checksum database as written, so a request such as
+  `/go/sumdb/sum.golang.org/lookupx/corp.example/internal/tool@v1.0.0` sent a reserved name
+  upstream. Only `supported`, `latest`, `lookup/{module}@{version}` and tile paths in the exact
+  form the Go transparency log writes them (`tile/{H}/{L|data}/…`) are now forwarded; anything
+  else answers 404 without contacting upstream. Lookups are now case-sensitive and must name a
+  `v`-prefixed semantic version, as the checksum database itself requires. Go clients are
+  unaffected. The sumdb host was already limited to the configured `Go:SumDb`.
+
+- **Action for Linux operators: check for stored secrets that can no longer be decrypted.**
+  Every release from v0.2.2 until this one shared a single AES-GCM object across threads when
+  encrypting and decrypting stored secrets. On Linux that object is not thread-safe, so a secret
+  saved while another request was using it could be written with mismatched parts and never
+  decrypt again (about 0.6% of overlapping saves in a stress test). Encryption and decryption are
+  now serialized, so no new value can be written this way, but a value already damaged stays
+  damaged until it is entered again. Damaged values do not leak: they decrypt to nothing, never to
+  another organization's secret. They show up only when the feature that needs them runs, as
+  Slack alerts that stop for an organization, a webhook that is skipped, upstream fetches that
+  fail for an organization and ecosystem, authenticator codes that are always rejected, or SBOM
+  and Hex signing that fails.
+
+  To find them, every start now tries to decrypt each stored secret in the background once the
+  server is listening and logs a `Stored secret check:` warning naming the table and rows of any
+  that fail, never the values. Startup is not delayed or stopped. Set
+  `SECRETS_VERIFY_ON_STARTUP=false` to skip it. For the full list, a system admin can call
+  `POST /api/v1/system/secrets/verify`, or in single-tenant mode an organization admin or owner
+  can call `POST /api/v1/instance/secrets/verify`; both are audited and report counts per kind
+  plus each failing row's table, id, organization and reason. Values stored unencrypted are
+  counted separately and are not failures, except TOTP keys, which are never stored unencrypted. If you ran a Linux build of an affected release,
+  check once after upgrading and re-enter whatever is reported.
+  [OPERATIONS.md, Verifying stored secrets](OPERATIONS.md#verifying-stored-secrets) lists what each
+  kind breaks and how to replace it.
+
+- **Locking or disabling a system admin now ends their sessions immediately.** Changing another
+  operator's status with `PATCH /api/v1/system/admins/{id}/account-status` only updated the status:
+  a session the admin already held kept full system access until it expired, up to eight hours
+  later. Setting an admin to `locked` or `disabled` now invalidates every session they hold on its
+  next request, and forgets their remembered devices in the same transaction as the status change,
+  so they need their second factor again after re-activation. Re-activating an admin does not bring an old session back; they must sign in
+  again. As a second safeguard, a system session is only accepted while its admin is `active`, so
+  a status change that skipped the invalidation would still end the session. Deleting a disabled
+  admin now also ends any session that was still being honoured from the token-version cache.
+  A sign-in that passed the password step before the change can no longer finish its second
+  step: it gets the same error as an invalid code, and no session or remembered device is
+  created. Re-activation also forgets any remembered devices the admin still has. System API
+  tokens already stopped working when their owner was locked or disabled; that is unchanged.
+- **A tenant user's sessions and remembered devices are now bound to an active account.**
+  Locking or disabling a user through `PATCH /api/v1/system/users/account-status` already ended
+  their sessions, but it left their remembered devices in place, so after re-activation a device
+  saved before or during the lock could skip the second factor. Every status change except active
+  to active now forgets the user's remembered devices, and re-activation also invalidates any
+  session issued before the lock, even if the lock itself was written without invalidating them.
+  As a second safeguard, a tenant session is only accepted while its user is `active`, so a status
+  change made any other way (for example, directly in the database) still ends the session within
+  a minute. A sign-in that passed the password step before a lock, disable, re-activation or role
+  change can no longer finish its second step: it gets the same error as an invalid code, nothing
+  is created or recorded as a successful sign-in, and the attempt does not count towards lockout.
+  For a tenant user or a system admin, such a refused second step is recorded as a
+  `login.failure` audit entry with the reason `stale_challenge` and the realm, and is sent to the
+  audit event stream, SIEM forwarding and webhooks like any other failed sign-in.
+- **Restoring a suspended or deleted tenant no longer brings back its old sessions.** Suspending a
+  tenant with `PATCH /api/v1/system/tenants/{slug}/status` refused its requests but left its
+  users' sessions and remembered devices valid, so restoring the tenant within eight hours let
+  them carry on with sessions issued before or during the suspension, and skip the second factor
+  on devices remembered before it. Suspending a tenant, or deleting it with
+  `DELETE /api/v1/system/tenants/{slug}`, now ends every session its users hold and forgets their
+  remembered devices, so after the restore everyone signs in again. Restoring does the same again,
+  which also covers a tenant locked out some other way. `read_only` is not a lockout: moving a
+  tenant into or out of it leaves sessions alone, because its users keep signing in and managing
+  the tenant.
+- **Suspending or deleting a tenant now revokes its API tokens for good.** Suspension is how an
+  operator contains an incident, but a tenant's personal access tokens and service tokens were only
+  refused while it stayed suspended: restoring it brought back every token, including a leaked CI
+  token that may have started the incident. Suspending a tenant with
+  `PATCH /api/v1/system/tenants/{slug}/status`, or deleting it with
+  `DELETE /api/v1/system/tenants/{slug}`, now deletes all of the tenant's personal access tokens
+  and service tokens, its unused password-reset and email-change links, and its pending invites.
+  Restoring the tenant does not bring any of them back, and does the same cleanup again for a
+  tenant locked out some other way. `read_only` is still not a lockout and keeps every token.
+  **After a restore, the tenant has to issue new tokens** for its CI pipelines, package-manager
+  configuration, and any edge node that pulls from it: an edge's `EDGE_MASTER_TOKEN` is one of
+  the revoked service tokens, so the edge serves only what it has already cached until it is
+  given a new token. Members who had an invite or a reset link outstanding need a new one. The
+  operator's `tenant.status_changed`, `tenant.deleted` and `tenant.restored` audit entries now
+  record how many of each credential were revoked. Revoking a single service token now also takes
+  effect on its next request, rather than up to a second later.
+
+- **The daily deprecation and latest-version refresh respects proxy passthrough and fails closed.**
+  An organization with passthrough off (or air-gapped) is no longer sent upstream requests, which
+  carried its stored upstream credentials, and its deprecated, latest-version and Hex retirement
+  facts are no longer rewritten from them. An npm or PyPI answer that is a 200 but carries no
+  `versions` / `releases` object (a mirror's `{}` or error body) is now treated as no answer, so it
+  can no longer clear a deprecation or yank and let a version blocked under `block_deprecated=block_all`
+  serve again. Versions are also matched the way each ecosystem compares them: npm versions that
+  differ only in case stay distinct, and a cached PyPI spelling such as `1.0.0.rc1` matches the
+  upstream key `1.0.0rc1`, so a yank is no longer cleared and the release is no longer marked revoked.
+- **Maven honours an organization's proxy passthrough setting.** With passthrough off (or the
+  organization air-gapped), a Maven artefact miss answers 404, a cached SNAPSHOT is served without
+  asking the upstream whether a newer build exists, and `maven-metadata.xml` lists only the
+  versions the organization already holds. Before, all three still sent requests, carrying the
+  upstream credential, to the configured Maven registries.
+- **An apk request whose filename cannot be parsed is no longer fetched from upstream.** A
+  `.apk` path that does not follow `{name}-{version}-r{release}.apk` has no package name to check
+  against the reserved namespaces, and it used to skip that check and go upstream. It now answers
+  404 unless the file is already in the store, so a reserved name is never asked of upstream by
+  way of a malformed filename.
+- **A TOTP key stored as plaintext is no longer accepted at sign-in.** Dependably has only ever
+  stored these keys encrypted, so a plaintext one can only have been written to the database from
+  outside, and it used to pass sign-in. It is now rejected, and the stored secret check reports it
+  with the reason `unexpected_plaintext`. The user signs in with a recovery code and enrols again.
+
+### Changed
+
+- **`oci-scan-sweep` runs under `AIR_GAPPED=true`.** It makes no outbound call, and an air-gapped
+  scanner re-matches against sideloaded OSV dumps. `DISABLE_BACKGROUND_JOBS=true`, a list naming
+  it, and edge mode still stop it, and `disabled_reason` no longer reports `AIR_GAPPED=true` for it.
+- **A hosted image's scan result now prunes and announces only what changed.** A re-extraction
+  removes the image's advisory links its new inventory no longer supports, and the `package.vuln`
+  webhook carries only advisories newly linked to the image instead of every advisory found.
+
+- **Upgrading a Postgres database adds the schema's CHECK and foreign-key constraints on first
+  boot, and that step can no longer hold up startup.** A database created by an older release lacks
+  the column constraints a fresh install has. The first boot adds each one as `NOT VALID` (new
+  writes are checked straight away) and then validates it against existing rows. The whole step
+  shares a three-minute budget. Waiting for a table lock is bounded and retried; if another
+  session, such as a long query on the old slot during a blue-green cutover, still holds the lock,
+  that table (and, for a foreign key, the table it references) is skipped for the rest of the boot.
+  Each validation scan is cut off after 60 seconds. Anything skipped, cancelled or past the budget
+  is left absent or `NOT VALID`, logged in one warning that counts the deferred steps, and retried
+  on the next boot. If existing rows break a constraint, the warning names it and the table and
+  column; repair those rows and the next boot validates it. Until then that constraint is rescanned
+  on every boot, and the 60-second cap bounds that cost. The step that drops the old unique key on
+  `nuget_symbol_index` checks for the key first and, when it must drop it, waits only briefly for
+  the table lock and retries on the next boot, so a previous-release instance holding the table
+  cannot stall the new boot. SQLite is unaffected.
+
+- **The vulnerability report, its total and the SIEM vulnerability summary stay fast at scale.** At
+  about 100,000 vulnerability links, one report request took tens of seconds on both SQLite and
+  Postgres, and the instance-wide summary a similar time, because each link evaluated its alias-donor
+  lookups (the severity, score and summary a PYSEC or similar copy borrows from its GHSA twin) as
+  correlated subqueries on every request, and several of those lookups could not use the partial
+  indexes on `package_version_vulns` at all. The queries now filter on the link's owner kind so the
+  indexes apply, the report total uses a count-specific query that drops the donor joins it never
+  reads, and each link carries its resolved donor values (`alias_severity`, `alias_cvss_score`,
+  `alias_summary`, `alias_resolved_at`) so the report, its sort and search, and the summary read columns
+  instead of computing donors. The values are resolved when a link is written and again when an
+  advisory's severity, score, summary or aliases change (a re-fetch that changes none of them
+  changes nothing). A sweep re-resolves, in short batches, every owner that has a link never
+  resolved or whose advisory's donor fields changed since the link was resolved; it runs at every
+  boot and after every vulnerability scan tick, so links and advisories written by the previous
+  release during a blue-green cutover, and two concurrent writers that each missed the other, are
+  corrected within a tick (until then the query resolves a never-resolved link's donor itself). The
+  sweep assumes the clocks of the replicas differ by less than two minutes; beyond that, a
+  previous-release donor edit landing just after a resolve can be missed until the advisory next
+  changes. Two advisory columns (`donor_basis`, `donor_changed_at`) record the donor fields and
+  when they last changed. The resolve sweep and the advisory-basis sweep (the first fill of each
+  advisory's recorded basis) size each batch from how long the previous statement held the write
+  lock, aiming at 250 ms and staying between 10 and 500 owners, and pause for as long as the lock
+  was held. A sweep that finds nothing to change takes no write lock.
+  The first boot after the upgrade backfills existing links and takes about 4.5 seconds per 100,000
+  links on Postgres. On the proxied (cache) plane the donor candidates are the advisories linked to
+  any cached artefact of the same ecosystem, name and version (each artefact, such as a wheel and
+  an sdist, is scanned and linked separately), whichever organization reaches them: an advisory's
+  severity, score and summary are global facts, so the stored value never depends on who is
+  looking, and report rows stay scoped to the organization's own artefacts. The accepted
+  trade-off is that, in the window after an advisory publishes, an organization can observe that
+  another file of the same version was fetched and scanned (through a borrowed severity). This replaces the earlier organization-scoped lookup on that plane. A donor is still
+  never from the same advisory database, and severity and score still come from one donor.
+
+- **The advisory detail fallback and the Alpine origin probe no longer query OSV on every call.**
+  `GET /api/v1/vulnerabilities/{osvId}` with `ecosystem`, `name` and `version` reads OSV for an
+  advisory that is not stored for the org, and a clean apk lookup probes the release feed to tell an
+  unknown origin from a clean one. Both answers are public data, so they are now held in a bounded
+  five-minute cache shared across orgs (capped by entry count and a 64 MiB byte budget; a single
+  oversize answer is served but not stored), with concurrent identical queries collapsed into one OSV
+  call. Only an answer from a reached source is kept, so an OSV outage is retried on the next call
+  and never remembered as a clean result. The reserved-name check still runs on every request,
+  outside the cache.
+
+- **The deprecation refresh schedules each organization on its own stamp.** Organizations that
+  proxy the same package share its cached rows, and the refresh used to decide what was due from a
+  stamp on those shared rows. When one organization's refresh landed at the end of a pass, its stamp
+  made another organization's refresh of the same package look fresh, so that organization's upstream
+  facts (latest version, versions behind) waited a further full age window. Each organization's
+  access to a cached package now carries its own refresh stamp (a new `tenant_artifact_access`
+  column, seeded from the shared stamp on upgrade so the queue order is kept), and a refresh pass
+  selects and stamps per organization. A failed upstream fetch or a reserved name now stamps only the
+  organization it was processed for, so the shared `deprecation_checked_at` (exposed on the
+  `artifact_inventory` view) records only the last upstream verdict. Packages never refreshed before
+  are now selected ahead of stale ones on Postgres too. Organizations that share a package each fetch
+  its upstream metadata once per age window, so `DEPRECATION_REFRESH_BATCH_SIZE`, which counts
+  (organization, package) groups, may need raising on instances with many organizations.
+
+- **Action required: upgrade to v0.13.3 before moving to this release from anything older.** The
+  oldest release supported as an upgrade source is now v0.13.3. Databases created by an older
+  release are no longer exercised against the current schema, and the upgrade tests start at
+  v0.13.3. From an older install, upgrade to v0.13.3 first, let it start and finish its
+  migrations, then upgrade to this release. The one exception is a Postgres database created by
+  0.2.2 to 0.4.4, which upgrades straight to this release (see Fixed). See
+  [Supported upgrade path](OPERATIONS.md#supported-upgrade-path).
+
+- **Action required: an unrecognized `DISABLE_BACKGROUND_JOBS` value fails startup.** A token that
+  is not a known job name used to log a warning, and startup continued with that job still
+  running. The instance now refuses to start and the error names the token and lists the known job
+  names. Check the value before upgrading: a typo such as `vulnscan` for `vuln-scan` was silently
+  leaving the job on, and now stops the node. `true`, `1` and `all` (on their own) are accepted and
+  disable every job except local housekeeping; see Fixed. `false` or `0` disables none, as an
+  empty or unset value always has. A switch value mixed into a list (`true,vuln-scan`) also fails
+  startup, because whether it means every job or is a mistyped name cannot be told from the value.
+- **`GET /api/v1/instance/background-jobs` lists every background job.** It reported 10 of the 25
+  jobs `DISABLE_BACKGROUND_JOBS` accepts; it now lists all of them, sorted by name. Each entry has
+  the same fields as before.
+- **Alias lookups for KEV and EPSS no longer scan the whole advisory table.** Resolving a
+  package lookup's advisories through their CVE aliases matched each CVE against the
+  `vulnerabilities.aliases` JSON text with a `LIKE`, so the cost grew with the instance's advisory
+  history. A new `vulnerability_aliases` table holds one indexed `(alias, osv_id)` row per alias,
+  written in the same transaction as the advisory, and the lookup resolves through it. The first
+  start after the upgrade fills it for existing advisories, and every start (and each threat-feed
+  pass) re-derives the rows of any advisory a previous release wrote without it, so a rolling
+  deploy stays correct. Results are unchanged. The reconcile writes in batches sized from how long
+  the previous one held the write lock and pauses for as long between them, and an advisory update
+  linked from more than 50 package versions leaves re-resolving their alias-donor values to the
+  sweep. A reconcile failure is logged, counted on `dependably.threat_feed.rejections` with reason
+  `alias_reconcile_failed`, and recorded as a degraded run while the KEV and EPSS feeds continue.
+  The reconcile locks advisory rows before their alias rows, as storing an advisory does, so the
+  two cannot deadlock on Postgres.
+- **The metadata-invalidation counters carry a `scope` attribute.** Every measurement on
+  `dependably.metadata.invalidations_published` and `dependably.metadata.invalidations_received`
+  has `scope="ecosystem"` (a message about one ecosystem's metadata, with `ecosystem` as
+  before) or `scope="org"` (an organization-wide invalidation after a reserved-namespace,
+  proxy-settings or licence-mode change, with no `ecosystem` attribute). `ecosystem` only ever
+  holds an ecosystem id, so queries that group or filter by it keep working.
+- **`GET /api/v1/lookup` now reports `blockedReason` as the wire token.** The field returned the
+  internal arm name (`VulnScore`, `ReleaseAge`, `Malicious`, `Deprecated`); it now returns the
+  same snake_case token the quarantine queue, response headers, and policy summary use
+  (`vuln_score`, `release_age`, `malicious`, `deprecated`). Clients that match on the old
+  spelling need to update.
+
+### Fixed
+
+- **Removing a member who created a licence policy entry or a package name grant no longer fails.**
+  A member who had added a licence allowlist or blocklist entry, or granted another account a
+  package name, could not be removed: the delete hit a foreign key on the entry's `created_by` and
+  answered 500. Removal now clears that attribution (the entries stay, with no author), as it
+  already did for reserved namespaces, quarantine decisions, dismissed alerts, claims and install
+  script allowlist entries.
+
+- **Licence copy no longer says an empty allowlist leaves only the blocklist in force.** Under
+  `license_enforcement_mode=block` the serve gate refuses any licence that is not on the allowlist
+  (allowed or conditional) as well as every blocklisted one, so an empty allowlist refuses
+  everything. The allowlist empty state, the Block mode hint and the Policies page description
+  now say so, in English and French. Off and Warn never refuse on the allowlist. Gate behaviour
+  is unchanged.
+
+- **A first fetch no longer erases a package version's "versions behind" count when upstream does not answer.**
+  The count lives on a cache row shared by every organization; an unreachable upstream, a 404 or a stale
+  metadata body used to overwrite it with nothing, and Cargo has no daily refresh to put it back.
+  It is now written only when upstream returns a stable-version list to count against.
+
+- **Postgres databases created by releases 0.2.2 to 0.4.4 start again.** Every release since 0.4.5
+  failed at startup with `42703: column "cache_artifact_id" does not exist` (or `config_digest`)
+  on a Postgres database created by 0.4.4 or earlier, including the 0.4.4 to 0.4.5 step.
+  Four indexes in the base schema named columns that such a database only gets later in the
+  upgrade. They are now created after those columns are added, on fresh installs as well as
+  upgrades. Upgrade such a database straight to this release: v0.13.3 and every other release
+  from 0.4.5 on fails to start on it, so it cannot take the usual route through v0.13.3. A database
+  a newer release has already failed to start on upgrades the same way. See
+  [Supported upgrade path](OPERATIONS.md#supported-upgrade-path).
+- **A momentary catalogue-lock conflict no longer fails a Postgres upgrade boot.** Widening the
+  numeric columns set `lock_timeout` for the whole session, so the 25 catalogue probes ran under
+  it and, unlike the `ALTER` itself, were not retried on a lock timeout. Only the `ALTER` is now
+  bounded, and retried; the probes wait as long as they need.
+- **A Maven plugin-prefix document now proxies.** `maven-metadata.xml` at a plugin group (for
+  example `org/apache/maven/plugins/`) answered 404, so Maven could not resolve short prefixes
+  such as `help:` or `versions:`. When no version of the group's coordinate is hosted or cached
+  and the upstream answers with a plugin-prefix document, it is served as the upstream sent it,
+  unless the group is reserved. No version is named in it, and versions blocked by policy stay
+  withheld from artefact metadata.
+- **Maven metadata no longer serves a document rendered under an older policy.** Whether the
+  upstream is merged in was decided before the cache entry was bound to the organization's
+  current state, so a reservation or proxy-settings change made in that gap kept being served for
+  up to five minutes. The decision is now part of the cache key, and npm, PyPI and Maven capture
+  the organization's state before reading settings and reservations.
+- **A package with many advisories no longer reads as clean when OSV pages the answer.** The
+  purl query and the batch query ignored OSV's `next_page_token`, so advisories past the first
+  page were dropped. Both now follow every page. A batch result that carries a page token is
+  completed through the paged query, and a chain that cannot be finished (a failed page, or more
+  than 50 pages) leaves the lookup unreached instead of serving a truncated list, so it is
+  retried rather than recorded as clean.
+
+- **Organization-wide cache invalidation reaches every replica.** Adding or removing a reserved
+  namespace, saving proxy settings, or changing the licence mode used to clear caches only on the
+  replica that took the change; the others kept serving the earlier policy until their TTLs
+  expired. With `REDIS_CONNECTION_STRING` set, the change is now broadcast over the existing
+  invalidation channel and every replica clears that organization's reservation list, settings
+  and rendered metadata. A licence-mode change also clears cached lookup verdicts, which stayed
+  stale for up to two minutes even on the replica that took it. During a rolling deploy, a
+  replica on an older release ignores the message and converges when its TTLs expire. The
+  broadcast is best effort; see
+  [Metadata caches](OPERATIONS.md#metadata-caches-are-per-instance-invalidated-across-replicas-over-redis).
+- **An advisory that affects several packages shows each package's own fix.** Storing an advisory
+  overwrote its ecosystem, package name and affected versions with whichever package was scanned
+  last, so `GET /api/v1/vulnerabilities/{osvId}` could show package A's fixed version while you
+  were viewing package B. The first scan's ecosystem and package name are kept, and affected
+  versions fill only when empty; the advisory's content still refreshes. The endpoint also takes
+  an optional `ecosystem` and `name` (both or neither) for the package being viewed and resolves
+  the fix for it. The Vulnerabilities page and the SBOM component panel pass them.
+
+- **npm packages whose tarball does not use a `package/` root folder now report their licence.**
+  The licence extractor only read `package/package.json`, so DefinitelyTyped tarballs
+  (`@types/react` unpacks to `react v18.3/`, `@types/json5` to `json5/`) read as licence-unknown,
+  which is a refusal under `license_enforcement_mode=block`. The extractor now selects the
+  manifest the same way the upload validator does: the root or exactly one wrapper directory of any
+  name. A nested manifest (a bundled dependency's
+  `package/node_modules/x/package/package.json`) can no longer be mistaken for the package's own.
+  On upgrade, the licence backfill re-reads each cached npm artefact that was recorded with no
+  licence, once; it needs no schema change and no operator action.
+
+- **A wrong sign-in code is counted once in the audit log.** A rejected TOTP or recovery code
+  wrote its `login.failure` row (with `"reason":"mfa_invalid"`) and then a second, bare row named
+  `auth.login.failure`, in both the tenant and the system realm, so every wrong code counted as
+  two failed sign-ins on the audit page, in exports and in the SIEM pull feed. It now writes only
+  the `login.failure` row. The `auth.login.failure` event that SIEM forwarding sends was already
+  emitted once per failure and is unchanged. Audit rows written before this change under `auth.login.failure`
+  stay as they are; leave them out when counting failures across the upgrade.
+- **PyPI versions that PEP 440 treats as the same release now shadow each other and are blocked
+  together.** An uploaded `1.0.0-rc1` and a proxied `1.0.0rc1` used to show as two rows and count
+  as two versions, and a block, quarantine or by-version lookup on one spelling missed the other.
+  Version identity now compares the PEP 440 canonical form, so separators, a leading `v`, implicit
+  zeros in `a`/`b`/`rc`/`post`/`dev` segments and spelling variants (`alpha`, `beta`, `c`, `pre`,
+  `preview`, `rev`, `-1`) all match. The uploaded copy shadows the proxied one in the version list
+  and the count. Blocking a version, or denying its quarantine entry, from either spelling now
+  blocks every spelling of it, uploaded and proxied, and resolves their pending quarantine entries
+  as denied. Unblocking or approving does not spread the same way. On an uploaded version it
+  allows that version and its other uploaded spellings, and lifts a block that spread to the
+  proxied files without ever allowing them. On a proxied file it covers that file's exact spelling
+  only. A proxied file flagged by an automatic gate (malicious, KEV, EPSS, release age, provenance
+  or licence) therefore stays blocked, and its quarantine entry is left as it was, until someone
+  approves that file itself; a clean one serves again. The shadowed proxied
+  files stay in the simple index under their own names and stay subject to their block state. Two spellings within the same source (for example an sdist and a wheel that spell the
+  version differently) still list as separate rows, and count that way. The stored version and the
+  file names pip is served are unchanged. `1.0` and `1.0.0` stay distinct, as they are on the
+  index.
+
+- **A PyPI version published under a second spelling no longer becomes a second version.**
+  `1.0.0rc1` and `1.0.0-rc1` are the same PEP 440 version, but the publish path compared version
+  strings exactly, so both could be stored as separate rows and counted twice. A respelled upload
+  now resolves to the version already stored: a new filename attaches to that release as another
+  file, and a filename it already holds follows the version-overwrite policy. The stored spelling
+  stays as published, and the package tile counts PEP 440-distinct versions. Deleting a version
+  under a blocking overwrite policy also keeps every spelling of it spent, so it can no longer be
+  republished with new bytes under a respelling. The match is read, then written, so two
+  concurrent first publishes under different spellings can still both land; the package count folds
+  them. Rows that were already published twice are left in place.
+
+- **The deprecation refresh now keeps NuGet unlisting current.** A NuGet version unlisted upstream
+  after this registry cached it stayed servable, because the daily refresh never read NuGet
+  listing state, while the registration index already hid it: the index and the download
+  disagreed. The refresh now reads each package's registration index once per pass and records
+  each cached version's listing state, read the same way as on first fetch. A version unlisted
+  upstream is marked "Unlisted upstream", so `block_deprecated=block_all` blocks it, and a version
+  relisted upstream is unmarked and servable again without an operator allowing it or deleting the
+  cached copy. When no upstream returns the registration index, or the page holding a version
+  cannot be fetched, that version keeps what was recorded, so an outage cannot unblock it. NuGet's
+  separate deprecation notice (reasons and an alternative package) is still not recorded.
+
+- **A licence allowlist or blocklist edit now shows on the next package lookup.** Adding,
+  editing or removing an allowlist or blocklist entry left the package lookup page showing the
+  verdict it had cached under the old lists for up to two minutes, on the replica that made the
+  edit and on its peers. Each committed edit now expires the organization's cached lookup
+  verdicts on every replica, as a licence-mode change already did. An edit that is rejected, or
+  that names an entry the organization does not have, changes nothing and expires nothing. The
+  licence gate on package downloads always read the lists live, so no download was ever let
+  through by the stale verdict.
+
+- **Two system admins disabling each other at the same moment can no longer leave the instance
+  with no active admin.** `PATCH /api/v1/system/admins/{id}/account-status` refuses to lock or
+  disable the last active admin, but it counted the other active admins and wrote the new status
+  in separate steps. When the last two active admins each disabled or locked the other at once,
+  both requests could pass the count and both succeed, leaving nobody able to sign in. Because
+  locking or disabling now ends sessions immediately, nobody was still signed in to undo it
+  either. The count and the write now happen in one transaction that runs one at a time, on SQLite
+  and on Postgres, so exactly one of the two requests succeeds and the other gets `409` with reason
+  `last_active_admin`, as a lone request always has. Deleting an admin was not affected: only an
+  admin who is already disabled can be deleted. If an instance has already lost its last active
+  admin, [OPERATIONS.md, Recovering when no system admin is active](OPERATIONS.md#recovering-when-no-system-admin-is-active)
+  gives the SQL to re-activate one.
+
+- **A stored secret that cannot be decrypted now affects only its own record, and the log says
+  which one.** An authenticator key that did not decrypt was handed to the code check as if the
+  ciphertext were the key, so every code the user entered failed with a server error and nothing
+  was logged. The code is now rejected as invalid, a warning names the user or system admin, and
+  recovery codes still work. One webhook whose signing secret did not decrypt stopped every
+  webhook of its organization for the events it was subscribed to; now only that subscription is
+  skipped, with a warning naming it, and it is never sent unsigned. Upstream registries, Slack
+  alerts, SBOM and Hex signing keys and instance settings still fail closed when their secret
+  does not decrypt, but the error now names the table, row and organization, never the value.
+  Upstreams stay all-or-nothing per ecosystem on purpose: skipping a private upstream would let
+  the next one in the priority order, often a public registry, answer for its packages.
+
+- **A new tenant's subdomain resolves as soon as it is created, and a usage-cap change from the
+  hourly sweep applies at once.** In multi-tenant mode, a request to a subdomain just before its
+  tenant was created cached "no such tenant", and that server kept answering 404 for up to five
+  seconds after the create succeeded. The hourly usage sweep had a similar gap: when it moved an
+  organization into or out of a capped posture (uploads refused, downloads throttled), the old
+  posture kept applying for up to five seconds. Tenant creation and the sweep now clear the
+  cached lookup once their change is saved. Other servers in a multi-server deployment still
+  pick up the change within their own five-second cache lifetime.
+
+- **A proxied version that differs from an uploaded one only in letter case is no longer hidden
+  where versions are case-sensitive.** An uploaded `1.0.0-RC1` used to hide a proxied upstream
+  `1.0.0-rc1` from the version list, and from its advisories on the package page, in every
+  ecosystem. Only NuGet and PyPI treat those as one version; npm, Go, Cargo, Hex, Terraform and
+  Maven keep them as two. One rule now decides this per ecosystem across the version list, the
+  Packages tile's version count, the Cargo, Go and Maven merges, and the block, unblock and delete
+  lookups by version, so the count always matches the rows listed and blocking `1.0.0-rc1` no longer
+  also blocks `1.0.0-RC1`.
+
+- **A proxy-settings change takes effect on the next metadata request, even under load.** A
+  request that was reading an organization's settings when an admin saved new ones could put the
+  old settings back in the one-second settings cache after the save had cleared it. The next npm,
+  PyPI or Maven metadata request then rendered under the old policy (for example, still listing
+  versions that `block_deprecated=block_all` now hides) and kept serving that document for the full
+  rendered-metadata cache lifetime, five to ten minutes. A settings read that overlaps a change
+  no longer caches what it read, so the next request reads the saved settings. This covers every
+  settings save on the replica that made it (proxy, retention, licence policy, anonymous pull,
+  allowlist mode, RPM upstream mode) and the organization-wide invalidation other replicas receive.
+- **Concurrent cache misses for the same key no longer empty the cache.** When two requests
+  missed the same cached record at once (an organization's reserved-namespace list, blocklist or
+  install-script allowlist, a session or tenant lookup), the second one to finish could evict the
+  first one's correct entry as it replaced it, leaving nothing cached. Under a burst of parallel
+  requests, such as a CI `npm install`, that repeated on every miss and sent each request to the
+  database. The surviving entry now stays cached.
+- **A host with `REDIS_CONNECTION_STRING` set starts again.** From 0.4.3 through 0.13.3, a
+  host configured with Redis, which every highly available deployment is, hung during startup and
+  never began listening. It also ignored SIGTERM, so it had to be killed. The services that keep
+  cached metadata in step across replicas depended on each other in a loop. Resolving them at
+  startup recursed until the process deadlocked. The loop is broken: the Redis channel now looks up
+  the component that applies peer messages when it subscribes, instead of when it is created.
+  Delivery is unchanged: a replica still drops its own broadcasts, and a push on one replica still
+  evicts the matching cached documents on the others. Hosts without
+  `REDIS_CONNECTION_STRING`, and edge hosts, were never affected.
+- **The daily deprecation refresh now covers Hex packages.** The 0.9.0 notes said the refresh
+  read a proxied Hex package's retirements and latest release from the signed upstream resource,
+  but the refresh never selected a Hex package. A release retired upstream after it was cached
+  kept being served as not retired, and a newer upstream release and the "versions behind" count
+  were never picked up. The refresh now covers Hex alongside npm, PyPI, NuGet and Maven,
+  including packages whose proxied versions were evicted so only published versions remain. A
+  retirement (or un-retirement) upstream now shows in the package's deprecated state and in the
+  `/hex/packages/NAME` resource this registry serves, so Mix and Rebar3 print their retired-release
+  warning. A Hex release retired upstream after it was cached now becomes blocked (and hidden
+  from the index) under `block_deprecated=block_all` on the next refresh pass. The refresh reads
+  only from a Hex upstream with a configured public key. When no upstream gives an answer that
+  verifies, it leaves the recorded retirement and latest version as they were. A name the
+  organization has reserved is never looked up.
+
+- **An upstream outage no longer unblocks a deprecated npm or PyPI version.** When every
+  configured npm or PyPI upstream answered a refresh with an error status (503, 429, or a 401/403
+  after a credential rotation), the deprecation refresh treated the empty result as a verdict: it
+  cleared every version's deprecation, erased the recorded latest version and versions-behind
+  counts, and stamped the versions as checked. Under `block_deprecated=block_all`, one bad pass
+  made a deprecated or yanked version servable again. The refresh now records nothing for a
+  package when no upstream returns a successful answer, as it already did for a network error or
+  an unverifiable Hex resource, and moves on to the next package. A package that every upstream
+  reports as not found (404) is also left as recorded. NuGet and Maven now keep their recorded
+  latest version and versions-behind counts the same way. A NuGet version marked unlisted
+  upstream when it was first fetched now stays marked as deprecated: the refresh was clearing that
+  mark on every pass. It now clears the mark only when the version is relisted upstream (see the
+  NuGet unlisting entry above).
+
+- **A package lookup no longer reports a reserved name or a missing upstream as an outage.**
+  `GET /api/v1/lookup` with no `version` answered 503 "The upstream registry is temporarily
+  unavailable. Try again shortly." both for a name the organization has reserved and for an
+  ecosystem with no upstream registry configured. Neither is transient: both are settings an
+  operator chose, so retrying never helped. Each now returns 422 on the `version` field with its
+  own message and a machine-readable `reason`: `name_reserved` or `upstream_not_configured`. The
+  503 now means only that a fetch from the upstream was attempted and failed. A lookup of a
+  reserved name with a version still returns the advisory and licence verdict, and the response
+  carries a new `reserved` field set to `true`; the lookup page shows a note saying the name is
+  reserved and that upstream metadata was not checked. Clients that retried on the 503 should
+  treat these two 422 reasons as final.
+- **`DISABLE_BACKGROUND_JOBS=true` now disables every background job except local
+  housekeeping.** The value was read as a list of job names, so `true` matched no job and every
+  job kept running, including the OSV scans, the CISA KEV and EPSS refresh, the deprecation
+  refresh and the healthcheck ping, each reaching the internet from an instance set up to be
+  isolated. `true`, `1` and `all` (any case) now switch off the whole job set apart from three
+  local jobs that make no outbound call: `cache-eviction` and `oci-staging-janitor`, which keep the
+  proxy cache and staging volume bounded, and `npm-manifest-rescan`. `AIR_GAPPED=true` leaves the
+  same three running, and `oci-scan-sweep` as well. On an edge node the
+  switch also stops the size gauge and the healthcheck ping. A comma-separated list of job names
+  works as before. Unlike `AIR_GAPPED=true`, this setting does not stop request-time upstream
+  fetches. `GET /api/v1/instance/background-jobs` reports a job switched off this way with a
+  `disabled_reason` of `DISABLE_BACKGROUND_JOBS=true`, a job named in a list with
+  `DISABLE_BACKGROUND_JOBS`, and a job an edge node force-disables with
+  `DEPLOYMENT_MODE=edge`.
+- **Naming `cache-eviction` or `oci-staging-janitor` in `DISABLE_BACKGROUND_JOBS` now stops it.**
+  Neither job checked the setting, so a named entry left it running while the background-jobs
+  report and the system health report showed it as disabled. Both now skip their pass when named.
+  Under `AIR_GAPPED=true` the two jobs keep running, as they always did, and the reports now say
+  so instead of listing them as disabled.
+- **A rejected threat feed now shows up as a degraded job run and a metric, and the first KEV
+  fetch after an upgrade is guarded.** A KEV or EPSS fetch that failed, came back empty, or came
+  back under half the stored size was dropped with only a log warning, and the `threat-feed` job
+  still recorded a success, so a mirror pointed at a filtered copy produced a daily warning and
+  nothing else. The run is now recorded with outcome `degraded` (the last-success time does not
+  advance), the new `dependably.threat_feed.rejections` counter increments with a `reason` of
+  `kev_fetch_failed`, `kev_empty`, `kev_shrunk`, `epss_fetch_failed`, `epss_empty` or
+  `epss_shrunk`, and the system health report lists the job as `degraded` and the instance as
+  degraded. An upgraded install starts with an empty stored KEV catalogue, so its first fetch had
+  nothing to be compared with and a degenerate one (a single entry from a broken mirror) would
+  have cleared every `is_kev` flag. While the stored catalogue is empty, the fetch is now
+  compared against the number of distinct CVEs behind the advisories already flagged `is_kev`
+  (one CVE often has several flagged rows) and rejected under half of it. Once a catalogue is
+  stored, that count covers only CVEs the catalogue contains. A `degraded` run has its own label,
+  colour and filter entry on the system Audit page's Background Jobs tab.
+- **Package lookups now report EPSS for a CVE this instance has never stored.** `GET
+  /api/v1/lookup` read EPSS only from stored advisory rows, so a candidate whose advisories the
+  instance had never scanned (log4j-core 2.14.1, for example) came back with `epss: null` and
+  `maxEpss: null`, and a missing score reads as "no signal" to the `epss` and `epss_percentile`
+  block arms: the pre-adoption check could say `allowed` for a version the download path would
+  later refuse. The threat-feed refresh now also keeps a local copy of FIRST.org's daily EPSS file
+  (a new `epss_scores` table, about 380,000 rows, refreshed on each successful fetch;
+  `EPSS_BULK_URL` overrides the source), and the lookup takes the highest score across
+  every CVE among an advisory's id and aliases. The lookup now also evaluates the `epss_percentile`
+  arm, which it previously ignored. The lookup makes no network call for this: with `AIR_GAPPED`
+  or `DISABLE_BACKGROUND_JOBS` the table stays empty or holds the last copy fetched. A file that
+  parses to no scores, or to fewer than half the stored count, is treated as a failed fetch and
+  the stored scores stay as they were.
+
+  The file loads into a staging table in short batches and is then applied to `epss_scores` in
+  bounded committed batches by key range, removing CVEs the file dropped last. Every batch (the
+  load, the apply and the advisory fill below) is sized from how long the previous one held the
+  write lock, aiming at 250 ms, and followed by a pause as long as that hold, so publishes, scans
+  and first-fetch records are not locked out on SQLite. During a refresh the table can hold a mix
+  of the old and new files' scores, each one complete. On Postgres a row is rewritten only when its
+  score or percentile changed. A store that fails keeps the last complete file and records the
+  run as `degraded` with the reason `epss_replace_failed` on `dependably.threat_feed.rejections`.
+
+  The download gate reads the score stamped on the stored advisory, so the file scores advisories
+  too. Storing an advisory fills its score and percentile from the file, and after each successful
+  refresh the threat-feed pass fills every advisory still unscored, in short batches; if that fill
+  fails the run is `degraded` with the reason `epss_fill_failed` and the next pass retries. Both
+  take the highest probability across the advisory's id and CVE aliases, with the percentile of
+  that same CVE, and never overwrite a recorded score. A score and its percentile are only ever
+  replaced together, so a per-CVE API answer with no score keeps the one the file supplied. An
+  advisory saved while a refresh applies the file is left for the fill that follows, so a
+  multi-CVE advisory cannot record a probability below both files' highest. That window is marked
+  in `instance_settings`, and a marker left by a crashed run expires after 5 minutes.
+- **`versionCount` no longer double-counts a proxied version shadowed by an uploaded one that
+  differs only in letter case.** In NuGet and PyPI, an uploaded `1.0.0-RC1` beside a proxied
+  `1.0.0-rc1` produced one row in `versions` but `versionCount: 2`, on both SQLite and Postgres and
+  on both the package list and the detail view. The count now follows the version list's rule:
+  exact version strings, except that in NuGet and PyPI a proxied version matching an uploaded one
+  case-insensitively is not counted again, and NuGet proxy rows compare case-insensitively among
+  themselves. Every other ecosystem counts a case-only variant as a separate version, on either
+  plane, as the list shows it.
+- **The package detail view no longer shows zero versions and zero downloads for a proxied
+  package.** `GET /api/v1/packages/{ecosystem}/{name}` returned `versionCount: 0` and
+  `totalDownloads: 0` beside a non-empty `versions` list, and the vulnerability counts and
+  malicious/KEV flags were empty too, because the detail lookup carried none of the totals the
+  packages list computes. It now reads the same totals as the list, so the two agree. Each
+  proxied version row also carries the `packageId` of its package instead of an empty string.
+- **The vulnerability report no longer shows a flaw's second identifier as an unknown-severity
+  duplicate.** A flaw published under several ids (for example a GHSA and a PYSEC for the same
+  Django release) appears once per id in `GET /api/v1/vuln-report`, and the PYSEC copy usually
+  carries no severity, CVSS score, or summary because OSV's PYSEC records omit them. A row missing
+  any of those now takes it from an alias advisory linked to the same version, in a different
+  database (a GHSA never lends to another GHSA), and one that lists the other as an alias.
+  Severity and score come from the same advisory. The substitution is made in the query, so
+  sorting, `search`, and the SIEM severity counts agree with the values shown. A summary still
+  missing after that falls back to the first prose line of the advisory's `details`; that line is
+  display-only and is not matched by `search` or used for sorting. Each item also gains an
+  `aliases` array (the advisory's other OSV ids, empty when none) so clients can group the rows
+  for one flaw. Row counts, totals, and paging are unchanged.
+- **Package lookups now report KEV and EPSS for advisories found only through a CVE alias.**
+  `GET /api/v1/lookup` decided KEV membership and the EPSS score from a stored row whose id
+  matched the live advisory exactly, so a GitHub advisory with no stored row of its own (Log4Shell,
+  `GHSA-jfh8-c2jp-5v3q`, alias `CVE-2021-44228`) came back with `isKev: false` and no EPSS even
+  though the CVE is in the CISA catalogue. The lookup now matches stored rows on the advisory's id
+  and on its aliases, treats the advisory as KEV when any matching row is, and takes the highest
+  EPSS across them. The block-KEV and EPSS verdict arms read the same corrected facts.
+
+  The threat-feed refresh now also keeps a local copy of the CISA KEV catalogue (a new
+  `kev_catalog` table, replaced in one transaction on each successful fetch and left untouched
+  when a fetch fails), and the lookup checks every CVE among an advisory's id and aliases against
+  it. An advisory whose CVE is in the catalogue reads as KEV even when this instance has never
+  stored any advisory for it. The lookup makes no network call for this: on an air-gapped
+  deployment, or with background jobs disabled, the table stays empty or holds the last copy
+  fetched. A feed response that parses to no entries, or to fewer than half the stored count, is
+  treated as a failed fetch: the catalogue and every KEV flag stay as they were. The lookup also
+  reports an advisory id once when the advisory source returns it more than once.
+
+  The download gate, the vulnerability report, the package list and the scan-time KEV alert read
+  the `is_kev` flag on the stored advisory, which only the daily threat-feed pass used to set, so
+  the lookup could report an advisory as KEV while the first proxy fetch of the same package was
+  served. Storing an advisory now also sets `is_kev` (and the ransomware and date-added context the
+  catalogue copy holds) when its id or any CVE among its aliases is in the stored catalogue, so all
+  of those agree with the lookup from the first scan, including on an instance where no refresh
+  pass ever runs. Storing an advisory never clears a flag; only the refresh pass does that, behind
+  its guard. EPSS for a CVE the instance has never stored is covered by a separate entry.
+- **Registry requests that name no organization now get `404` instead of `500`.** In
+  `DEPLOYMENT_MODE=multi`, a package-manager request sent to the apex host (for example
+  `http://localhost:8080/maven/.../maven-metadata.xml`) or to a subdomain that matches no
+  organization reached the registry code with no organization and failed with a server error.
+  Every registry surface (npm, PyPI, NuGet, Maven, RPM, Cargo, Go, OCI, APK, Terraform, Hex) now
+  answers such a request with `404` problem+json, or the OCI error envelope with `NAME_UNKNOWN`
+  under `/v2/`, whether or not it carries a token. A token never makes the request fall back to
+  its own organization: the host decides which organization a request is for. The system admin
+  console, login, and health endpoints on the apex are unchanged.
+
+- **Banners can be created and edited on PostgreSQL.** Creating or updating an organization or
+  system banner failed with a server error on PostgreSQL (`column "enabled" is of type integer but
+  expression is of type boolean`); SQLite deployments were unaffected. The `enabled` flag is now
+  stored as `1`/`0` on both databases.
+
+## [0.13.3] - 2026-09-30
+
+### Added
+
+- **`DEFAULT_USAGE_CAPS` sets instance-wide default usage caps.** In `DEPLOYMENT_MODE=multi` or
+  `header`, a comma-separated list of `meter=quantity` pairs over `egress_bytes`,
+  `egress_metadata_bytes`, `storage_bytes` and `artifact_count` (for example
+  `egress_bytes=500000000000,artifact_count=10000`) caps every tenant on each meter where it has no
+  explicit cap. Clearing a tenant's explicit cap makes the meter fall back to the default. Unset
+  or empty means no defaults, and the setting is ignored in single and edge mode. An unknown meter,
+  a repeated meter, or a quantity that is not a positive whole number stops startup with an error
+  naming the bad pair. It is read at startup, so a change takes a restart. The system API's
+  `GET` and `PATCH /api/v1/system/tenants/{slug}/usage-limits` responses gain `defaultCaps` and
+  `effectiveCaps` beside `caps`, and the hourly usage rollup measures a tenant against its
+  effective caps. See [OPERATIONS.md](OPERATIONS.md#usage-caps).
+
+### Fixed
+
+- **An empty S3 bucket or prefix is read as zero objects.** The AWS SDK leaves the listing's
+  object collection null rather than empty when the service returns none, so measuring the
+  total size of, or enumerating, an empty bucket or prefix threw instead of reporting zero.
+- **Back and Forward restore a list's scroll position on a slow page.** The restore gave up after
+  about ten frames, so a page whose data arrived later landed at the top. It now keeps trying for
+  up to three seconds, and stops as soon as you scroll or interact, or when another navigation
+  places the viewport.
+
+## [0.13.2] - 2026-09-29
+
+### Fixed
+
+- **A failing licence backfill no longer crashes the application on Postgres.** The first page of
+  the backfill's query bound a null timestamp that Postgres rejected (`42P08`), and because the
+  job ran at startup and stopped the whole host on a tick error, the failure became a crash loop
+  on every boot. The query now binds the timestamp as text on both databases.
+- **A background job that fails a pass no longer stops the application.** The threat-feed
+  refresh, vulnerability scan, deprecation refresh and licence backfill were set to end the host
+  on an unhandled error in a pass. Every background job now logs the failure and retries at its
+  next scheduled run.
+
 ## [0.13.1] - 2026-09-28
 
 ### Added

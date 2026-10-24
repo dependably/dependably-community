@@ -77,13 +77,13 @@ public sealed class SamlController : ControllerBase
     [HttpGet("metadata")]
     public async Task<IActionResult> Metadata(CancellationToken ct)
     {
-        var tenant = ResolveTenant();
-        if (tenant is null)
+        string? tenantId = ResolveTenantId();
+        if (tenantId is null)
         {
             return NotFound();
         }
 
-        var cfg = await _samlConfig.GetAsync(tenant.TenantId!, ct);
+        var cfg = await _samlConfig.GetAsync(tenantId, ct);
         var saml2Config = BuildSaml2Configuration(cfg, requireIdp: false);
 
         // Fall back to the standard Email NameID format when the configured value is absent
@@ -152,23 +152,23 @@ public sealed class SamlController : ControllerBase
             && !string.Equals(test, "0", StringComparison.Ordinal)
             && !string.Equals(test, "false", StringComparison.OrdinalIgnoreCase);
 
-        var tenant = ResolveTenant();
-        if (tenant is null)
+        string? tenantId = ResolveTenantId();
+        if (tenantId is null)
         {
             return NotFound();
         }
 
-        var cfg = await _samlConfig.GetAsync(tenant.TenantId!, ct);
+        var cfg = await _samlConfig.GetAsync(tenantId, ct);
         if (!IsSamlConfigured(cfg))
         {
             _logger.LogInformation("SAML rejected for tenant {TenantId}: state={SamlState}",
-                tenant.TenantId, "config_missing");
+                tenantId, "config_missing");
             return Problem(statusCode: 404, detail: "SAML SSO is not configured for this tenant.");
         }
         if (!isTest && !cfg!.Enabled)
         {
             _logger.LogInformation("SAML rejected for tenant {TenantId}: state={SamlState}",
-                tenant.TenantId, "disabled");
+                tenantId, "disabled");
             return Problem(statusCode: 404, detail: "SAML SSO is not enabled for this tenant.");
         }
 
@@ -187,7 +187,7 @@ public sealed class SamlController : ControllerBase
             // The cid is also placed in RelayState so the ACS can detect test mode even when
             // the cookie is blocked (SameSite=Lax is not sent on cross-site form POSTs from the
             // IdP — relay state is echoed back verbatim by the IdP and has no SameSite restriction).
-            testCid = await SetTestCookieAsync(tenant.TenantId!, ct);
+            testCid = await SetTestCookieAsync(tenantId, ct);
         }
 
         Saml2Configuration saml2Config;
@@ -201,7 +201,7 @@ public sealed class SamlController : ControllerBase
             // Test SSO path passes allowExpiredCert and never throws. Refuse the round-trip instead
             // of redirecting to the IdP against a stale trust anchor.
             _logger.LogWarning("SAML rejected for tenant {TenantId}: state={SamlState}",
-                tenant.TenantId, "idp_cert_expired");
+                tenantId, "idp_cert_expired");
             return Problem(statusCode: 503,
                 detail: "SAML SSO is unavailable: the IdP signing certificate has expired. Ask an administrator to rotate it in Settings → Authentication.");
         }
@@ -227,7 +227,7 @@ public sealed class SamlController : ControllerBase
         if (!isTest)
         {
             await _samlConfig.IssuePendingRequestAsync(
-                authnRequest.Id.Value, tenant.TenantId!,
+                authnRequest.Id.Value, tenantId,
                 _time.GetUtcNow().Add(AuthnRequestLifetime), ct);
         }
 
@@ -260,15 +260,15 @@ public sealed class SamlController : ControllerBase
     [HttpGet("acs")]
     public async Task<IActionResult> Acs(CancellationToken ct)
     {
-        var tenant = ResolveTenant();
-        if (tenant is null)
+        string? tenantId = ResolveTenantId();
+        if (tenantId is null)
         {
             return NotFound();
         }
 
-        var cfg = await _samlConfig.GetAsync(tenant.TenantId!, ct);
+        var cfg = await _samlConfig.GetAsync(tenantId, ct);
 
-        var (isTest, testActorId, testError) = await ResolveTestModeAsync(tenant.TenantId!, ct);
+        var (isTest, testActorId, testError) = await ResolveTestModeAsync(tenantId, ct);
         if (testError is not null)
         {
             return testError;
@@ -290,13 +290,13 @@ public sealed class SamlController : ControllerBase
             }
         }
 
-        var configError = ValidateSamlConfigured(cfg, tenant.TenantId!, isTest);
+        var configError = ValidateSamlConfigured(cfg, tenantId, isTest);
         if (configError is not null)
         {
             return configError;
         }
 
-        var (authnResponse, samlError) = ParseSamlResponse(cfg!, tenant.TenantId!, isTest);
+        var (authnResponse, samlError) = ParseSamlResponse(cfg!, tenantId, isTest);
         if (samlError is not null)
         {
             return samlError;
@@ -325,22 +325,22 @@ public sealed class SamlController : ControllerBase
             string claimsJson = System.Text.Json.JsonSerializer.Serialize(claimsDict);
 
             await _login.RecordSamlTestAsync(
-                tenant.TenantId!, cfg!.IdpEntityId!, nameId, email, testActorId,
+                tenantId, cfg!.IdpEntityId!, nameId, email, testActorId,
                 sourceIp: HttpContext.GetNormalizedRemoteIp(), ct: ct);
-            await _samlConfig.RecordTestSuccessAsync(tenant.TenantId!, email ?? "", claimsJson, ct);
+            await _samlConfig.RecordTestSuccessAsync(tenantId, email ?? "", claimsJson, ct);
             return RedirectToTestResult();
         }
 
         // Production login hardening (the admin test path above is exempt — it has its own
         // one-shot via saml_test_runs). See ConsumeProductionGuardsAsync for the ordered checks.
-        var guardError = await ConsumeProductionGuardsAsync(authnResponse!, cfg!, tenant.TenantId!, ct);
+        var guardError = await ConsumeProductionGuardsAsync(authnResponse!, cfg!, tenantId, ct);
         if (guardError is not null)
         {
             return guardError;
         }
 
         string mappedRole = Dependably.Infrastructure.Saml.RoleAttributeResolver.Resolve(authnResponse!, cfg!);
-        var result = await _login.LoginSamlAsync(tenant.TenantId!, cfg!.IdpEntityId!, nameId, email,
+        var result = await _login.LoginSamlAsync(tenantId, cfg!.IdpEntityId!, nameId, email,
             new SamlLoginOptions(mappedRole, cfg.IdpCanAssignAdmin, HttpContext.GetNormalizedRemoteIp()), ct);
         if (result.Token is null)
         {
@@ -586,11 +586,10 @@ public sealed class SamlController : ControllerBase
         return Redirect("/saml-test-result" + qs.ToUriComponent());
     }
 
-    private TenantContext? ResolveTenant()
-    {
-        var ctx = HttpContext.Items[TenantContext.HttpItemsKey] as TenantContext;
-        return ctx is not null && ctx.IsTenant && ctx.TenantId is not null ? ctx : null;
-    }
+    private string? ResolveTenantId() =>
+        HttpContext.Items[TenantContext.HttpItemsKey] is TenantContext { IsTenant: true, TenantId: { } tenantId }
+            ? tenantId
+            : null;
 
     private string AcsUri() => _urls.Absolute(HttpContext, "/saml/acs");
     private string SpEntityIdDefault() => _urls.Absolute(HttpContext, "/saml/metadata");

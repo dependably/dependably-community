@@ -197,7 +197,8 @@ public sealed class OrgSettingsRepository
                 block_kev_ransomware, max_epss_percentile_tolerance,
                 block_install_scripts, verify_npm_signatures, verify_nuget_signatures,
                 verify_pypi_attestations, verify_rpm_signatures, verify_maven_signatures,
-                verify_terraform_signatures, block_revoked, block_ssvc_exploitation, verify_sbom_signatures)
+                verify_terraform_signatures, block_revoked, block_ssvc_exploitation, verify_sbom_signatures,
+                oci_scan_enforcement)
             VALUES (
                 @orgId, COALESCE(@proxyEnabled, 1), COALESCE(@maxScore, 10.0), @minAgeHours,
                 COALESCE(@blockDeprecated, 'off'), COALESCE(@blockMalicious, 'block'),
@@ -209,7 +210,7 @@ public sealed class OrgSettingsRepository
                 COALESCE(@verifyPyPiAttestations, 'off'), COALESCE(@verifyRpmSignatures, 'off'),
                 COALESCE(@verifyMavenSignatures, 'off'), COALESCE(@verifyTerraformSignatures, 'off'),
                 COALESCE(@blockRevoked, 'warn'), COALESCE(@blockSsvcExploitation, 'off'),
-                COALESCE(@verifySbomSignatures, 'off'))
+                COALESCE(@verifySbomSignatures, 'off'), COALESCE(@ociScanEnforcement, 'off'))
             ON CONFLICT(org_id) DO UPDATE SET
                 proxy_passthrough_enabled = COALESCE(@proxyEnabled, org_settings.proxy_passthrough_enabled),
                 max_osv_score_tolerance   = COALESCE(@maxScore, org_settings.max_osv_score_tolerance),
@@ -231,7 +232,8 @@ public sealed class OrgSettingsRepository
                 verify_rpm_signatures     = COALESCE(@verifyRpmSignatures, org_settings.verify_rpm_signatures),
                 verify_maven_signatures   = COALESCE(@verifyMavenSignatures, org_settings.verify_maven_signatures),
                 verify_terraform_signatures = COALESCE(@verifyTerraformSignatures, org_settings.verify_terraform_signatures),
-                verify_sbom_signatures    = COALESCE(@verifySbomSignatures, org_settings.verify_sbom_signatures)
+                verify_sbom_signatures    = COALESCE(@verifySbomSignatures, org_settings.verify_sbom_signatures),
+                oci_scan_enforcement      = COALESCE(@ociScanEnforcement, org_settings.oci_scan_enforcement)
             """,
             new
             {
@@ -260,6 +262,7 @@ public sealed class OrgSettingsRepository
                 verifyMavenSignatures = policy.VerifyMavenSignatures,
                 verifyTerraformSignatures = policy.VerifyTerraformSignatures,
                 verifySbomSignatures = policy.VerifySbomSignatures,
+                ociScanEnforcement = policy.OciScanEnforcement,
             });
         _orgs?.InvalidateSettingsCache(orgId);
     }
@@ -349,4 +352,6 @@ public sealed record ProxyPolicySettings(
     // like its six siblings — it governs SBOM upload admission, not a proxy fetch — but it is
     // wired through this same endpoint/record because ADR-sbom-author-signature says to reuse
     // the verify_*_signatures fail-closed-enablement mechanism this controller already applies.
-    string? VerifySbomSignatures = null);
+    string? VerifySbomSignatures = null,
+    // Appended for the same reason as BlockKevRansomware above.
+    string? OciScanEnforcement = null);

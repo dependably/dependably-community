@@ -250,6 +250,9 @@
   <data name="error.list.trailingGlobOnly" xml:space="preserve">
     <value>« * » n'est pris en charge qu'en dernier caractère (glob final).</value>
   </data>
+  <data name="error.list.reservedNamespaceDuplicate" xml:space="preserve">
+    <value>« {0} » est déjà réservé pour cet écosystème.</value>
+  </data>
   <data name="error.list.ecosystemInvalidDenylist" xml:space="preserve">
     <value>ecosystem doit être l'une des valeurs suivantes : npm, pypi, nuget, maven, cargo, golang, rpm, oci.</value>
   </data>
@@ -285,6 +288,12 @@
   </data>
   <data name="error.settings.offWarnBlock" xml:space="preserve">
     <value>Doit être « off », « warn » ou « block ».</value>
+  </data>
+  <data name="error.settings.ociScanDisabled" xml:space="preserve">
+    <value>L'analyse des images OCI n'est pas activée sur cette instance (OCI_SCAN_ENABLED) : chaque image serait refusée comme non analysée. Activez d'abord l'analyse, ou laissez ce réglage à « off ».</value>
+  </data>
+  <data name="error.settings.ociScannerNotSeen" xml:space="preserve">
+    <value>Aucun analyseur d'images OCI ne s'est encore connecté pour cette organisation : chaque image serait refusée comme non analysée. Démarrez d'abord un analyseur avec un jeton scan:oci, ou laissez ce réglage à « off ».</value>
   </data>
   <data name="error.risk.reasonInvalid" xml:space="preserve">
     <value>Doit être « blocklisted » ou « unknown ».</value>
@@ -484,6 +493,15 @@
   <data name="error.lookup.versionInvalid" xml:space="preserve">
     <value>La version n'est pas valide.</value>
   </data>
+  <data name="error.lookup.ociDigestRequired" xml:space="preserve">
+    <value>Pour une image OCI, version doit être le condensat (digest) de l'image (par exemple sha256:...).</value>
+  </data>
+  <data name="error.lookup.releaseRequired" xml:space="preserve">
+    <value>Pour apk, version doit inclure la révision du paquet (par exemple 8.5.0-r0). Pour rpm, elle doit être de la forme version-release avec une époque facultative (par exemple 1:3.0.7-24.el9).</value>
+  </data>
+  <data name="error.lookup.distroInvalid" xml:space="preserve">
+    <value>distro n'est pas une version que cette vérification peut traiter. Utilisez une version d'Alpine comme v3.20, ou Rocky Linux:9, AlmaLinux:9 ou Red Hat:enterprise_linux:9::baseos.</value>
+  </data>
   <data name="error.lookup.mavenCoordinateInvalid" xml:space="preserve">
     <value>Le nom Maven doit être une coordonnée « groupId:artifactId ».</value>
   </data>
@@ -492,6 +510,15 @@
   </data>
   <data name="error.lookup.upstreamUnavailable" xml:space="preserve">
     <value>La source amont pour « {0} » est temporairement indisponible. Réessayez sous peu.</value>
+  </data>
+  <data name="error.lookup.reservedVersionRequired" xml:space="preserve">
+    <value>Ce nom est réservé aux paquets « {0} » de votre organisation : sa dernière version n'est donc pas recherchée auprès de la source amont. Indiquez une version pour le vérifier.</value>
+  </data>
+  <data name="error.lookup.upstreamNotConfigured" xml:space="preserve">
+    <value>Aucune source amont n'est configurée pour « {0} » : il n'y a donc pas de dernière version à rechercher. Indiquez une version pour vérifier le paquet.</value>
+  </data>
+  <data name="error.lookup.passthroughOffVersionRequired" xml:space="preserve">
+    <value>Le relais proxy est désactivé pour votre organisation : la dernière version « {0} » n'est donc pas recherchée auprès de la source amont. Indiquez une version pour vérifier le paquet.</value>
   </data>
   <data name="email.invite.subject" xml:space="preserve">
     <value>Invitation à rejoindre {0} sur Dependably</value>
@@ -895,5 +922,83 @@ Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement votr
   </data>
   <data name="error.trustAnchor.labelTooLong" xml:space="preserve">
     <value>L'étiquette doit compter au plus {0} caractères.</value>
+  </data>
+  <data name="error.ociScan.claimMax" xml:space="preserve">
+    <value>max doit être compris entre 1 et {0}.</value>
+  </data>
+  <data name="error.ociScan.leaseLost" xml:space="preserve">
+    <value>Cette tâche n'est pas louée à l'appelant : son bail a expiré, ou une autre demande la détient.</value>
+  </data>
+  <data name="error.ociScan.failReason" xml:space="preserve">
+    <value>reason est requis et ne peut dépasser {0} caractères.</value>
+  </data>
+  <data name="error.ociScan.advisorySourceUnavailable" xml:space="preserve">
+    <value>Le résultat cite des avis que ce serveur ne détient pas, et sa source d'avis est injoignable pour les vérifier. Rien n'a été enregistré; la tâche sera relancée.</value>
+  </data>
+  <data name="error.ociScan.unavailable" xml:space="preserve">
+    <value>L'image référence cet objet, mais il ne peut pas être lu pour le moment. Signalez l'échec de la tâche comme réessayable et elle sera relancée.</value>
+  </data>
+  <data name="error.ociScan.platformsRequired" xml:space="preserve">
+    <value>Un résultat doit décrire au moins une plateforme.</value>
+  </data>
+  <data name="error.ociScan.platformsMax" xml:space="preserve">
+    <value>Un résultat peut décrire au plus {0} plateformes.</value>
+  </data>
+  <data name="error.ociScan.advisoriesMax" xml:space="preserve">
+    <value>Un résultat peut contenir au plus {0} avis de sécurité.</value>
+  </data>
+  <data name="error.ociScan.advisoryInvalid" xml:space="preserve">
+    <value>Chaque avis doit être un enregistrement OSV complet doté d'un identifiant.</value>
+  </data>
+  <data name="error.ociScan.platformInvalid" xml:space="preserve">
+    <value>Chaque plateforme exige un nom distinct, une version d'analyseur, une version d'extraction et une source OSV.</value>
+  </data>
+  <data name="error.ociScan.gapsInvalid" xml:space="preserve">
+    <value>Chaque plateforme peut énumérer au plus {0} lacunes de couverture, aucune vide.</value>
+  </data>
+  <data name="error.ociScan.componentsInvalid" xml:space="preserve">
+    <value>Chaque plateforme doit énumérer ses composants, au plus {0} au total.</value>
+  </data>
+  <data name="error.ociScan.componentInvalid" xml:space="preserve">
+    <value>Chaque composant exige un purl, un écosystème, un nom et une version, et aucun champ texte ne peut dépasser {0} caractères.</value>
+  </data>
+  <data name="error.ociScan.findingsMax" xml:space="preserve">
+    <value>Un résultat peut contenir au plus {0} constats au total, tous composants confondus.</value>
+  </data>
+  <data name="error.ociScan.vulnsMax" xml:space="preserve">
+    <value>Un composant peut énumérer au plus {0} avis de sécurité.</value>
+  </data>
+  <data name="error.ociScan.vulnUnknown" xml:space="preserve">
+    <value>Chaque constat doit nommer un avis dont l'enregistrement OSV figure parmi les avis du résultat.</value>
+  </data>
+  <data name="error.ociScan.reachabilityInvalid" xml:space="preserve">
+    <value>reachability doit valoir reachable, not_observed ou unknown.</value>
+  </data>
+  <data name="error.ociScan.vulnTextTooLong" xml:space="preserve">
+    <value>Les champs texte d'un constat ne peuvent dépasser {0} caractères.</value>
+  </data>
+  <data name="error.ociScan.platformUnknown" xml:space="preserve">
+    <value>Le résultat d'analyse de l'image ne contient pas cette plateforme.</value>
+  </data>
+  <data name="error.ociScan.contentGapsNotSubset" xml:space="preserve">
+    <value>Les contentGaps de chaque plateforme doivent faire partie de ses gaps.</value>
+  </data>
+  <data name="error.ociScan.verdictInvalid" xml:space="preserve">
+    <value>Le verdict d'un composant exige un status reachable, not_observed ou unknown, et aucun champ texte ne peut dépasser {0} caractères.</value>
+  </data>
+  <data name="error.ociScan.attemptRequired" xml:space="preserve">
+    <value>attempt est requis : transmettez l'attempt renvoyé par la réclamation.</value>
+  </data>
+  <data name="error.ociScan.inventoryChanged" xml:space="preserve">
+    <value>L'image a été extraite de nouveau après la lecture de son inventaire; ces correspondances ne s'appliquent plus. Rien n'a été enregistré.</value>
+  </data>
+  <data name="error.ociScan.findingUnknown" xml:space="preserve">
+    <value>Chaque constat doit désigner, une seule fois, un composant enregistré de cette image sur la plateforme sous laquelle il figure.</value>
+  </data>
+  <data name="error.ociScan.matchPlatformInvalid" xml:space="preserve">
+    <value>Chaque plateforme exige un nom distinct, le coverageId renvoyé par l'inventaire, une version du scanner et une source OSV.</value>
+  </data>
+  <data name="error.ociScan.platformsIncomplete" xml:space="preserve">
+    <value>Un résultat de nouvelle correspondance doit couvrir chaque plateforme enregistrée de l'image.</value>
   </data>
 </root>

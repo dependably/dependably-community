@@ -428,6 +428,14 @@ public sealed partial class HexController
             return File(existing, "application/gzip", $"{name}-{version}.tar.gz");
         }
 
+        // A name reserved after its tarball was cached keeps serving the docs already held, but
+        // never asks the upstream for docs it does not hold: the same decision the package index
+        // and the tarball miss path apply to a reserved name.
+        if (await _svc.Reserved.IsReservedAsync(orgId, Ecosystem, name, ct))
+        {
+            return NotFound();
+        }
+
         var upstreamDocs = await FetchDocsFromUpstreamAsync(orgId, name, version, docsKey, ct);
         return upstreamDocs is null ? NotFound() : File(upstreamDocs, "application/gzip", $"{name}-{version}.tar.gz");
     }

@@ -9,7 +9,10 @@ namespace Dependably.Infrastructure;
 /// dependency between resolver registration and FirstBootService.
 ///
 /// If no tenant exists yet (FirstBoot has not run, or the tenant was somehow purged), returns
-/// <see cref="TenantContext.Uninitialized"/>. The middleware translates that into a 503.
+/// <see cref="TenantContext.Uninitialized"/>. <c>TenantStatusEnforcementMiddleware</c> answers a
+/// protocol request under it with 404, and org-scoped management routes (those behind
+/// <c>OrgAccessGuard</c>) refuse it the same way. Pre-login surfaces such as
+/// <c>/api/v1/bootstrap</c> and <c>/api/v1/auth/methods</c> still answer it.
 /// </summary>
 public sealed class SingleTenantResolver : ITenantResolver
 {
@@ -25,7 +28,7 @@ public sealed class SingleTenantResolver : ITenantResolver
         await using var conn = await _db.OpenAsync(ct);
 
         // Active tenants only — if the operator soft-deletes the single tenant, the install
-        // becomes Uninitialized (503) until restore. Order is for determinism on the unlikely
+        // becomes Uninitialized (404) until restore. Order is for determinism on the unlikely
         // edge of multiple rows. Usage posture rides along for the usage-cap gate. Status flows through to TenantContext so
         // TenantStatusEnforcementMiddleware can refuse a suspended/archived/deleting single
         // tenant the same way it refuses any other status; the operator plane is unreachable in

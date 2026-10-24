@@ -3,10 +3,20 @@ using System.Security.Cryptography;
 namespace Dependably.Infrastructure.Identity;
 
 /// <summary>
-/// AES-GCM implementation of <see cref="IMfaSecretProtector"/>. A single
-/// <see cref="System.Security.Cryptography.AesGcm"/> instance is created lazily per protector
-/// instance and reused across calls. <see cref="System.Security.Cryptography.AesGcm"/> is
-/// thread-safe for concurrent Encrypt/Decrypt operations on .NET 8+.
+/// AES-GCM implementation of <see cref="IMfaSecretProtector"/>. One
+/// <see cref="System.Security.Cryptography.AesGcm"/> instance is created per protector and reused
+/// across calls, and every Encrypt/Decrypt on it is serialized under <see cref="_aesGate"/>.
+///
+/// <para>The lock is load-bearing. <see cref="System.Security.Cryptography.AesGcm"/> makes no
+/// thread-safety guarantee for instance members, and on Linux it does not have it: the
+/// OpenSSL-backed implementation keeps one cipher context per instance and re-keys its IV on
+/// every call, so two overlapping calls trample each other's state. The result is an
+/// authentication failure, a silently wrong plaintext, or — from <see cref="Protect"/> — stored
+/// ciphertext that can never be decrypted. This type backs the singleton
+/// <see cref="EnvelopeProtector"/> and <see cref="IMfaSecretProtector"/>, which concurrent
+/// requests and the per-org delivery workers share, so overlap is the normal case, not an edge
+/// one. The macOS implementation is stateless per call, which is why a race here does not
+/// reproduce on a developer Mac.</para>
 /// </summary>
 internal sealed class MfaSecretProtector : IMfaSecretProtector, IDisposable
 {
@@ -15,6 +25,7 @@ internal sealed class MfaSecretProtector : IMfaSecretProtector, IDisposable
     private const int TagSize = 16;      // 128-bit authentication tag
 
     private readonly AesGcm _aes;
+    private readonly Lock _aesGate = new();
 
     public MfaSecretProtector(byte[] key)
     {
@@ -34,7 +45,10 @@ internal sealed class MfaSecretProtector : IMfaSecretProtector, IDisposable
         byte[] ciphertext = new byte[plaintextBytes.Length];
         byte[] tag = new byte[TagSize];
 
-        _aes.Encrypt(nonce, plaintextBytes, ciphertext, tag);
+        lock (_aesGate)
+        {
+            _aes.Encrypt(nonce, plaintextBytes, ciphertext, tag);
+        }
 
         // Layout: nonce (12) || tag (16) || ciphertext (n)
         byte[] output = new byte[NonceSize + TagSize + ciphertext.Length];
@@ -70,7 +84,10 @@ internal sealed class MfaSecretProtector : IMfaSecretProtector, IDisposable
 
         try
         {
-            _aes.Decrypt(nonce, encryptedBytes, tag, plaintext);
+            lock (_aesGate)
+            {
+                _aes.Decrypt(nonce, encryptedBytes, tag, plaintext);
+            }
         }
         catch (CryptographicException ex)
         {
@@ -80,5 +97,11 @@ internal sealed class MfaSecretProtector : IMfaSecretProtector, IDisposable
         return System.Text.Encoding.UTF8.GetString(plaintext);
     }
 
-    public void Dispose() => _aes.Dispose();
+    public void Dispose()
+    {
+        lock (_aesGate)
+        {
+            _aes.Dispose();
+        }
+    }
 }

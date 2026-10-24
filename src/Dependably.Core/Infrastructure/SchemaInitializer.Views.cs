@@ -32,11 +32,13 @@ namespace Dependably.Infrastructure;
 ///
 /// The drop that recreate-table migrations need is taken lazily instead of unconditionally. A view
 /// holding a dependency on a table blocks a Postgres <c>ALTER COLUMN</c> and dangles across a SQLite
-/// DROP+RENAME, and several one-time migrations do exactly that — so <c>RunOnceAsync</c> drops the
-/// views once, immediately before the first migration body it actually runs. A boot with nothing
-/// pending runs no migration body and so takes no drop at all. Creation still runs last, once every
-/// column and table shape the bodies reference is guaranteed to exist, including those added by the
-/// additive migrations that run after the schema file.
+/// DROP+RENAME, and several one-time migrations do exactly that — so each of those declares
+/// <c>dropsViews</c>, and <c>RunOnceAsync</c> drops the views once, immediately before the first such
+/// body it actually runs. A boot whose pending migrations only rewrite rows (a backfill, a purl
+/// repair) takes no drop at all: during a blue-green cutover the previous release is still reading
+/// through the views, and would fail every one of those reads for as long as the drop lasted.
+/// Creation still runs last, once every column and table shape the bodies reference is guaranteed
+/// to exist, including those added by the additive migrations that run after the schema file.
 ///
 /// A view's shape is under the same blue-green rule as a table's: blue reads the view while green
 /// replaces it, so a view may gain columns but may not drop, rename, or retype them in one release
@@ -279,11 +281,11 @@ public sealed partial class SchemaInitializer
         ("org_billable_storage_bytes", OrgBillableStorageBytesView),
     ];
 
-    // Set once per boot, the first time a one-time migration is about to run a body that may reshape
-    // a table a view depends on. A boot with no pending migration never sets it and never drops.
+    // Set once per boot, the first time a one-time migration is about to run a body that declares
+    // dropsViews. A boot with no pending reshape never sets it and never drops.
     private bool _viewsDropped;
 
-    // Called by RunOnceAsync immediately before it executes a pending migration body. Idempotent
+    // Called by RunOnceAsync immediately before it executes a pending dropsViews body. Idempotent
     // within a boot, so every subsequent pending migration in the same run reuses the first drop.
     private async Task EnsureViewsDroppedAsync(DbConnection conn)
     {

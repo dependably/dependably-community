@@ -42,10 +42,11 @@ public sealed class SbomComponentScanner
     }
 
     /// <summary>
-    /// Scans one batch and persists every hydrated advisory hit. Non-hydrated advisories are
-    /// skipped (same precondition as <see cref="VulnerabilityRepository.UpsertVulnerabilityAsync"/>
+    /// Scans one batch and persists every hydrated advisory hit. A non-hydrated advisory is never
+    /// upserted (same precondition as <see cref="VulnerabilityRepository.UpsertVulnerabilityAsync"/>
     /// — <c>/querybatch</c> returns id+modified only, and persisting a partial record would
-    /// clobber existing severity/cvss data via the upsert).
+    /// clobber existing severity/cvss data via the upsert): one the instance already stores is
+    /// linked from its stored row, and any other leaves its component unstamped for the next pass.
     /// </summary>
     public async Task<SbomScanBatchResult> ScanBatchAsync(
         IReadOnlyList<ScannableSbomComponent> batch, CancellationToken ct)
@@ -81,6 +82,23 @@ public sealed class SbomComponentScanner
         }
 
         var results = batchResult.Results;
+        List<ResolvedPurlAdvisories> resolved;
+        try
+        {
+            resolved = await BatchAdvisoryResolver.ResolveAsync(_vulns, results, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            RecordOutcome(scanned: 0, deferred: batch.Count);
+            return Deferred();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not resolve the advisories OSV returned for {Count} SBOM component(s); deferring.", batch.Count);
+            RecordOutcome(scanned: 0, deferred: batch.Count);
+            return Deferred();
+        }
+
         var scanned = new HashSet<string>(StringComparer.Ordinal);
         var advisoryCounts = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -95,7 +113,21 @@ public sealed class SbomComponentScanner
                 results.Count, batch.Count);
         }
 
-        for (int i = 0; i < batch.Count && i < results.Count; i++)
+        await PersistAnsweredAsync(batch, resolved, results.Count, scanned, advisoryCounts, ct);
+
+        // Every component in the batch is accounted for exactly once: persisted-and-stamped
+        // counts as scanned, everything else (the unanswered tail, an incomplete answer, an
+        // ecosystem the source has no feed for, a per-component persist failure) counts as deferred — coverage that did not land this pass and stays in the
+        // scan work queue for the next one.
+        RecordOutcome(scanned: scanned.Count, deferred: batch.Count - scanned.Count);
+        return new SbomScanBatchResult(scanned, advisoryCounts, Deferred: false);
+    }
+
+    private async Task PersistAnsweredAsync(
+        IReadOnlyList<ScannableSbomComponent> batch, List<ResolvedPurlAdvisories> resolved, int answered,
+        HashSet<string> scanned, Dictionary<string, int> advisoryCounts, CancellationToken ct)
+    {
+        for (int i = 0; i < batch.Count && i < answered; i++)
         {
             if (ct.IsCancellationRequested)
             {
@@ -103,7 +135,18 @@ public sealed class SbomComponentScanner
             }
 
             var component = batch[i];
-            var (outcome, linked) = await PersistComponentAsync(component, results[i], ct);
+
+            // A source holding no feed for the component's ecosystem (a local dump sideloaded
+            // without it) answers it empty, which is silence rather than a clean result.
+            if (!await _osv.HasCoverageFor(component.Ecosystem))
+            {
+                _logger.LogDebug(
+                    "OSV source currently carries no advisory coverage for {Ecosystem}; SBOM component {Purl} left unscanned.",
+                    component.Ecosystem, component.Purl);
+                continue;
+            }
+
+            var (outcome, linked) = await PersistComponentAsync(component, resolved[i], ct);
             if (outcome == ComponentScanOutcome.Cancelled)
             {
                 break;
@@ -115,29 +158,33 @@ public sealed class SbomComponentScanner
                 advisoryCounts[component.Id] = linked;
             }
         }
-
-        // Every component in the batch is accounted for exactly once: persisted-and-stamped
-        // counts as scanned, everything else (the unanswered tail, a per-component persist
-        // failure) counts as deferred — coverage that did not land this pass and stays in the
-        // scan work queue for the next one.
-        RecordOutcome(scanned: scanned.Count, deferred: batch.Count - scanned.Count);
-        return new SbomScanBatchResult(scanned, advisoryCounts, Deferred: false);
     }
 
-    private enum ComponentScanOutcome { Persisted, Failed, Cancelled }
+    private enum ComponentScanOutcome { Persisted, Incomplete, Failed, Cancelled }
 
     /// <summary>
-    /// Persists one component's advisories and stamps it checked. A per-component failure is
-    /// logged and reported as <see cref="ComponentScanOutcome.Failed"/> so the batch continues and
-    /// the component stays unstamped — it is counted as deferred and returns on the next pass.
+    /// Persists one component's resolved advisories and, when its answer is complete, stamps it
+    /// checked. An incomplete answer (an advisory whose detail never arrived and that the instance
+    /// does not hold) still links what did resolve but leaves the component unstamped, reported as
+    /// <see cref="ComponentScanOutcome.Incomplete"/>. A per-component failure is logged and
+    /// reported as <see cref="ComponentScanOutcome.Failed"/> so the batch continues and the
+    /// component stays unstamped. Both count as deferred and return on the next pass.
     /// Cancellation stops the batch instead.
     /// </summary>
     private async Task<(ComponentScanOutcome Outcome, int Linked)> PersistComponentAsync(
-        ScannableSbomComponent component, List<OsvAdvisory> advisories, CancellationToken ct)
+        ScannableSbomComponent component, ResolvedPurlAdvisories resolution, CancellationToken ct)
     {
         try
         {
-            int linked = await LinkHydratedAdvisoriesAsync(component, advisories, ct);
+            int linked = await LinkAdvisoriesAsync(component, resolution.Advisories, ct);
+            if (!resolution.IsComplete)
+            {
+                _logger.LogWarning(
+                    "OSV answered SBOM component {Purl} incompletely ({Count} matched advisory(ies) without detail); left unscanned.",
+                    component.Purl, resolution.UnresolvedIds.Count);
+                return (ComponentScanOutcome.Incomplete, linked);
+            }
+
             await _sbomVulns.MarkComponentCheckedAsync(component.Id, ct);
             return (ComponentScanOutcome.Persisted, linked);
         }
@@ -155,19 +202,17 @@ public sealed class SbomComponentScanner
         }
     }
 
-    /// <summary>Links every hydrated advisory to the component and answers how many landed.</summary>
-    private async Task<int> LinkHydratedAdvisoriesAsync(
-        ScannableSbomComponent component, List<OsvAdvisory> advisories, CancellationToken ct)
+    /// <summary>
+    /// Links every resolved advisory to the component and answers how many landed. A hydrated one
+    /// is upserted; one already stored is linked from its stored row and never rewritten.
+    /// </summary>
+    private async Task<int> LinkAdvisoriesAsync(
+        ScannableSbomComponent component, IReadOnlyList<ResolvedAdvisory> advisories, CancellationToken ct)
     {
         int linked = 0;
-        foreach (var advisory in advisories)
+        foreach (var (advisory, storedVulnId) in advisories)
         {
-            if (!advisory.IsHydrated)
-            {
-                continue;
-            }
-
-            string vulnId = await _vulns.UpsertVulnerabilityAsync(
+            string vulnId = storedVulnId ?? await _vulns.UpsertVulnerabilityAsync(
                 advisory, component.Ecosystem, component.PurlName ?? "", ct);
             await _sbomVulns.LinkComponentVulnAsync(component.Id, vulnId, ct);
             linked++;

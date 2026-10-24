@@ -458,9 +458,9 @@ public sealed partial class PackageRepository
     /// never be revisited and its <c>upstream_latest_version</c> / hosted <c>versions_behind</c>
     /// would freeze at eviction time.
     ///
-    /// Restricted to the upstream-latest-supported ecosystems and to packages already proven to
-    /// track an upstream (<c>upstream_latest_checked_at IS NOT NULL</c>), so a purely-internal name
-    /// that was never proxied is never fetched. Excludes soft-deleted / air-gapped tenants and
+    /// Restricted to the refresh's ecosystems (<see cref="DeprecationRefreshEcosystems.All"/>) and
+    /// to packages already proven to track an upstream (<c>upstream_latest_checked_at IS NOT
+    /// NULL</c>), so a purely-internal name that was never proxied is never fetched. Excludes soft-deleted / air-gapped tenants and
     /// packages carrying no hosted version. Ordered oldest-checked first so a partial run makes
     /// progress on the most stale packages.
     /// </summary>
@@ -481,12 +481,13 @@ public sealed partial class PackageRepository
             FROM packages p
             JOIN orgs o ON o.id = p.org_id
             LEFT JOIN org_settings os ON os.org_id = p.org_id
-            WHERE p.ecosystem IN ('npm', 'pypi', 'nuget', 'maven')
+            WHERE p.ecosystem IN ('npm', 'pypi', 'nuget', 'maven', 'hex')
               AND p.upstream_latest_checked_at IS NOT NULL
               AND p.upstream_latest_checked_at < @threshold
               AND o.deleted_at IS NULL
               AND o.status = 'active'
               AND COALESCE(os.air_gapped, 0) = 0
+              AND COALESCE(os.proxy_passthrough_enabled, 1) = 1
               AND EXISTS (SELECT 1 FROM package_versions pv
                           WHERE pv.package_id = p.id AND pv.origin = 'uploaded')
               AND NOT EXISTS (SELECT 1 FROM cache_artifact ca

@@ -119,6 +119,42 @@ public sealed class SystemAdminUserStoreTests : IAsyncLifetime
         Assert.Null(await store.GetAuthenticatorKeyAsync(user, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task GetAuthenticatorKeyAsync_CorruptedCiphertext_ReturnsNullAndWarnsNamingTheAdminNotTheValue()
+    {
+        var logger = new RecordingLogger<SystemAdminUserStore>();
+        var store = new SystemAdminUserStore(_db, _protector, _recoveryHasher, logger);
+        string corrupted = CorruptCiphertext.Totp(_protector, "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP");
+        var broken = new SystemAdminUser { Id = "sa1", AuthenticatorKey = corrupted };
+        var sibling = new SystemAdminUser { Id = "sa2" };
+        await store.SetAuthenticatorKeyAsync(sibling, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", CancellationToken.None);
+
+        Assert.Null(await store.GetAuthenticatorKeyAsync(broken, CancellationToken.None));
+        Assert.Equal("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            await store.GetAuthenticatorKeyAsync(sibling, CancellationToken.None));
+
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("sa1", warning.Message);
+        Assert.Contains(ProtectedSecretKinds.SystemAdminTotpKey, warning.Message);
+        Assert.DoesNotContain(corrupted, warning.AllText);
+    }
+
+    [Fact]
+    public async Task GetAuthenticatorKeyAsync_PlaintextBase32Key_IsNeverReturned_AndWarnsUnexpectedPlaintext()
+    {
+        var logger = new RecordingLogger<SystemAdminUserStore>();
+        var store = new SystemAdminUserStore(_db, _protector, _recoveryHasher, logger);
+        var user = new SystemAdminUser { Id = "sa1", AuthenticatorKey = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP" };
+
+        Assert.Null(await store.GetAuthenticatorKeyAsync(user, CancellationToken.None));
+
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("sa1", warning.Message);
+        Assert.Contains(ProtectedSecretKinds.SystemAdminTotpKey, warning.Message);
+        Assert.Contains(ProtectedSecretFailureReasons.UnexpectedPlaintext, warning.Message);
+        Assert.DoesNotContain("JBSWY3DPEHPK3PXP", warning.AllText);
+    }
+
     // ── recovery codes ────────────────────────────────────────────────────────
 
     [Fact]

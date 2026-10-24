@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
@@ -166,6 +167,8 @@ public static class AuthStartupExtensions
             current = await versions.GetCurrentVersionAsync(sub);
         }
 
+        // Null means the principal no longer has a current version: the row is gone, or the user
+        // or admin is locked or disabled.
         if (current is null || claimVersion < current.Value)
         {
             ctx.Fail("Session has been invalidated.");
@@ -303,12 +306,23 @@ public static class AuthStartupExtensions
         // Cross-replica rendered-metadata invalidation. Replaces the no-op bus Core registered,
         // so a push on one replica evicts the matching packument / simple index / registration /
         // maven-metadata / repodata entries on every other replica instead of leaving them to
-        // expire on their TTL. Registered as a hosted service too — the same singleton both
-        // publishes and subscribes, so a received message is recognisably its own and skipped.
-        builder.Services.AddSingleton<RedisMetadataInvalidationBus>();
-        builder.Services.AddSingleton<IMetadataInvalidationBus>(
-            sp => sp.GetRequiredService<RedisMetadataInvalidationBus>());
-        builder.Services.AddHostedService(sp => sp.GetRequiredService<RedisMetadataInvalidationBus>());
+        // expire on their TTL. Replace rather than Add, so the collection holds one bus
+        // descriptor instead of two resolved by registration order, and an enumeration of
+        // IMetadataInvalidationBus cannot surface the no-op. Registered as a hosted service too —
+        // the same singleton both publishes and subscribes, so a received message is
+        // recognisably its own and skipped.
+        //
+        // The bus reaches the receiver through a deferred resolver because the receiver evicts
+        // through the coordinator, which publishes through this bus; an eager edge closes that
+        // loop and the container deadlocks resolving it. The bus itself is mapped by type, not
+        // through a forwarding factory, so build-time validation walks its constructor and
+        // reports a cycle should one be wired back in.
+        builder.Services.AddSingleton<Func<MetadataInvalidationReceiver>>(
+            sp => () => sp.GetRequiredService<MetadataInvalidationReceiver>());
+        builder.Services.Replace(
+            ServiceDescriptor.Singleton<IMetadataInvalidationBus, RedisMetadataInvalidationBus>());
+        builder.Services.AddHostedService(
+            sp => (RedisMetadataInvalidationBus)sp.GetRequiredService<IMetadataInvalidationBus>());
 
         // Func<IDatabase> defers resolution until after DI is built.
         builder.Services.AddDataProtection()

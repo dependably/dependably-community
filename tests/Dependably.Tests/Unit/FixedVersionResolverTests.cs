@@ -105,6 +105,75 @@ public sealed class FixedVersionResolverTests
     }
 
     [Fact]
+    public void Resolve_SinglePackageListedUnderSeveralEntries_StillFallsBackWhenTheSpellingDiffers()
+    {
+        var affected = new[]
+        {
+            Entry("Left_Pad", "pkg:npm/Left_Pad", Semver(Introduced("0"), Fixed("1.0.5"))),
+            Entry("Left_Pad", "pkg:npm/Left_Pad", Semver(Introduced("2.0.0"), Fixed("2.0.3"))),
+        };
+
+        Assert.Equal("2.0.3", FixedVersionResolver.Resolve(affected, "npm", "leftpad", "2.0.1"));
+    }
+
+    [Fact]
+    public void Resolve_MultiPackageRecordWithNoNameMatch_ReturnsNull_NeverAnotherPackagesFix()
+    {
+        // The record lists two packages, neither of them the one asked about, and both ranges
+        // contain the version: nothing says which entry would be the caller's, so no fix is offered.
+        Assert.Null(FixedVersionResolver.Resolve(ZopeRecord(), "pypi", "zope-schema", "5.0.0"));
+    }
+
+    [Theory]
+    [InlineData("zope-interface")]
+    [InlineData("zope_interface")]
+    [InlineData("Zope.Interface")]
+    [InlineData("zope.interface")]
+    public void Resolve_MultiPackagePyPiRecord_MatchesTheCanonicalNameOfTheOsvSpelling(string requested)
+    {
+        // OSV spells the package zope.interface; a PyPI caller sends the canonical zope-interface
+        // (PEP 503 folds runs of '-', '_' and '.' to '-'). They are the same package.
+        Assert.Equal("5.1.0", FixedVersionResolver.Resolve(ZopeRecord(), "pypi", requested, "5.0.0"));
+    }
+
+    [Fact]
+    public void Resolve_MultiPackagePyPiRecord_MatchesTheCanonicalPurlTail_WhenTheEntryHasNoName()
+    {
+        var affected = new[]
+        {
+            new OsvAffectedDetail(new OsvAffectedPackageRef("PyPI", "zope.event", "pkg:pypi/zope.event"),
+                new[] { new OsvRange("ECOSYSTEM", null, new[] { Introduced("0"), Fixed("9.0") }) }, null, null, null),
+            new OsvAffectedDetail(new OsvAffectedPackageRef("PyPI", null, "pkg:pypi/zope.interface"),
+                new[] { new OsvRange("ECOSYSTEM", null, new[] { Introduced("0"), Fixed("5.1.0") }) }, null, null, null),
+        };
+
+        Assert.Equal("5.1.0", FixedVersionResolver.Resolve(affected, "pypi", "zope-interface", "5.0.0"));
+    }
+
+    [Fact]
+    public void Resolve_OnePyPiPackageSpelledTwoWays_CountsAsOnePackage_SoTheFallbackStillApplies()
+    {
+        var affected = new[]
+        {
+            new OsvAffectedDetail(new OsvAffectedPackageRef("PyPI", "jupyter_server", "pkg:pypi/jupyter_server"),
+                new[] { new OsvRange("ECOSYSTEM", null, new[] { Introduced("0"), Fixed("1.0.1") }) }, null, null, null),
+            new OsvAffectedDetail(new OsvAffectedPackageRef("PyPI", "jupyter-server", "pkg:pypi/jupyter-server"),
+                new[] { new OsvRange("ECOSYSTEM", null, new[] { Introduced("2.0.0"), Fixed("2.11.2") }) }, null, null, null),
+        };
+
+        // "jupyterserver" matches neither spelling, but both entries are one package.
+        Assert.Equal("2.11.2", FixedVersionResolver.Resolve(affected, "pypi", "jupyterserver", "2.5.0"));
+    }
+
+    private static OsvAffectedDetail[] ZopeRecord() =>
+    [
+        new OsvAffectedDetail(new OsvAffectedPackageRef("PyPI", "zope.event", "pkg:pypi/zope.event"),
+            new[] { new OsvRange("ECOSYSTEM", null, new[] { Introduced("0"), Fixed("9.0") }) }, null, null, null),
+        new OsvAffectedDetail(new OsvAffectedPackageRef("PyPI", "zope.interface", "pkg:pypi/zope.interface"),
+            new[] { new OsvRange("ECOSYSTEM", null, new[] { Introduced("0"), Fixed("5.1.0") }) }, null, null, null),
+    ];
+
+    [Fact]
     public void Resolve_MatchesOnThePurlNameTail()
     {
         var affected = new[]

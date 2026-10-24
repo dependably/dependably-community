@@ -16,7 +16,7 @@ internal sealed class DependablyUser
     public string? PasswordHash { get; set; }
     /// <summary>Maps to <c>users.mfa_enabled</c> (0/1).</summary>
     public bool TwoFactorEnabled { get; set; }
-    /// <summary>Plaintext TOTP key held in memory only; encrypted before storage via <see cref="IMfaSecretProtector"/>.</summary>
+    /// <summary>The TOTP key as stored: ciphertext from <see cref="IMfaSecretProtector"/>, decrypted only by the store's <c>GetAuthenticatorKeyAsync</c>.</summary>
     public string? AuthenticatorKey { get; set; }
     /// <summary>JSON array of SHA-256 hashes of one-time recovery codes, as stored in the DB.</summary>
     public string? RecoveryCodes { get; set; }

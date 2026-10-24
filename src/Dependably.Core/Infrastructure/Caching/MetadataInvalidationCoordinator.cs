@@ -18,6 +18,10 @@ namespace Dependably.Infrastructure.Caching;
 /// under-enumerate; <see cref="EvictLocal"/> is shared verbatim by the publish path and the
 /// subscriber path, so a message received from a peer evicts exactly what a local mutation
 /// evicts.</para>
+///
+/// <para>The same holds for an org-wide change (a reserved namespace added or removed, a
+/// proxy-settings write): <see cref="InvalidateOrg"/> and a received
+/// <see cref="MetadataInvalidation.ForOrg"/> message both run <see cref="OrgWideCacheEviction"/>.</para>
 /// </summary>
 public sealed class MetadataInvalidationCoordinator
 {
@@ -27,8 +31,13 @@ public sealed class MetadataInvalidationCoordinator
     private readonly RenderedResponseCache<MavenMetadataKey> _maven;
     private readonly RenderedResponseCache<RpmLocalRepodataKey> _rpmLocal;
     private readonly MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> _rpmMerged;
+    private readonly OrgWideCacheEviction _orgWide;
     private readonly IMetadataInvalidationBus _bus;
 
+    // Dependency-injection constructor: one cache per ecosystem plus the org-wide expansion and
+    // the transport. Grouping the caches into an aggregate would hide dependencies without
+    // adding cohesion.
+#pragma warning disable S107
     public MetadataInvalidationCoordinator(
         RenderedResponseCache<NpmPackumentKey> npm,
         RenderedResponseCache<PyPiSimpleIndexKey> pypi,
@@ -36,7 +45,9 @@ public sealed class MetadataInvalidationCoordinator
         RenderedResponseCache<MavenMetadataKey> maven,
         RenderedResponseCache<RpmLocalRepodataKey> rpmLocal,
         MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> rpmMerged,
+        OrgWideCacheEviction orgWide,
         IMetadataInvalidationBus bus)
+#pragma warning restore S107
     {
         _npm = npm;
         _pypi = pypi;
@@ -44,6 +55,7 @@ public sealed class MetadataInvalidationCoordinator
         _maven = maven;
         _rpmLocal = rpmLocal;
         _rpmMerged = rpmMerged;
+        _orgWide = orgWide;
         _bus = bus;
     }
 
@@ -58,6 +70,15 @@ public sealed class MetadataInvalidationCoordinator
         EvictLocal(invalidation);
         _bus.Publish(invalidation);
     }
+
+    /// <summary>
+    /// Expires everything this replica cached from <paramref name="orgId"/>'s reserved namespaces
+    /// and proxy settings, then broadcasts the org id so peer replicas do the same. Call it after
+    /// the change is committed: a peer that receives the message re-reads from the store. Like
+    /// <see cref="Invalidate"/>, the broadcast never throws, and a lost one leaves peers on their
+    /// TTLs.
+    /// </summary>
+    public void InvalidateOrg(string orgId) => Invalidate(MetadataInvalidation.ForOrg(orgId));
 
     /// <summary>
     /// Evicts this replica's entries for <paramref name="invalidation"/> without broadcasting —
@@ -83,6 +104,9 @@ public sealed class MetadataInvalidationCoordinator
                 break;
             case MetadataInvalidationEcosystems.Rpm:
                 EvictRpm(invalidation);
+                break;
+            case MetadataInvalidationEcosystems.Org:
+                _orgWide.Evict(invalidation.OrgId);
                 break;
             default:
                 // Unknown ecosystem: nothing to expand. Reached only for a peer message from a
@@ -141,8 +165,9 @@ public sealed class MetadataInvalidationCoordinator
     }
 
     // Maven: the artifact-level maven-metadata.xml always, plus the version-level SNAPSHOT
-    // document when the mutation named a version. The two are different documents at adjacent
-    // path depths and never share an entry.
+    // document when the mutation named a version — each in both its local-only and proxy-allowed
+    // variants. The two documents sit at adjacent path depths and never share an entry; the two
+    // variants are the rendering decision, which a reservation or registry change flips.
     private void EvictMaven(MetadataInvalidation inv)
     {
         if (inv.GroupId is not { Length: > 0 } groupId || inv.ArtifactId is not { Length: > 0 } artifactId)
@@ -151,9 +176,11 @@ public sealed class MetadataInvalidationCoordinator
         }
 
         _maven.Evict(new MavenMetadataKey(inv.OrgId, groupId, artifactId));
+        _maven.Evict(new MavenMetadataKey(inv.OrgId, groupId, artifactId) { IsProxy = true });
         if (inv.Version is { Length: > 0 } version)
         {
             _maven.Evict(new MavenMetadataKey(inv.OrgId, groupId, artifactId, version));
+            _maven.Evict(new MavenMetadataKey(inv.OrgId, groupId, artifactId, version) { IsProxy = true });
         }
     }
 
@@ -209,8 +236,7 @@ public sealed class MetadataInvalidationReceiver
         }
 
         _coordinator.EvictLocal(invalidation);
-        DependablyMeter.MetadataInvalidationsReceived.Add(
-            1, new KeyValuePair<string, object?>("ecosystem", invalidation.Ecosystem));
+        DependablyMeter.MetadataInvalidationsReceived.Add(1, invalidation.MetricTags());
         return true;
     }
 }

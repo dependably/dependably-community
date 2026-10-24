@@ -47,8 +47,70 @@ public sealed class PackageLookupTenantPolicyTests : IClassFixture<DependablyMul
         using var lenientDoc = JsonDocument.Parse(await lenientResp.Content.ReadAsStringAsync());
 
         Assert.Equal("blocked", strictDoc.RootElement.GetProperty("verdict").GetString());
-        Assert.Equal("Deprecated", strictDoc.RootElement.GetProperty("blockedReason").GetString());
+        Assert.Equal("deprecated", strictDoc.RootElement.GetProperty("blockedReason").GetString());
         Assert.NotEqual("blocked", lenientDoc.RootElement.GetProperty("verdict").GetString());
+    }
+
+    [Fact]
+    public async Task PassthroughOffOrg_NeverSendsTheNameUpstream_PassthroughOnOrgDoes()
+    {
+        // An org that turned proxy passthrough off has told the instance not to talk to its
+        // upstreams. A lookup there must not send the candidate name (with the org's stored
+        // upstream credentials) upstream; the metadata part is answered as unavailable instead.
+        // The passthrough-on tenant is the positive control that the same name does reach the
+        // stub when policy allows it.
+        string offPkg = $"lookup-ptoff-{Guid.NewGuid():N}"[..24];
+        string onPkg = $"lookup-pton-{Guid.NewGuid():N}"[..24];
+        StubDeprecatedNpmPackument(offPkg);
+        StubDeprecatedNpmPackument(onPkg);
+
+        var off = await _factory.CreateTenantAsync("ptoff");
+        var on = await _factory.CreateTenantAsync("pton");
+        await SetProxySettings(off, passthrough: false, "warn");
+        await SetProxySettings(on, passthrough: true, "warn");
+
+        using var offClient = await TenantOwnerClient(off);
+        using var onClient = await TenantOwnerClient(on);
+
+        var latestResp = await offClient.GetAsync($"/api/v1/lookup?ecosystem=npm&name={offPkg}");
+        var pinnedResp = await offClient.GetAsync($"/api/v1/lookup?ecosystem=npm&name={offPkg}&version=1.0.0");
+        var onResp = await onClient.GetAsync($"/api/v1/lookup?ecosystem=npm&name={onPkg}&version=1.0.0");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, latestResp.StatusCode);
+        using (var problem = JsonDocument.Parse(await latestResp.Content.ReadAsStringAsync()))
+        {
+            Assert.Equal("passthrough_off", problem.RootElement.GetProperty("reason").GetString());
+        }
+
+        Assert.Equal(HttpStatusCode.OK, pinnedResp.StatusCode);
+        using (var pinned = JsonDocument.Parse(await pinnedResp.Content.ReadAsStringAsync()))
+        {
+            var unavailable = pinned.RootElement.GetProperty("unavailableChecks").EnumerateArray()
+                .Select(e => e.GetString()).ToList();
+            Assert.Contains("deprecated", unavailable);
+            Assert.Contains("release_age", unavailable);
+        }
+
+        Assert.Equal(HttpStatusCode.OK, onResp.StatusCode);
+
+        var requested = _factory.MockUpstream.LogEntries.Select(e => e.RequestMessage?.Path ?? "").ToList();
+        Assert.DoesNotContain(requested, p => p.Contains(offPkg, StringComparison.Ordinal));
+        Assert.Contains(requested, p => p.Contains(onPkg, StringComparison.Ordinal));
+    }
+
+    private async Task SetProxySettings(
+        (string Slug, string TenantId, string OwnerId) tenant, bool passthrough, string blockDeprecated)
+    {
+        string jwt = await _factory.CreateTenantJwt(tenant.OwnerId, tenant.TenantId);
+        using var admin = _factory.CreateTenantClient(tenant.Slug);
+        admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+        var resp = await admin.PutAsJsonAsync("/api/v1/proxy-settings", new
+        {
+            proxyPassthroughEnabled = passthrough,
+            maxOsvScoreTolerance = 10.0,
+            blockDeprecated,
+        });
+        resp.EnsureSuccessStatusCode();
     }
 
     private void StubDeprecatedNpmPackument(string name)

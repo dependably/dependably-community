@@ -117,6 +117,25 @@ public sealed class NpmAuditBulkAdvisoriesTests
         """);
 
     /// <summary>
+    /// The aliases and fixed version ride on each advisory as snake_case extension properties
+    /// (npm ignores unknown keys); the fix is the one for the requested version.
+    /// </summary>
+    [Fact]
+    public async Task PackageWithAdvisory_CarriesAliasesAndFixedVersionExtensions()
+    {
+        var advisory = LodashAdvisory() with { Aliases = ["CVE-2021-23337"] };
+        await using var factory = await FactoryWithAsync(("lodash", advisory));
+        using var client = await AuthedClientAsync(factory);
+
+        var report = await PostBulkAsync(client, new() { ["lodash"] = ["4.17.20"] });
+
+        var first = report.RootElement.GetProperty("lodash")[0];
+        Assert.Equal("CVE-2021-23337", first.GetProperty("aliases")[0].GetString());
+        Assert.Equal("4.17.21", first.GetProperty("fixed_version").GetString());
+        Assert.False(first.TryGetProperty("fixedVersion", out _));
+    }
+
+    /// <summary>
     /// A package with a known advisory is reported, with npm's exact field names and a
     /// <c>vulnerable_versions</c> range rendered from the OSV interval.
     /// </summary>
@@ -518,6 +537,86 @@ public sealed class NpmAuditBulkAdvisoriesTests
     }
 
     /// <summary>
+    /// The batch is answered but one advisory's <c>GET /vulns/{id}</c> outlasts the HttpClient
+    /// timeout. That id is unhydrated, so the report cannot be vouched for: 503, not a 500 from
+    /// the timeout escaping the batch call. The twin, with the same advisory answered promptly,
+    /// is a clean 200, so the 503 comes from the timeout and nothing else.
+    /// </summary>
+    [Theory]
+    [InlineData(10, HttpStatusCode.ServiceUnavailable)]
+    [InlineData(0, HttpStatusCode.OK)]
+    public async Task RealOsvClient_HydrationTimesOut_Returns503(int hydrationDelaySeconds, HttpStatusCode expected)
+    {
+        using var osvServer = WireMockServer.Start();
+        osvServer
+            .Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(
+                """{"results":[{"vulns":[{"id":"GHSA-slow-hydr-0001","modified":"2026-01-01T00:00:00Z"}]}]}"""));
+        var hydration = Response.Create().WithStatusCode(HttpStatusCode.OK)
+            .WithBody("""{"id":"GHSA-slow-hydr-0001"}""");
+        if (hydrationDelaySeconds > 0)
+        {
+            hydration = hydration.WithDelay(TimeSpan.FromSeconds(hydrationDelaySeconds));
+        }
+
+        osvServer
+            .Given(Request.Create().WithPath("/vulns/GHSA-slow-hydr-0001").UsingGet())
+            .RespondWith(hydration);
+        var osv = new OsvClient(
+            new TimeoutHttpClientFactory(osvServer.Urls[0] + "/", TimeSpan.FromSeconds(2)),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<OsvClient>.Instance);
+
+        await using var factory = await FactoryWithStubAsync(osv);
+        using var client = await AuthedClientAsync(factory);
+        using var content = new StringContent(
+            JsonSerializer.Serialize(new Dictionary<string, string[]> { ["lodash"] = ["4.17.20"] }),
+            Encoding.UTF8, "application/json");
+
+        var resp = await client.PostAsync(BulkPath, content);
+
+        Assert.Equal(expected, resp.StatusCode);
+    }
+
+    /// <summary>
+    /// OSV_MODE=local with a dump that holds no npm feed answers every package empty, which reads
+    /// exactly like a clean tree. The twin (the dump holds the npm feed) still answers 200.
+    /// </summary>
+    [Theory]
+    [InlineData("PyPI", HttpStatusCode.ServiceUnavailable)]
+    [InlineData("npm", HttpStatusCode.OK)]
+    public async Task LocalDumpWithoutNpmFeed_Returns503NotCleanReport(string dumpEcosystem, HttpStatusCode expected)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), $"npm-audit-osv-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(dir, "ADV-1.json"), $$"""
+                {"id":"ADV-1","summary":"other package","affected":[{"package":{"ecosystem":"{{dumpEcosystem}}","name":"unrelated-pkg"},"versions":["9.9.9"]}]}
+                """);
+            var osv = new LocalOsvSource(dir, Microsoft.Extensions.Logging.Abstractions.NullLogger<LocalOsvSource>.Instance);
+            await using var factory = await FactoryWithStubAsync(osv);
+            using var client = await AuthedClientAsync(factory);
+            using var content = new StringContent(
+                JsonSerializer.Serialize(new Dictionary<string, string[]> { ["lodash"] = ["4.17.20"] }),
+                Encoding.UTF8, "application/json");
+
+            var resp = await client.PostAsync(BulkPath, content);
+
+            Assert.Equal(expected, resp.StatusCode);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private sealed class TimeoutHttpClientFactory(string baseUrl, TimeSpan timeout) : IHttpClientFactory
+    {
+        private readonly HttpClient _client = new() { BaseAddress = new Uri(baseUrl), Timeout = timeout };
+        public HttpClient CreateClient(string name) => _client;
+    }
+
+    /// <summary>
     /// The same guarantee at the source contract, without HTTP: a source that answers every purl
     /// with an empty list and reports itself unreached — exactly what <c>OsvClient</c> produces on
     /// a network failure or non-2xx, and what <c>LocalOsvSource</c> produces when
@@ -540,6 +639,23 @@ public sealed class NpmAuditBulkAdvisoriesTests
     }
 
     /// <summary>A source that throws outright is still refused, not read as clean.</summary>
+    [Fact]
+    public async Task SourceTimeoutWhileRequestIsLive_Returns503Not500()
+    {
+        // A TaskCanceledException the caller did not ask for is the source failing, not the
+        // request being aborted: it answers 503 like any other unavailable source.
+        await using var factory = await FactoryWithStubAsync(new TimingOutOsvSource());
+        using var client = await AuthedClientAsync(factory);
+
+        using var content = new StringContent(
+            JsonSerializer.Serialize(new Dictionary<string, string[]> { ["lodash"] = ["4.17.20"] }),
+            Encoding.UTF8, "application/json");
+
+        var resp = await client.PostAsync(BulkPath, content);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+    }
+
     [Fact]
     public async Task ThrowingSource_Returns503NotEmptyReport()
     {
@@ -791,6 +907,21 @@ public sealed class NpmAuditBulkAdvisoriesTests
         public Task<List<List<OsvAdvisory>>> QueryBatchAsync(
             IReadOnlyList<string> purls, CancellationToken ct = default) =>
             Task.FromResult(new List<List<OsvAdvisory>> { new() });
+    }
+
+    /// <summary>A source whose own timeout fires while the request is still live.</summary>
+    private sealed class TimingOutOsvSource : IOsvSource
+    {
+        public Task<List<OsvAdvisory>> QueryAsync(string purl, CancellationToken ct = default) =>
+            throw new TaskCanceledException("advisory source timed out");
+
+        public Task<List<List<OsvAdvisory>>> QueryBatchAsync(
+            IReadOnlyList<string> purls, CancellationToken ct = default) =>
+            throw new TaskCanceledException("advisory source timed out");
+
+        public Task<OsvBatchQueryResult> TryQueryBatchAsync(
+            IReadOnlyList<string> purls, CancellationToken ct = default) =>
+            throw new TaskCanceledException("advisory source timed out");
     }
 
     private sealed class ThrowingOsvSource : IOsvSource

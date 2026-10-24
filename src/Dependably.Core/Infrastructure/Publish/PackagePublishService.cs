@@ -166,6 +166,12 @@ public sealed class PackagePublishService : IPackagePublishService
         await _packages.UpdateMetadataAsync(
             pkg.Id, request.Homepage, request.Repository, request.Description, request.Author, ct);
         var existing = await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
+        if (existing is null && await FindPep440EqualUploadedAsync(request, pkg.Id, ct) is { } spelled)
+        {
+            existing = spelled;
+            request = WithStoredSpelling(request, spelled);
+        }
+
         var settings = await _orgs.GetSettingsAsync(request.OrgId, ct);
 
         // License hard-block. Runs before any dedup/quota/blob work so a blocked publish never
@@ -452,10 +458,13 @@ public sealed class PackagePublishService : IPackagePublishService
             return nameReject;
         }
 
-        if (await CheckDedupForValidateAsync(request, ct) is { } dedupReject)
+        var (dedupReject, resolved) = await CheckDedupForValidateAsync(request, ct);
+        if (dedupReject is not null)
         {
             return dedupReject;
         }
+
+        request = resolved;
 
         string sha256 = request.ArtifactStagingPath is { } stagePath
             ? (await ComputeHashesFromFileAsync(stagePath, request.Ecosystem, ct)).Sha256
@@ -464,12 +473,36 @@ public sealed class PackagePublishService : IPackagePublishService
         return new PublishResult.Accepted(VersionId: "", request.Purl, sha256, BlobKey: "");
     }
 
+    // A version is identified by its ecosystem's version identity, not its spelling. For PyPI a
+    // PEP 440-equal respelling of an uploaded version (1.0.0rc1 vs 1.0.0-rc1, 1.0a vs 1.0a0,
+    // v1.0 vs 1.0) names the same release; trailing release zeros are not folded, so 1.0 and
+    // 1.0.0 stay distinct versions, so the publish resolves to that row and runs through the ordinary file-slot
+    // and overwrite-policy path: a new filename attaches to the release, a held filename is an
+    // overwrite. The stored spelling is kept; the canonical form is only the comparison key.
+    // Other ecosystems keep exact-string identity.
+    private async Task<PackageVersion?> FindPep440EqualUploadedAsync(
+        PublishRequest request, string packageId, CancellationToken ct)
+    {
+        if (request.Ecosystem != "pypi")
+        {
+            return null;
+        }
+
+        var identity = VersionIdentity.Comparer("pypi");
+        var uploaded = await _packages.ListUploadedVersionStringsAsync(packageId, ct);
+        string? match = uploaded.FirstOrDefault(v => identity.Equals(v, request.Version));
+        return match is null ? null : await _packages.GetVersionAsync(packageId, match, ct);
+    }
+
+    private static PublishRequest WithStoredSpelling(PublishRequest request, PackageVersion stored) =>
+        request with { Version = stored.Version, Purl = PurlNormalizer.PyPi(request.Name, stored.Version) };
+
     // Dry-run dedup projection: mirrors StoreAndRecordInnerAsync's version-exists and
     // filename-mismatch gates without any write. A PyPI upload adding a filename the version
     // does not yet hold is a new file of the release, not an overwrite. Non-mutating lookup —
     // if the package row doesn't exist yet, the version can't either, so dedup passes
     // implicitly.
-    private async Task<PublishResult.Rejected?> CheckDedupForValidateAsync(
+    private async Task<(PublishResult.Rejected? Reject, PublishRequest Resolved)> CheckDedupForValidateAsync(
         PublishRequest request, CancellationToken ct)
     {
         // The package row is absent both for a name never published and for one whose last
@@ -481,19 +514,26 @@ public sealed class PackagePublishService : IPackagePublishService
             settings?.VersionOverwritePolicy, pkg?.SameVersionPushOverride);
 
         var existing = pkg is null ? null : await _packages.GetVersionAsync(pkg.Id, request.Version, ct);
+        if (existing is null && pkg is not null && await FindPep440EqualUploadedAsync(request, pkg.Id, ct) is { } spelled)
+        {
+            existing = spelled;
+            request = WithStoredSpelling(request, spelled);
+        }
+
         if (existing is null)
         {
-            return await TombstoneRejectionAsync(request, overwriteAllowed, ct);
+            return (await TombstoneRejectionAsync(request, overwriteAllowed, ct), request);
         }
 
         var (_, addsNewFile) = await ResolveVersionFileSlotAsync(request, existing, ct);
-        return !addsNewFile && !overwriteAllowed
+        var reject = !addsNewFile && !overwriteAllowed
             ? new PublishResult.Rejected(409, "version_exists",
                 $"Tarball parsed as {request.PurlName}@{request.Version}; that version already exists. " +
                 "Same-version push is blocked by this package's policy.")
             : !MultiFileEcosystems.Covers(request.Ecosystem)
                 ? ArtifactFilenameMismatch(existing, request.Filename)
                 : null;
+        return (reject, request);
     }
 
     // Version-granular delete tombstone. A hard delete of a hosted version records its
@@ -938,29 +978,36 @@ public sealed class PackagePublishService : IPackagePublishService
     // public package with no known issues. Failures are swallowed so a transient OSV
     // outage cannot fail an otherwise valid publish; the scheduled pass retries later.
     // Install/lifecycle-script detection on the just-stored artefact. Re-opens the registry blob
-    // (the artifact stream was already consumed by the put) and persists the signal. Best-effort:
-    // a backend or parse failure leaves has_install_script at its default rather than failing an
-    // otherwise valid publish. Always writes the result (including a negative on overwrite) so a
+    // (the artifact stream was already consumed by the put) and persists the signal. A
+    // backend or parse failure never fails an otherwise valid publish: npm records the unscannable
+    // verdict, the other ecosystems keep the default. Always writes the result (including a negative on overwrite) so a
     // republished, now-script-free artefact clears a stale flag.
     private async Task DetectInstallScriptQuietlyAsync(
         PublishRequest request, PackageVersion newVersion, string blobKey, IBlobStore registry, CancellationToken ct)
     {
+        InstallScriptResult script;
         try
         {
             await using var stream = await registry.GetAsync(blobKey, ct);
-            if (stream is null)
-            {
-                return;
-            }
+            script = stream is null
+                ? ScriptDetectionService.FailClosedResult(request.Ecosystem)
+                : await ScriptDetectionService.DetectAsync(request.Ecosystem, request.Filename, stream, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Install-script detection failed for {Purl}; recording the ecosystem's fail-closed verdict.", request.Purl);
+            script = ScriptDetectionService.FailClosedResult(request.Ecosystem);
+        }
 
-            var script = await ScriptDetectionService.DetectAsync(
-                request.Ecosystem, request.Filename, stream, ct);
+        try
+        {
             await _packages.UpdateInstallScriptAsync(newVersion.Id, script.HasScript, script.Kind, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex,
-                "Install-script detection failed for {Purl}; signal left at its default.", request.Purl);
+                "Recording the install-script signal failed for {Purl}; signal left at its default.", request.Purl);
         }
     }
 

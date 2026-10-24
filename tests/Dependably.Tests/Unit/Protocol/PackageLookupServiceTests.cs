@@ -8,6 +8,7 @@ using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
 using WireMock.RequestBuilders;
 using WireMock.ResponseBuilders;
 using WireMock.Server;
@@ -31,6 +32,15 @@ namespace Dependably.Tests.Unit.Protocol;
 public sealed class PackageLookupServiceTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
+    private readonly ReservedNamespaceService _reserved;
+
+    public PackageLookupServiceTests()
+    {
+        _reserved = new ReservedNamespaceService(
+            _db,
+            new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+            TimeProvider.System);
+    }
     private WireMockServer _server = null!;
 
     // One master key per test instance: the seed side encrypts an upstream's stored credential
@@ -63,7 +73,7 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
 
         Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
         Assert.Equal("blocked", outcome.Result!.Verdict);
-        Assert.Equal("Malicious", outcome.Result.BlockedReason);
+        Assert.Equal("malicious", outcome.Result.BlockedReason);
         Assert.True(outcome.Result.Malware.Detected);
         Assert.Contains("MAL-2024-1", outcome.Result.Malware.AdvisoryIds);
     }
@@ -131,6 +141,255 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         Assert.True(vulns.Scored[0].IsKev);
         // BlockKev defaults to 'off' — KEV alone does not block by default.
         Assert.Equal("allowed", outcome.Result.Verdict);
+    }
+
+    [Fact]
+    public async Task Kev_ResolvedThroughAliasCve_WhenAdvisoryHasNoRowOfItsOwn()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("alias-kev-pkg", "1.0.0", license: "MIT");
+        await VulnerabilitySeeder.InsertVulnAsync(
+            _db, "CVE-2021-44228", ecosystem: "npm", packageName: "alias-kev-pkg",
+            isKev: true, epssScore: 0.97);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-jfh8-c2jp-5v3q", 10.0, "CRITICAL") with { Aliases = ["CVE-2021-44228"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "alias-kev-pkg", "1.0.0"));
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.True(vulns.HasKev);
+        Assert.Equal(0.97, vulns.MaxEpss);
+        Assert.True(vulns.Scored[0].IsKev);
+        Assert.Equal(0.97, vulns.Scored[0].Epss);
+    }
+
+    [Fact]
+    public async Task Kev_ResolvedThroughSiblingRowAliases_AndEpssTakesMaxAcrossMatches()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("sibling-kev-pkg", "1.0.0", license: "MIT");
+        await VulnerabilitySeeder.InsertVulnAsync(
+            _db, "GHSA-other-0001", ecosystem: "npm", packageName: "sibling-kev-pkg",
+            aliases: "[\"CVE-2021-44228\"]", isKev: true, epssScore: 0.40);
+        await VulnerabilitySeeder.InsertVulnAsync(
+            _db, "CVE-2021-44228", ecosystem: "npm", packageName: "sibling-kev-pkg",
+            isKev: false, epssScore: 0.90);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-jfh8-c2jp-5v3q", 10.0, "CRITICAL") with { Aliases = ["CVE-2021-44228"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "sibling-kev-pkg", "1.0.0"));
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.True(vulns.HasKev);
+        Assert.Equal(0.90, vulns.MaxEpss);
+    }
+
+    [Fact]
+    public async Task KevAndEpss_OfAMultiCveSiblingRow_DoNotEnrichAnAdvisoryAliasingOnlyOneOfItsCves()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("multi-cve-pkg", "1.0.0", license: "MIT");
+        await SetBlockKevAsync(orgId, "block");
+        await SetEpssToleranceAsync(orgId, probability: 0.5, percentile: null);
+        // The distro row's KEV flag and EPSS score are aggregates over both of its CVEs: only
+        // CVE-2024-1001 is in KEV and carries the high score, and the live advisory names only
+        // CVE-2024-1002.
+        await VulnerabilitySeeder.InsertVulnAsync(
+            _db, "RLSA-2024:7001", ecosystem: "Rocky Linux:9", packageName: "multi-cve-pkg",
+            aliases: "[\"CVE-2024-1001\",\"CVE-2024-1002\"]", isKev: true, epssScore: 0.95);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-mcve-0001-aaaa", 5.0, "MEDIUM") with { Aliases = ["CVE-2024-1002"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "multi-cve-pkg", "1.0.0"));
+        var detail = await service.FindAdvisoryDetailAsync(orgId, "npm", "multi-cve-pkg", "1.0.0", "GHSA-mcve-0001-aaaa");
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.False(vulns.HasKev);
+        Assert.Null(vulns.MaxEpss);
+        Assert.False(vulns.Scored[0].IsKev);
+        Assert.Equal("allowed", outcome.Result.Verdict);
+        Assert.NotNull(detail);
+        Assert.Null(detail.Intel);
+    }
+
+    [Fact]
+    public async Task KevAndEpss_OfARowStoredUnderTheAdvisorysOwnId_StillEnrich_WhateverItsAliases()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("own-row-pkg", "1.0.0", license: "MIT");
+        await SetBlockKevAsync(orgId, "block");
+        await VulnerabilitySeeder.InsertVulnAsync(
+            _db, "GHSA-own0-0001-aaaa", ecosystem: "npm", packageName: "own-row-pkg",
+            aliases: "[\"CVE-2024-2001\",\"CVE-2024-2002\"]", isKev: true, epssScore: 0.60);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-own0-0001-aaaa", 5.0, "MEDIUM") with { Aliases = ["CVE-2024-2002"] },
+        });
+
+        var outcome = await BuildService(osv).LookupAsync(new PackageLookupRequest(orgId, "npm", "own-row-pkg", "1.0.0"));
+
+        Assert.True(outcome.Result!.Vulnerabilities.HasKev);
+        Assert.Equal(0.60, outcome.Result.Vulnerabilities.MaxEpss);
+        Assert.Equal("blocked", outcome.Result.Verdict);
+        Assert.Equal("kev", outcome.Result.BlockedReason);
+    }
+
+    [Fact]
+    public async Task Kev_ResolvedFromStoredCatalogue_WhenNoVulnerabilitiesRowExistsAnywhere()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("catalogue-kev-pkg", "1.0.0", license: "MIT");
+        await new VulnerabilityRepository(_db, TimeProvider.System).ReplaceKevCatalogAsync(new Dictionary<string, KevEntry>
+        {
+            ["CVE-2021-44228"] = new(true, "2021-12-10", null),
+        });
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-jfh8-c2jp-5v3q", 10.0, "CRITICAL") with { Aliases = ["CVE-2021-44228"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "catalogue-kev-pkg", "1.0.0"));
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.True(vulns.HasKev);
+        Assert.True(vulns.Scored[0].IsKev);
+        Assert.Null(vulns.MaxEpss);
+    }
+
+    [Fact]
+    public async Task Epss_ResolvedFromStoredScores_ForACveNoVulnerabilitiesRowNamesAnywhere()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("stored-epss-pkg", "1.0.0", license: "MIT");
+        await new VulnerabilityRepository(_db, TimeProvider.System).ReplaceEpssScoresAsync(
+            new Dictionary<string, EpssScore>
+            {
+                ["CVE-2021-44228"] = new(0.97, 0.999),
+                ["CVE-2021-45046"] = new(0.40, 0.95),
+            }, "2026-10-05");
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            // The GHSA id itself is no CVE, so only its aliases reach the stored scores; the
+            // advisory takes the highest across them.
+            ScoredAdvisoryRecord("GHSA-jfh8-c2jp-5v3q", 5.0, "MEDIUM") with { Aliases = ["CVE-2021-45046", "CVE-2021-44228"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "stored-epss-pkg", "1.0.0"));
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.Equal(0.97, vulns.MaxEpss);
+        Assert.Equal(0.97, vulns.Scored[0].Epss);
+        Assert.False(vulns.HasKev);
+    }
+
+    [Fact]
+    public async Task Epss_ProbabilityCeiling_BlocksOnAScoreOnlyTheStoredFileHolds()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("epss-block-pkg", "1.0.0", license: "MIT");
+        await SetEpssToleranceAsync(orgId, probability: 0.5, percentile: null);
+        await new VulnerabilityRepository(_db, TimeProvider.System).ReplaceEpssScoresAsync(
+            new Dictionary<string, EpssScore> { ["CVE-2021-44228"] = new(0.97, 0.999) }, null);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-jfh8-c2jp-5v3q", 5.0, "MEDIUM") with { Aliases = ["CVE-2021-44228"] },
+        });
+
+        var outcome = await BuildService(osv).LookupAsync(new PackageLookupRequest(orgId, "npm", "epss-block-pkg", "1.0.0"));
+
+        Assert.Equal("blocked", outcome.Result!.Verdict);
+        Assert.Equal("epss", outcome.Result.BlockedReason);
+    }
+
+    [Fact]
+    public async Task Epss_PercentileCeiling_BlocksOnAStoredPercentile()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("epss-pct-pkg", "1.0.0", license: "MIT");
+        await SetEpssToleranceAsync(orgId, probability: null, percentile: 0.9);
+        await new VulnerabilityRepository(_db, TimeProvider.System).ReplaceEpssScoresAsync(
+            new Dictionary<string, EpssScore> { ["CVE-2021-44228"] = new(0.10, 0.95) }, null);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-jfh8-c2jp-5v3q", 5.0, "MEDIUM") with { Aliases = ["CVE-2021-44228"] },
+        });
+
+        var outcome = await BuildService(osv).LookupAsync(new PackageLookupRequest(orgId, "npm", "epss-pct-pkg", "1.0.0"));
+
+        Assert.Equal("blocked", outcome.Result!.Verdict);
+        Assert.Equal("epss_percentile", outcome.Result.BlockedReason);
+    }
+
+    [Fact]
+    public async Task Epss_EmptyStore_ReadsAsNoSignal_NotAsAFailure()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("epss-empty-pkg", "1.0.0", license: "MIT");
+        await SetEpssToleranceAsync(orgId, probability: 0.5, percentile: 0.5);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-jfh8-c2jp-5v3q", 5.0, "MEDIUM") with { Aliases = ["CVE-2021-44228"] },
+        });
+
+        var outcome = await BuildService(osv).LookupAsync(new PackageLookupRequest(orgId, "npm", "epss-empty-pkg", "1.0.0"));
+
+        Assert.Null(outcome.Result!.Vulnerabilities.MaxEpss);
+        Assert.Equal("allowed", outcome.Result.Verdict);
+    }
+
+    [Fact]
+    public async Task DuplicateAdvisoryIds_FromTheSource_AreReportedOnce_WithMergedAliases()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("dup-adv-pkg", "1.0.0", license: "MIT");
+        await new VulnerabilityRepository(_db, TimeProvider.System).ReplaceKevCatalogAsync(
+            new Dictionary<string, KevEntry> { ["CVE-2037-0001"] = new(null, null, null) });
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-dup-0001", 8.0, "HIGH") with { Aliases = ["CVE-2037-0002"] },
+            ScoredAdvisoryRecord("GHSA-dup-0001", 8.0, "HIGH") with { Aliases = ["CVE-2037-0001"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "dup-adv-pkg", "1.0.0"));
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.Single(vulns.Scored);
+        Assert.Empty(vulns.Unscored);
+        Assert.True(vulns.HasKev);
+        Assert.True(vulns.Scored[0].IsKev);
+    }
+
+    [Fact]
+    public async Task Kev_NotReported_WhenOnlyUnrelatedRowsAreKev()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("unrelated-kev-pkg", "1.0.0", license: "MIT");
+        await VulnerabilitySeeder.InsertVulnAsync(
+            _db, "CVE-2020-0001", ecosystem: "npm", packageName: "unrelated-kev-pkg",
+            isKev: true, epssScore: 0.5);
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-aaaa-bbbb-cccc", 7.0, "HIGH") with { Aliases = ["CVE-2021-0002"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "unrelated-kev-pkg", "1.0.0"));
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.False(vulns.HasKev);
+        Assert.Null(vulns.MaxEpss);
     }
 
     // ── License policy ───────────────────────────────────────────────────────────
@@ -285,6 +544,47 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         Assert.Equal("allowed", outcome.Result.Verdict);
     }
 
+    [Theory]
+    [InlineData("PyPI", false)]
+    [InlineData("npm", true)]
+    public async Task LocalDump_WithoutTheEcosystemsFeed_IsNoOsvCoverage_NeverCheckedClean(
+        string dumpEcosystem, bool expectChecked)
+    {
+        // OSV_MODE=local with a dump that holds no npm feed: an empty answer for an npm package is
+        // silence, not a clean result. The twin (the dump holds the npm feed) stays checked.
+        string dir = Path.Combine(Path.GetTempPath(), $"lookup-osv-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(dir, "ADV-1.json"), $$"""
+                {"id":"ADV-1","summary":"other package","affected":[{"package":{"ecosystem":"{{dumpEcosystem}}","name":"unrelated-pkg"},"versions":["9.9.9"]}]}
+                """);
+            string orgId = await SeedOrgWithNpmUpstreamAsync();
+            StubNpmPackument("local-dump-pkg", "1.0.0", license: "MIT");
+            var service = BuildService(new LocalOsvSource(dir, NullLogger<LocalOsvSource>.Instance));
+
+            var result = (await service.LookupAsync(
+                new PackageLookupRequest(orgId, "npm", "local-dump-pkg", "1.0.0"))).Result!;
+
+            Assert.Equal(expectChecked, result.Vulnerabilities.Available);
+            if (expectChecked)
+            {
+                Assert.Equal(AdvisorySourceInfo.CheckedStatus, result.AdvisorySource.Status);
+                Assert.Equal("allowed", result.Verdict);
+            }
+            else
+            {
+                Assert.Equal(AdvisorySourceInfo.UnavailableStatus, result.AdvisorySource.Status);
+                Assert.Equal("no_osv_coverage", result.AdvisorySource.Reason);
+                Assert.Equal("warn", result.Verdict);
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task NoVersionGiven_UpstreamUnreachable_ReturnsUpstreamUnavailable_NeverFalseAllowed()
     {
@@ -358,25 +658,60 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         string orgId = await SeedOrgWithNpmUpstreamAsync();
         var service = BuildService(new FakeOsvSource(_ => []));
 
-        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "rpm", "bash", "5.0"));
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "conan", "boost", "1.84.0"));
 
         Assert.Equal(PackageLookupStatus.UnsupportedEcosystem, outcome.Status);
     }
 
     /// <summary>
     /// Go resolves a latest version from its module proxy, so an omitted version is no longer a
-    /// hard failure on its own — it fails only when the org has no golang upstream to ask, which
-    /// is the transient-shaped UpstreamUnavailable rather than the client-error VersionRequired.
+    /// hard failure on its own — it fails only when the org has no golang upstream to ask. That
+    /// is a configuration state with its own outcome, not the retryable UpstreamUnavailable.
     /// </summary>
     [Fact]
-    public async Task Golang_NoVersionGiven_NoGoUpstreamConfigured_ReturnsUpstreamUnavailable()
+    public async Task Golang_NoVersionGiven_NoGoUpstreamConfigured_ReturnsUpstreamNotConfigured()
     {
         string orgId = await SeedOrgWithNpmUpstreamAsync();
         var service = BuildService(new FakeOsvSource(_ => []));
 
         var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "golang", "example.com/mod", null));
 
-        Assert.Equal(PackageLookupStatus.UpstreamUnavailable, outcome.Status);
+        Assert.Equal(PackageLookupStatus.UpstreamNotConfigured, outcome.Status);
+        Assert.Equal("golang", outcome.Reason);
+        Assert.Empty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task NoUpstreamConfigured_IsNotCached_SoAddingAnUpstreamTakesEffectAtOnce()
+    {
+        // Nothing invalidates the lookup cache when an operator adds an upstream, so the
+        // not-configured answer must not outlive the configuration it describes.
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        StubWidgetMavenMetadata();
+        var service = BuildService(NoAdvisories());
+        var request = new PackageLookupRequest(orgId, "maven", "com.acme:widget", null);
+
+        var before = await service.LookupAsync(request);
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("maven", _server.Urls[0]));
+        var after = await service.LookupAsync(request);
+
+        Assert.Equal(PackageLookupStatus.UpstreamNotConfigured, before.Status);
+        Assert.Equal(PackageLookupStatus.Ok, after.Status);
+        Assert.Equal("2.0.0", after.Result!.Version);
+    }
+
+    [Fact]
+    public async Task NoUpstreamConfigured_ExplicitVersion_StillAnswers_NotMarkedReserved()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", "com.acme:widget", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.False(outcome.Result!.Reserved);
+        Assert.Contains("release_age", outcome.Result.UnavailableChecks);
     }
 
     [Fact]
@@ -512,6 +847,409 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         Assert.NotEqual(PackageLookupStatus.InvalidInput, outcome.Status);
     }
 
+    // ── Maven reserved namespaces ────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("com.acme")]
+    [InlineData("com.acme.widget")]
+    public async Task MavenLookup_ReservedName_ExplicitVersion_NeverConsultsUpstream(string pattern)
+    {
+        // Both readings of com/acme/widget/maven-metadata.xml are checked. A reserved coordinate
+        // reads as local-only: the advisory and licence verdict still run, the upstream-derived
+        // checks are reported unavailable, and upstream is never asked.
+        string orgId = await SeedOrgWithMavenUpstreamAsync();
+        await _reserved.AddAsync(orgId, "maven", pattern, createdBy: null);
+        StubWidgetMavenMetadata();
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", "com.acme:widget", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("1.0.0", outcome.Result!.Version);
+        Assert.True(outcome.Result.Reserved);
+        Assert.Contains("release_age", outcome.Result.UnavailableChecks);
+        Assert.Contains("license", outcome.Result.UnavailableChecks);
+        Assert.Empty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task MavenLookup_NotReserved_ExplicitVersion_IsNotMarkedReserved()
+    {
+        // Adversarial twin of the explicit-version case: a reservation past the dot boundary
+        // leaves the coordinate unreserved, so upstream is consulted and no marker is set.
+        string orgId = await SeedOrgWithMavenUpstreamAsync();
+        await _reserved.AddAsync(orgId, "maven", "com.acmecorp", createdBy: null);
+        StubWidgetMavenMetadata();
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", "com.acme:widget", "1.0.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.False(outcome.Result!.Reserved);
+        Assert.NotEmpty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task MavenLookup_ReservedName_NoVersion_IsReserved_WithoutConsultingUpstream()
+    {
+        // With no version there is nothing to evaluate without upstream. The reservation is a
+        // standing operator choice, so the outcome says so: never the retryable
+        // UpstreamUnavailable, and never a false "not found".
+        string orgId = await SeedOrgWithMavenUpstreamAsync();
+        await _reserved.AddAsync(orgId, "maven", "com.acme", createdBy: null);
+        StubWidgetMavenMetadata();
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", "com.acme:widget", null));
+
+        Assert.Equal(PackageLookupStatus.Reserved, outcome.Status);
+        Assert.Equal("maven", outcome.Reason);
+        Assert.Null(outcome.Result);
+        Assert.Empty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task MavenLookup_NotReserved_NoVersion_UpstreamUnreachable_IsStillUpstreamUnavailable()
+    {
+        // Adversarial twin: an unreserved coordinate whose upstream answers 503 is a genuine
+        // outage and keeps the retryable outcome.
+        string orgId = await SeedOrgWithMavenUpstreamAsync();
+        await _reserved.AddAsync(orgId, "maven", "com.acmecorp", createdBy: null);
+        _server.Given(Request.Create().WithPath("/com/acme/widget/maven-metadata.xml").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(503));
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", "com.acme:widget", null));
+
+        Assert.Equal(PackageLookupStatus.UpstreamUnavailable, outcome.Status);
+        Assert.NotEmpty(_server.LogEntries);
+    }
+
+    [Fact]
+    public async Task MavenLookup_ReservationInAnotherOrg_DoesNotApply()
+    {
+        string reservingOrg = await SeedOrgWithMavenUpstreamAsync();
+        string otherOrg = await SeedOrgWithMavenUpstreamAsync();
+        await _reserved.AddAsync(reservingOrg, "maven", "com.acme", createdBy: null);
+        StubWidgetMavenMetadata();
+        var service = BuildService(NoAdvisories());
+
+        var reserving = await service.LookupAsync(new PackageLookupRequest(reservingOrg, "maven", "com.acme:widget", null));
+        var other = await service.LookupAsync(new PackageLookupRequest(otherOrg, "maven", "com.acme:widget", null));
+
+        Assert.Equal(PackageLookupStatus.Reserved, reserving.Status);
+        Assert.Equal(PackageLookupStatus.Ok, other.Status);
+        Assert.Equal("2.0.0", other.Result!.Version);
+        Assert.False(other.Result.Reserved);
+    }
+
+    [Fact]
+    public async Task MavenLookup_NotReserved_NoVersion_ResolvesLatestFromUpstream()
+    {
+        // Adversarial twin: a reservation that covers neither reading (com.acmecorp sits past the
+        // dot boundary) leaves the lookup going upstream and resolving the latest release.
+        string orgId = await SeedOrgWithMavenUpstreamAsync();
+        await _reserved.AddAsync(orgId, "maven", "com.acmecorp", createdBy: null);
+        StubWidgetMavenMetadata();
+        var service = BuildService(NoAdvisories());
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", "com.acme:widget", null));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        Assert.Equal("2.0.0", outcome.Result!.Version);
+        Assert.True(outcome.Result.VersionInferred);
+        Assert.NotEmpty(_server.LogEntries);
+        Assert.All(_server.LogEntries,
+            e => Assert.Equal("/com/acme/widget/maven-metadata.xml", e.RequestMessage?.Path));
+    }
+
+    [Fact]
+    public async Task MavenLookup_ResolverReportsReserved_IsReservedNotNotFound()
+    {
+        // The lookup's latest-version resolve treats a reserved result as the Reserved outcome.
+        // Reached here through a resolver that reserves while the lookup's own metadata fetch
+        // does not, so the classification is pinned independently of the lookup's own gate.
+        string orgId = await SeedOrgWithMavenUpstreamAsync();
+        StubWidgetMavenMetadata();
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        resolver.ResolveAsync("maven", orgId, "com.acme:widget", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(UpstreamLatestVersion.Reserved));
+        var service = BuildService(NoAdvisories(), latestResolverOverride: resolver);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "maven", "com.acme:widget", null));
+
+        Assert.Equal(PackageLookupStatus.Reserved, outcome.Status);
+    }
+
+    // ── Aliases + fixed version on lookup advisories ─────────────────────────────
+
+    private const string LodashRanges =
+        """
+        {"id":"GHSA-35jh-r3h4-6jhm","affected":[{"package":{"ecosystem":"npm","name":"lodash"},
+         "ranges":[{"type":"SEMVER","events":[
+           {"introduced":"0"},{"fixed":"3.10.2"},{"introduced":"4.0.0"},{"fixed":"4.17.21"}]}]}]}
+        """;
+
+    private static OsvAdvisory WithRaw(OsvAdvisory advisory, string rawJson) => advisory with { RawJson = rawJson };
+
+    [Fact]
+    public async Task Advisories_CarryMergedAliases_WithoutTheirOwnId_OnBothBuckets()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("alias-pkg", "1.0.0", license: "MIT");
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            ScoredAdvisoryRecord("GHSA-alias-0001", 8.0, "HIGH") with { Aliases = ["CVE-2037-0002", "GHSA-alias-0001"] },
+            ScoredAdvisoryRecord("GHSA-alias-0001", 8.0, "HIGH") with { Aliases = ["CVE-2037-0001", "cve-2037-0002"] },
+            UnscoredAdvisoryRecord("PYSEC-2037-1") with { Aliases = ["CVE-2037-0001"] },
+        });
+        var service = BuildService(osv);
+
+        var outcome = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "alias-pkg", "1.0.0"));
+
+        var vulns = outcome.Result!.Vulnerabilities;
+        Assert.Equal(["CVE-2037-0002", "CVE-2037-0001"], vulns.Scored.Single().Aliases);
+        Assert.Equal(["CVE-2037-0001"], vulns.Unscored.Single().Aliases);
+    }
+
+    [Fact]
+    public async Task FixedVersion_ResolvesTheReleaseLineOfTheQueriedVersion()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("lodash-a", "4.17.20", license: "MIT");
+        StubNpmPackument("lodash-b", "3.5.0", license: "MIT");
+        StubNpmPackument("lodash-c", "4.17.21", license: "MIT");
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            WithRaw(ScoredAdvisoryRecord("GHSA-35jh-r3h4-6jhm", 7.4, "HIGH"), LodashRanges),
+        });
+        var service = BuildService(osv);
+
+        // The record's package name is "lodash"; a differing name falls back to every entry.
+        var onModernLine = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "lodash-a", "4.17.20"));
+        var onOldLine = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "lodash-b", "3.5.0"));
+        var alreadyFixed = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "lodash-c", "4.17.21"));
+
+        Assert.Equal("4.17.21", onModernLine.Result!.Vulnerabilities.Scored.Single().FixedVersion);
+        Assert.Equal("3.10.2", onOldLine.Result!.Vulnerabilities.Scored.Single().FixedVersion);
+        Assert.Null(alreadyFixed.Result!.Vulnerabilities.Scored.Single().FixedVersion);
+    }
+
+    [Fact]
+    public async Task FixedVersion_MixedAdvisories_NullWhereNoFixOrNoRange_AndRepeatLookupKeepsFields()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        StubNpmPackument("mixed-fix", "2.0.0", license: "MIT");
+        const string noFix =
+            """{"id":"GHSA-nofix","affected":[{"package":{"ecosystem":"npm","name":"mixed-fix"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"}]}]}]}""";
+        const string fixedAt =
+            """{"id":"GHSA-fix","affected":[{"package":{"ecosystem":"npm","name":"mixed-fix"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"2.0.1"}]}]}]}""";
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            WithRaw(ScoredAdvisoryRecord("GHSA-fix", 6.0, "MEDIUM"), fixedAt),
+            WithRaw(ScoredAdvisoryRecord("GHSA-nofix", 5.0, "MEDIUM"), noFix),
+            UnscoredAdvisoryRecord("GHSA-noraw"),
+        });
+        var service = BuildService(osv);
+
+        var first = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "mixed-fix", "2.0.0"));
+        var cached = await service.LookupAsync(new PackageLookupRequest(orgId, "npm", "mixed-fix", "2.0.0"));
+
+        foreach (var outcome in new[] { first, cached })
+        {
+            var vulns = outcome.Result!.Vulnerabilities;
+            Assert.Equal("2.0.1", vulns.Scored.Single(a => a.Id == "GHSA-fix").FixedVersion);
+            Assert.Null(vulns.Scored.Single(a => a.Id == "GHSA-nofix").FixedVersion);
+            Assert.Null(vulns.Unscored.Single().FixedVersion);
+        }
+    }
+
+    // ── Advisory detail fallback ─────────────────────────────────────────────────
+
+    [Fact]
+    public async Task FindAdvisoryDetail_MatchesByIdOrAlias_AndResolvesFromTheOsvRecord()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var osv = new FakeOsvSource(_ => new List<OsvAdvisory>
+        {
+            WithRaw(ScoredAdvisoryRecord("GHSA-35jh-r3h4-6jhm", 7.4, "HIGH") with { Aliases = ["CVE-2021-23337"] }, LodashRanges),
+            ScoredAdvisoryRecord("GHSA-other", 5.0, "MEDIUM"),
+        });
+        var service = BuildService(osv);
+
+        var byId = await service.FindAdvisoryDetailAsync(orgId, "npm", "lodash", "4.17.20", "GHSA-35jh-r3h4-6jhm");
+        var byAlias = await service.FindAdvisoryDetailAsync(orgId, "npm", "lodash", "4.17.20", "CVE-2021-23337");
+        var unknown = await service.FindAdvisoryDetailAsync(orgId, "npm", "lodash", "4.17.20", "GHSA-nope");
+
+        Assert.NotNull(byId);
+        Assert.Equal("4.17.21", FixedVersionResolver.Resolve(byId.Detail.Affected, "npm", "lodash", "4.17.20"));
+        Assert.NotNull(byAlias);
+        Assert.Equal("GHSA-35jh-r3h4-6jhm", byAlias.Detail.Id);
+        Assert.Null(unknown);
+    }
+
+    [Fact]
+    public async Task FindAdvisoryDetail_ReservedName_OsvUnreached_AndBadCoordinate_AreNull()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        await _reserved.AddAsync(orgId, "npm", "internal-lib", createdBy: null);
+        var advisories = new List<OsvAdvisory> { ScoredAdvisoryRecord("GHSA-x", 5.0, "MEDIUM") };
+        var reachable = BuildService(new FakeOsvSource(_ => advisories));
+        var unreachable = BuildService(new FakeOsvSource(_ => new List<OsvAdvisory>(), reached: false));
+
+        Assert.Null(await reachable.FindAdvisoryDetailAsync(orgId, "npm", "internal-lib", "1.0.0", "GHSA-x"));
+        Assert.Null(await unreachable.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x"));
+        Assert.Null(await reachable.FindAdvisoryDetailAsync(orgId, "rpm", "public-lib", "1.0.0", "GHSA-x"));
+        Assert.Null(await reachable.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "../1", "GHSA-x"));
+        Assert.NotNull(await reachable.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x"));
+    }
+
+
+    // ── OSV answer caching ───────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task FindAdvisoryDetail_RepeatedCalls_HitOsvOncePerTtl_ThenAgain()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var osv = new FakeOsvSource(_ => [ScoredAdvisoryRecord("GHSA-x", 5.0, "MEDIUM")]);
+        var clock = TestTime.Frozen();
+        var service = BuildService(osv, clock: clock);
+
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.NotNull(await service.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x"));
+        }
+
+        Assert.Single(osv.QueryCalls);
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        Assert.NotNull(await service.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x"));
+        Assert.Equal(2, osv.QueryCalls.Count);
+    }
+
+    [Fact]
+    public async Task FindAdvisoryDetail_UnreachedOsv_IsNotCached_AndRecoversWhenReached()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var osv = new FakeOsvSource(_ => [ScoredAdvisoryRecord("GHSA-x", 5.0, "MEDIUM")], reached: false);
+        var service = BuildService(osv, clock: TestTime.Frozen());
+
+        Assert.Null(await service.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x"));
+        Assert.Null(await service.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x"));
+        Assert.Equal(2, osv.QueryCalls.Count);
+
+        osv.Reached = true;
+        Assert.NotNull(await service.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x"));
+    }
+
+    [Fact]
+    public async Task FindAdvisoryDetail_NameReservedAfterFirstCall_IsRefusedOnTheSecond()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var osv = new FakeOsvSource(_ => [ScoredAdvisoryRecord("GHSA-x", 5.0, "MEDIUM")]);
+        var service = BuildService(osv, clock: TestTime.Frozen());
+
+        Assert.NotNull(await service.FindAdvisoryDetailAsync(orgId, "npm", "later-reserved", "1.0.0", "GHSA-x"));
+        await _reserved.AddAsync(orgId, "npm", "later-reserved", createdBy: null);
+
+        Assert.Null(await service.FindAdvisoryDetailAsync(orgId, "npm", "later-reserved", "1.0.0", "GHSA-x"));
+    }
+
+    [Fact]
+    public async Task Apk_OriginProbe_IsCachedAcrossLookups_AndNotWhenUnreached()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Alpine:v3.20", "openssl", ["3.1.0-r0"], ScoredAdvisoryRecord("ALPINE-CVE-2024-9", 7.5, "HIGH")));
+        var clock = TestTime.Frozen();
+        var service = BuildService(osv, clock: clock);
+
+        foreach (string version in new[] { "3.1.4-r5", "3.1.5-r0", "3.1.6-r0" })
+        {
+            var result = (await service.LookupAsync(
+                new PackageLookupRequest(orgId, "apk", "openssl", version, "v3.20"))).Result!;
+            Assert.Equal("checked", result.AdvisorySource.Status);
+        }
+
+        Assert.Single(osv.ScopedCalls, c => c.Version == "0");
+
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await service.LookupAsync(new PackageLookupRequest(orgId, "apk", "openssl", "3.1.7-r0", "v3.20"));
+        Assert.Equal(2, osv.ScopedCalls.Count(c => c.Version == "0"));
+
+        var unreached = new FakeOsvSource(_ => [], scoped: (s, n, v) =>
+            new OsvScopedQueryResult([], Reached: v != "0"));
+        var flaky = BuildService(unreached, clock: clock);
+        for (int i = 0; i < 2; i++)
+        {
+            var r = (await flaky.LookupAsync(
+                new PackageLookupRequest(orgId, "apk", "zlib", $"1.3.{i}-r0", "v3.20"))).Result!;
+            Assert.Equal("unavailable", r.AdvisorySource.Status);
+        }
+
+        Assert.Equal(2, unreached.ScopedCalls.Count(c => c.Version == "0"));
+    }
+
+
+    [Fact]
+    public async Task OsvQueryCache_PastTheByteBudget_EvictsOldest_AndOversizeEntriesAreNotStored()
+    {
+        var clock = TestTime.Frozen();
+        var advisory = ScoredAdvisoryRecord("GHSA-big", 5.0, "MEDIUM") with { RawJson = new string('x', 1000) };
+        long each = OsvQueryCache.EstimateBytes([advisory]);
+        var cache = new OsvQueryCache(clock, maxBytes: each * 3 * 8);
+        int computes = 0;
+
+        Task<string> Get(string key, int advisories) => cache.GetOrComputeAsync<string>(key, () =>
+        {
+            computes++;
+            return Task.FromResult(("v", true, each * advisories));
+        }, CancellationToken.None);
+
+        for (int i = 0; i < 40; i++)
+        {
+            await Get($"k{i}", 1);
+            clock.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        Assert.True(cache.TotalBytes <= each * 3 * 8);
+        Assert.Equal(each * cache.EntryCount, cache.TotalBytes);
+        Assert.True(cache.EntryCount < 40);
+        int before = computes;
+        await Get("k0", 1);
+        Assert.Equal(before + 1, computes);
+
+        await Get("huge", 4);
+        await Get("huge", 4);
+        Assert.Equal(before + 3, computes);
+    }
+
+
+    [Fact]
+    public async Task FindAdvisoryDetail_ConcurrentIdenticalCalls_ShareOneOsvQuery()
+    {
+        string orgId = await SeedOrgWithNpmUpstreamAsync();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var osv = new FakeOsvSource(_ => [ScoredAdvisoryRecord("GHSA-x", 5.0, "MEDIUM")]) { Gate = gate };
+        var service = BuildService(osv, clock: TestTime.Frozen());
+
+        var first = service.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x");
+        while (osv.QueryCalls.Count == 0)
+        {
+            await Task.Yield();
+        }
+
+        var second = service.FindAdvisoryDetailAsync(orgId, "npm", "public-lib", "1.0.0", "GHSA-x");
+        // now-ok: real elapsed time lets the second call reach the single-flight lock before the gate opens
+        await Task.Delay(TimeSpan.FromMilliseconds(300), TimeProvider.System, CancellationToken.None);
+        Assert.Single(osv.QueryCalls);
+
+        gate.SetResult();
+        Assert.NotNull(await first);
+        Assert.NotNull(await second);
+        Assert.Single(osv.QueryCalls);
+    }
+
     // ── Test doubles / helpers ───────────────────────────────────────────────────
 
     private static OsvAdvisory MalwareAdvisory(string id) => new(
@@ -587,7 +1325,7 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
 
         Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
         Assert.Equal("blocked", outcome.Result!.Verdict);
-        Assert.Equal("ReleaseAge", outcome.Result.BlockedReason);
+        Assert.Equal("release_age", outcome.Result.BlockedReason);
     }
 
     [Fact]
@@ -603,7 +1341,7 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
 
         Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
         Assert.Equal("blocked", outcome.Result!.Verdict);
-        Assert.Equal("Deprecated", outcome.Result.BlockedReason);
+        Assert.Equal("deprecated", outcome.Result.BlockedReason);
     }
 
     /// <summary>
@@ -804,6 +1542,826 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         Assert.DoesNotContain("deprecated", outcome.Result!.UnavailableChecks);
     }
 
+    // ── apk / rpm: release-scoped distro feeds ───────────────────────────────────
+
+    private static readonly string[] AffectedApk = ["8.5.0-r0"];
+
+    private static Func<DistroScope, string, string, OsvScopedQueryResult> DistroFeed(
+        string ecosystem, string name, string[] affectedVersions, OsvAdvisory advisory) =>
+        (scope, n, v) => new OsvScopedQueryResult(
+            scope.OsvEcosystem == ecosystem && n == name && (affectedVersions.Contains(v) || v == "0")
+                ? [advisory]
+                : [],
+            Reached: true);
+
+    [Fact]
+    public async Task Apk_AffectedVersion_ReportsAdvisory_ScopedToTheRequestedRelease()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Alpine:v3.20", "curl", AffectedApk, ScoredAdvisoryRecord("ALPINE-CVE-2024-1", 7.5, "HIGH")));
+
+        var outcome = await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.20"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        var result = outcome.Result!;
+        Assert.True(result.Vulnerabilities.Available);
+        Assert.Equal("ALPINE-CVE-2024-1", Assert.Single(result.Vulnerabilities.Scored).Id);
+        Assert.Equal("checked", result.AdvisorySource.Status);
+        Assert.Equal("osv", result.AdvisorySource.Source);
+        Assert.Equal("Alpine:v3.20", result.AdvisorySource.Distro);
+        Assert.False(result.AdvisorySource.DistroInferred);
+        Assert.Equal("pkg:apk/alpine/curl@8.5.0-r0", result.Purl);
+        Assert.Equal(("Alpine:v3.20", "curl", "8.5.0-r0"), Assert.Single(osv.ScopedCalls));
+    }
+
+    [Fact]
+    public async Task Apk_UnaffectedVersion_IsExplicitlyCheckedAndClean()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Alpine:v3.20", "curl", AffectedApk, ScoredAdvisoryRecord("ALPINE-CVE-2024-1", 7.5, "HIGH")));
+
+        var outcome = await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.9.1-r0", "Alpine:v3.20"));
+
+        var result = outcome.Result!;
+        Assert.True(result.Vulnerabilities.Available);
+        Assert.Empty(result.Vulnerabilities.Scored);
+        Assert.Empty(result.Vulnerabilities.Unscored);
+        Assert.Equal("checked", result.AdvisorySource.Status);
+        Assert.DoesNotContain("vulnerabilities", result.UnavailableChecks);
+        Assert.Equal("allowed", result.Verdict);
+    }
+
+    [Fact]
+    public async Task Apk_NoRequestedRelease_AndNoUpstream_SaysSoInsteadOfReadingClean()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true));
+
+        var outcome = await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        var result = outcome.Result!;
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.Equal("unavailable", result.AdvisorySource.Status);
+        Assert.Equal("distro_required", result.AdvisorySource.Reason);
+        Assert.Contains("vulnerabilities", result.UnavailableChecks);
+        Assert.Equal("warn", result.Verdict);
+        Assert.Empty(osv.ScopedCalls);
+    }
+
+    [Fact]
+    public async Task Apk_ReleaseDerivedFromASingleConfiguredUpstream()
+    {
+        string orgId = await SeedOrgWithApkUpstreamsAsync("https://dl-cdn.alpinelinux.org/alpine/v3.19/main");
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Alpine:v3.19", "curl", AffectedApk, ScoredAdvisoryRecord("ALPINE-CVE-2024-2", 5.0, "MEDIUM")));
+
+        var outcome = await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0"));
+
+        var result = outcome.Result!;
+        Assert.Equal("checked", result.AdvisorySource.Status);
+        Assert.Equal("Alpine:v3.19", result.AdvisorySource.Distro);
+        Assert.True(result.AdvisorySource.DistroInferred);
+        Assert.Single(result.Vulnerabilities.Scored);
+    }
+
+    [Fact]
+    public async Task Apk_UpstreamsOnDifferentReleases_AreAmbiguous_AndNotGuessed()
+    {
+        string orgId = await SeedOrgWithApkUpstreamsAsync(
+            "https://dl-cdn.alpinelinux.org/alpine/v3.19/main", "https://dl-cdn.alpinelinux.org/alpine/v3.20/main");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true));
+
+        var outcome = await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0"));
+
+        Assert.Equal("distro_required", outcome.Result!.AdvisorySource.Reason);
+        Assert.Empty(osv.ScopedCalls);
+    }
+
+    [Fact]
+    public async Task Apk_RequestedReleaseWinsOverTheUpstreamRelease()
+    {
+        string orgId = await SeedOrgWithApkUpstreamsAsync("https://dl-cdn.alpinelinux.org/alpine/v3.19/main");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true));
+
+        await BuildService(osv).LookupAsync(new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "3.21"));
+
+        Assert.All(osv.ScopedCalls, c => Assert.Equal("Alpine:v3.21", c.Scope));
+        Assert.NotEmpty(osv.ScopedCalls);
+    }
+
+    [Theory]
+    [InlineData("apk", "edge")]
+    [InlineData("apk", "bookworm")]
+    [InlineData("apk", "v3")]
+    [InlineData("rpm", "Rocky Linux")]
+    [InlineData("rpm", "Debian:12")]
+    [InlineData("rpm", "9")]
+    [InlineData("rpm", "Rocky Linux:9.4")]
+    [InlineData("rpm", "AlmaLinux:9.4")]
+    [InlineData("rpm", "Red Hat:enterprise_linux:9")]
+    public async Task InvalidDistro_IsRejectedAsInput(string ecosystem, string distro)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+
+        var outcome = await BuildService(NoAdvisories()).LookupAsync(
+            new PackageLookupRequest(orgId, ecosystem, "openssl", ecosystem == "apk" ? "1.0-r0" : "1.0-1", distro));
+
+        Assert.Equal(PackageLookupStatus.InvalidInput, outcome.Status);
+        Assert.Equal("distro", outcome.Field);
+        Assert.Equal("distro.invalid", outcome.Reason);
+    }
+
+    [Theory]
+    [InlineData("apk", "curl", "8.5.0", "v3.20")]
+    [InlineData("apk", "curl", "8.5.0-r", "v3.20")]
+    [InlineData("rpm", "openssl", "3.0.7", "Rocky Linux:9")]
+    [InlineData("rpm", "openssl", "3.0.7-", "Rocky Linux:9")]
+    public async Task BareVersionWithoutBuild_IsRejected_NotComparedAsClean(
+        string ecosystem, string name, string version, string distro)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true));
+
+        var outcome = await BuildService(osv).LookupAsync(new PackageLookupRequest(orgId, ecosystem, name, version, distro));
+
+        Assert.Equal(PackageLookupStatus.InvalidInput, outcome.Status);
+        Assert.Equal("version", outcome.Field);
+        Assert.Equal("version.releaseRequired", outcome.Reason);
+        Assert.Empty(osv.ScopedCalls);
+    }
+
+    [Fact]
+    public async Task Apk_SubPackageNameTheFeedNeverLists_IsOriginUnknown_NotChecked()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        // The feed files advisories under the origin "openssl"; it has never heard of "libssl3".
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Alpine:v3.20", "openssl", ["3.1.0-r0"], ScoredAdvisoryRecord("ALPINE-CVE-2024-9", 7.5, "HIGH")));
+        var service = BuildService(osv);
+
+        var subPackage = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "libssl3", "3.1.0-r0", "v3.20"))).Result!;
+        var origin = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "openssl", "3.1.4-r5", "v3.20"))).Result!;
+
+        Assert.Equal("unavailable", subPackage.AdvisorySource.Status);
+        Assert.Equal("origin_unknown", subPackage.AdvisorySource.Reason);
+        Assert.False(subPackage.Vulnerabilities.Available);
+        Assert.Equal("warn", subPackage.Verdict);
+        Assert.Equal("checked", origin.AdvisorySource.Status);
+    }
+
+    [Fact]
+    public async Task Apk_OriginProbeUnreached_IsUnavailable_NeverChecked()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, v) => v == "0"
+            ? new OsvScopedQueryResult([], Reached: false, Covered: false)
+            : new OsvScopedQueryResult([], Reached: true));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.20"))).Result!;
+
+        Assert.Equal("unavailable", result.AdvisorySource.Status);
+        Assert.Equal("osv_unreachable", result.AdvisorySource.Reason);
+    }
+
+    [Fact]
+    public async Task Apk_SourceUnreached_IsUnavailable_NeverClean()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: false, Covered: false));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.20"))).Result!;
+
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.Equal("osv_unreachable", result.AdvisorySource.Reason);
+        Assert.Equal("warn", result.Verdict);
+    }
+
+    [Fact]
+    public async Task Apk_SourceThrows_IsUnavailable_NeverClean()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => throw new InvalidOperationException("boom"));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.20"))).Result!;
+
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.Equal("osv_unreachable", result.AdvisorySource.Reason);
+    }
+
+    [Fact]
+    public async Task Apk_ReleaseTheSourceHoldsNoFeedFor_IsNoCoverage_NeverClean()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true, Covered: false));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.20"))).Result!;
+
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.Equal("no_osv_coverage", result.AdvisorySource.Reason);
+        Assert.Equal("Alpine:v3.20", result.AdvisorySource.Distro);
+    }
+
+    [Fact]
+    public async Task Rpm_AffectedVersion_ReportsAdvisory_AndUnaffectedIsCheckedClean()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Rocky Linux:9", "openssl", ["3.0.7-24.el9"], ScoredAdvisoryRecord("RLSA-2024:1", 9.1, "CRITICAL")));
+        var service = BuildService(osv);
+
+        var affected = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "openssl", "3.0.7-24.el9", "rocky linux:9"))).Result!;
+        var fixedBuild = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "openssl", "3.0.7-27.el9", "rocky linux:9"))).Result!;
+
+        Assert.Equal("RLSA-2024:1", Assert.Single(affected.Vulnerabilities.Scored).Id);
+        Assert.Equal("Rocky Linux:9", affected.AdvisorySource.Distro);
+        Assert.Equal("pkg:rpm/rocky-linux/openssl@3.0.7-24.el9", affected.Purl);
+        Assert.Empty(fixedBuild.Vulnerabilities.Scored);
+        Assert.True(fixedBuild.Vulnerabilities.Available);
+        Assert.Equal("checked", fixedBuild.AdvisorySource.Status);
+    }
+
+    [Fact]
+    public async Task Rpm_NameTheScopedFeedNeverLists_IsNameUnknown_NotCheckedClean()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        // The Rocky Linux 9 feed lists openssl; "opensll" (a typo) and an EPEL-only package are
+        // names it has never filed an advisory under.
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Rocky Linux:9", "openssl", ["3.0.7-24.el9"], ScoredAdvisoryRecord("RLSA-2024:2", 9.1, "CRITICAL")));
+        var service = BuildService(osv);
+
+        var typo = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "opensll", "3.0.7-27.el9", "Rocky Linux:9"))).Result!;
+        var epel = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "htop", "3.3.0-1.el9", "Rocky Linux:9"))).Result!;
+        var listed = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "openssl", "3.0.7-27.el9", "Rocky Linux:9"))).Result!;
+
+        foreach (var unknown in new[] { typo, epel })
+        {
+            Assert.Equal("unavailable", unknown.AdvisorySource.Status);
+            Assert.Equal("name_unknown", unknown.AdvisorySource.Reason);
+            Assert.Equal("Rocky Linux:9", unknown.AdvisorySource.Distro);
+            Assert.False(unknown.Vulnerabilities.Available);
+            Assert.Contains("vulnerabilities", unknown.UnavailableChecks);
+            Assert.Equal("warn", unknown.Verdict);
+        }
+
+        Assert.Equal("checked", listed.AdvisorySource.Status);
+        Assert.True(listed.Vulnerabilities.Available);
+        Assert.Contains(("Rocky Linux:9", "opensll", "0"), osv.ScopedCalls);
+    }
+
+    [Fact]
+    public async Task Rpm_NameProbeUnreached_IsUnavailable_NeverChecked()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, v) => v == "0"
+            ? new OsvScopedQueryResult([], Reached: false, Covered: false)
+            : new OsvScopedQueryResult([], Reached: true));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "openssl", "3.0.7-27.el9", "Rocky Linux:9"))).Result!;
+
+        Assert.Equal("unavailable", result.AdvisorySource.Status);
+        Assert.Equal("osv_unreachable", result.AdvisorySource.Reason);
+    }
+
+    [Fact]
+    public async Task Rpm_NoRelease_AndAmbiguousUpstream_IsDistroRequired()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("rpm", "https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os"));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("rpm", "https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os"));
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "openssl", "3.0.7-24.el9"))).Result!;
+
+        Assert.Equal("distro_required", result.AdvisorySource.Reason);
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.Empty(osv.ScopedCalls);
+    }
+
+    [Fact]
+    public async Task Rpm_ReleaseDerivedFromASingleRockyUpstream()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("rpm", "https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os"));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("rpm", "https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os"));
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "openssl", "3.0.7-24.el9"))).Result!;
+
+        Assert.Equal("Rocky Linux:9", result.AdvisorySource.Distro);
+        Assert.True(result.AdvisorySource.DistroInferred);
+    }
+
+    [Fact]
+    public async Task DistroLookup_IsCachedPerRelease_NotSharedAcrossReleases()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => [], scoped: DistroFeed(
+            "Alpine:v3.20", "curl", AffectedApk, ScoredAdvisoryRecord("ALPINE-CVE-2024-1", 7.5, "HIGH")));
+        var service = BuildService(osv);
+
+        var onAffectedRelease = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.20"))).Result!;
+        var onOtherRelease = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.19"))).Result!;
+        var repeat = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r0", "v3.20"))).Result!;
+
+        Assert.Single(onAffectedRelease.Vulnerabilities.Scored);
+        Assert.Empty(onOtherRelease.Vulnerabilities.Scored);
+        Assert.Single(repeat.Vulnerabilities.Scored);
+        // v3.20 answers once; v3.19 answers empty and is then probed for the name, once.
+        Assert.Equal(3, osv.ScopedCalls.Count);
+    }
+
+    [Theory]
+    [InlineData("apk", "curl")]
+    [InlineData("rpm", "openssl")]
+    [InlineData("oci", "library/nginx")]
+    [InlineData("terraform", "hashicorp/aws")]
+    public async Task NewEcosystems_RequireAnExplicitVersion(string ecosystem, string name)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+
+        var outcome = await BuildService(NoAdvisories()).LookupAsync(
+            new PackageLookupRequest(orgId, ecosystem, name, null));
+
+        Assert.Equal(PackageLookupStatus.VersionRequired, outcome.Status);
+    }
+
+    [Theory]
+    [InlineData("apk", "curl", "8.5.0-r0", "v3.20")]
+    [InlineData("terraform", "hashicorp/aws", "5.0.0", null)]
+    public async Task NewEcosystems_ReservedName_IsReportedReserved(
+        string ecosystem, string name, string version, string? distro)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        string otherOrg = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        await _reserved.AddAsync(orgId, ecosystem, name, createdBy: null);
+        var service = BuildService(new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([], Reached: true)));
+
+        var reserved = (await service.LookupAsync(new PackageLookupRequest(orgId, ecosystem, name, version, distro))).Result!;
+        var open = (await service.LookupAsync(new PackageLookupRequest(otherOrg, ecosystem, name, version, distro))).Result!;
+
+        Assert.True(reserved.Reserved);
+        Assert.False(open.Reserved);
+    }
+
+    private static OsvAdvisory AdvisoryWithRanges(string id, string[] aliases, string affectedJson) => new(
+        Id: id, Aliases: aliases, Summary: "distro advisory", Severity: "HIGH", CvssScore: 7.5,
+        AffectedPackages: [], Published: null, Modified: null, IsHydrated: true,
+        RawJson: $$"""{"id":"{{id}}","affected":{{affectedJson}}}""");
+
+    [Fact]
+    public async Task Rpm_Advisory_CarriesAliases_AndTheFixOfTheScopedRelease_NotAnotherReleasesFix()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var advisory = AdvisoryWithRanges("RLSA-2024:7", ["CVE-2024-0007", "RLSA-2024:7"],
+            """
+            [{"package":{"ecosystem":"Rocky Linux:8","name":"openssl"},
+              "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"9:9.9-1.el8"}]}]},
+             {"package":{"ecosystem":"Rocky Linux:9","name":"openssl"},
+              "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1:3.0.7-27.el9"}]}]}]
+            """);
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([advisory], Reached: true));
+
+        var result = (await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "rpm", "openssl", "1:3.0.7-24.el9", "Rocky Linux:9"))).Result!;
+
+        var found = Assert.Single(result.Vulnerabilities.Scored);
+        Assert.Equal(["CVE-2024-0007"], found.Aliases);
+        Assert.Equal("1:3.0.7-27.el9", found.FixedVersion);
+    }
+
+    [Fact]
+    public async Task Apk_Advisory_FixedVersionUsesApkOrdering()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var advisory = AdvisoryWithRanges("ALPINE-CVE-2024-8", ["CVE-2024-0008"],
+            """
+            [{"package":{"ecosystem":"Alpine:v3.20","name":"curl"},
+              "ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"8.5.0-r10"}]}]}]
+            """);
+        var osv = new FakeOsvSource(_ => [], scoped: (_, _, _) => new OsvScopedQueryResult([advisory], Reached: true));
+        var service = BuildService(osv);
+
+        // -r9 < -r10 numerically (a text ordering would call it newer and report no fix).
+        var result = (await service.LookupAsync(
+            new PackageLookupRequest(orgId, "apk", "curl", "8.5.0-r9", "v3.20"))).Result!;
+
+        Assert.Equal("8.5.0-r10", Assert.Single(result.Vulnerabilities.Scored).FixedVersion);
+    }
+
+    [Fact]
+    public async Task OciAdvisory_HasAliases_AndNoFixedVersion()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SeedScanResultAsync(orgId, versionId, 0, ("DEBIAN-CVE-2024-0010", 8.0));
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        var found = Assert.Single(result.Vulnerabilities.Scored);
+        Assert.Equal(["CVE-2024-0001"], found.Aliases);
+        Assert.Null(found.FixedVersion);
+    }
+
+    [Theory]
+    [InlineData("apk")]
+    [InlineData("rpm")]
+    [InlineData("oci")]
+    [InlineData("terraform")]
+    public async Task AdvisoryDetailFallback_IsNotAnsweredForEcosystemsWithoutAPurlQuery(string ecosystem)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var service = BuildService(new FakeOsvSource(_ => [AdvisoryWithRanges("X-1", [], "[]")]));
+
+        var detail = await service.FindAdvisoryDetailAsync(orgId, ecosystem, "pkg/name", "1.0-1", "X-1");
+
+        Assert.Null(detail);
+    }
+
+    // ── terraform: no advisory source ────────────────────────────────────────────
+
+    [Fact]
+    public async Task Terraform_ReportsNotApplicable_WithoutConsultingAnySource_AndDoesNotWarn()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var osv = new FakeOsvSource(_ => throw new InvalidOperationException("OSV must not be queried"));
+
+        var outcome = await BuildService(osv).LookupAsync(
+            new PackageLookupRequest(orgId, "terraform", "hashicorp/aws", "5.31.0"));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        var result = outcome.Result!;
+        Assert.Equal("not_applicable", result.AdvisorySource.Status);
+        Assert.Equal("no_advisory_source", result.AdvisorySource.Reason);
+        Assert.Null(result.AdvisorySource.Source);
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.DoesNotContain("vulnerabilities", result.UnavailableChecks);
+        Assert.Equal("allowed", result.Verdict);
+        Assert.Equal("pkg:terraform/hashicorp/aws@5.31.0", result.Purl);
+    }
+
+    // ── oci: the org's own image-scan result ─────────────────────────────────────
+
+    private const string ImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    private async Task<(string OrgId, string VersionId)> SeedHostedImageAsync(string repository = "team/app")
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        string pkg = await PackageSeeder.InsertAsync(_db, orgId, "oci", repository);
+        string versionId = await PackageSeeder.InsertVersionAsync(_db, pkg, ImageDigest, "pkg:oci/app@sha256%3A1111");
+        return (orgId, versionId);
+    }
+
+    private async Task SeedScanResultAsync(
+        string orgId, string versionId, int gaps = 0, params (string OsvId, double Cvss)[] advisories)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_scan_coverage (
+                id, org_id, owner_kind, package_version_id, platform, scanner_version,
+                extraction_version, osv_source, scanned_at, gaps_json, gap_count)
+            VALUES (@id, @orgId, 'package_version', @pv, 'linux/amd64', '1', '1', 'remote', '2026-06-15T12:00:00.000Z', '[]', @gaps)
+            """,
+            new { id = Guid.NewGuid().ToString("N"), orgId, pv = versionId, gaps });
+
+        foreach (var (osvId, cvss) in advisories)
+        {
+            string vulnId = await VulnerabilitySeeder.InsertVulnAsync(
+                _db, osvId, ecosystem: "Debian:12", packageName: "openssl", severity: "HIGH", cvssScore: cvss,
+                aliases: "[\"CVE-2024-0001\"]");
+            string componentId = Guid.NewGuid().ToString("N");
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO oci_image_components (
+                    id, org_id, owner_kind, package_version_id, platform, purl, ecosystem, name, version)
+                VALUES (@componentId, @orgId, 'package_version', @pv, 'linux/amd64', 'pkg:deb/debian/openssl@3.0', 'deb', 'openssl', '3.0')
+                """,
+                new { componentId, orgId, pv = versionId });
+            await conn.ExecuteAsync(
+                "INSERT INTO oci_component_vulns (id, org_id, component_id, vuln_id) VALUES (@id, @orgId, @componentId, @vulnId)",
+                new { id = Guid.NewGuid().ToString("N"), orgId, componentId, vulnId });
+        }
+    }
+
+    private PackageLookupService BuildOciService()
+    {
+        var scans = new Dependably.Infrastructure.OciScan.OciScanRepository(_db);
+        var pullGate = new OciPullGateResolver(
+            _db, scans, new VulnerabilityRepository(_db, TimeProvider.System), new LiveScannerCoverage());
+        return BuildService(new FakeOsvSource(_ => throw new InvalidOperationException("OSV must not be queried")),
+            ociScans: scans, ociPullGate: pullGate, quarantine: new QuarantineRepository(_db, TimeProvider.System));
+    }
+
+    private sealed class LiveScannerCoverage : Dependably.Infrastructure.OciScan.IOciScanCoverage
+    {
+        public bool Enabled => true;
+
+        public Task<bool> IsCoveredAsync(string orgId, CancellationToken ct = default) => Task.FromResult(true);
+    }
+
+    // Under oci_scan_enforcement=block the lookup answers what the pull gate would: an image with
+    // no complete scan is refused as unscanned, a finding over a tolerance is refused by its arm.
+
+    [Fact]
+    public async Task Oci_UnderBlock_ImageWithNoScanResult_IsBlockedUnscanned_AsThePullGateRefusesIt()
+    {
+        var (orgId, _) = await SeedHostedImageAsync();
+        await SetOciScanEnforcementAsync(orgId, "block");
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Equal("no_scan_result", result.AdvisorySource.Reason);
+        Assert.Equal("blocked", result.Verdict);
+        Assert.Equal("unscanned", result.BlockedReason);
+    }
+
+    [Fact]
+    public async Task Oci_UnderBlock_PartialScanWithNoFindings_IsBlockedUnscanned()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SetOciScanEnforcementAsync(orgId, "block");
+        await SeedScanResultAsync(orgId, versionId, gaps: 2);
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Equal("scan_incomplete", result.AdvisorySource.Reason);
+        Assert.Equal("blocked", result.Verdict);
+        Assert.Equal("unscanned", result.BlockedReason);
+    }
+
+    [Fact]
+    public async Task Oci_UnderBlock_CompleteCleanScan_IsAllowed()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SetOciScanEnforcementAsync(orgId, "block");
+        await SeedScanResultAsync(orgId, versionId);
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Equal("checked", result.AdvisorySource.Status);
+        Assert.Equal("allowed", result.Verdict);
+    }
+
+    [Fact]
+    public async Task Oci_UnderBlock_ScoreOverTheTolerance_IsBlockedByTheScoreArm()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SetOciScanEnforcementAsync(orgId, "block");
+        await SetMaxOsvScoreToleranceAsync(orgId, 7.0);
+        await SeedScanResultAsync(orgId, versionId, 0, ("DEBIAN-CVE-2024-0020", 9.1));
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Equal("blocked", result.Verdict);
+        Assert.Equal("vuln_score", result.BlockedReason);
+    }
+
+    [Fact]
+    public async Task Oci_UnderBlock_UnscannedImageAnOperatorApproved_IsNotBlocked()
+    {
+        var (orgId, _) = await SeedHostedImageAsync();
+        await SetOciScanEnforcementAsync(orgId, "block");
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO quarantine (id, org_id, ecosystem, purl, gate, state) VALUES (@id, @orgId, 'oci', @purl, 'unscanned', 'approved')",
+                new { id = Guid.NewGuid().ToString("N"), orgId, purl = PurlNormalizer.Oci("team/app", ImageDigest) });
+        }
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Null(result.BlockedReason);
+        Assert.Equal("warn", result.Verdict);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("warn")]
+    public async Task Oci_UnderOffOrWarn_UnscannedImageAndScoreOverTheTolerance_OnlyWarn(string posture)
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        var (otherOrg, _) = await SeedHostedImageAsync("team/other");
+        await SetOciScanEnforcementAsync(orgId, posture);
+        await SetOciScanEnforcementAsync(otherOrg, posture);
+        await SetMaxOsvScoreToleranceAsync(orgId, 7.0);
+        await SeedScanResultAsync(orgId, versionId, 0, ("DEBIAN-CVE-2024-0021", 9.1));
+        var service = BuildOciService();
+
+        var scored = (await service.LookupAsync(new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+        var unscanned = (await service.LookupAsync(new PackageLookupRequest(otherOrg, "oci", "team/other", ImageDigest))).Result!;
+
+        Assert.Equal("warn", scored.Verdict);
+        Assert.Null(scored.BlockedReason);
+        Assert.Equal("warn", unscanned.Verdict);
+        Assert.Null(unscanned.BlockedReason);
+    }
+
+    [Fact]
+    public async Task Oci_ScannedImageWithAdvisories_AnswersFromTheOrgsScanResult()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SeedScanResultAsync(orgId, versionId, 0, ("DEBIAN-CVE-2024-0001", 8.1));
+
+        var outcome = await BuildOciService().LookupAsync(new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest));
+
+        Assert.Equal(PackageLookupStatus.Ok, outcome.Status);
+        var result = outcome.Result!;
+        Assert.True(result.Vulnerabilities.Available);
+        var advisory = Assert.Single(result.Vulnerabilities.Scored);
+        Assert.Equal("DEBIAN-CVE-2024-0001", advisory.Id);
+        Assert.Equal(8.1, advisory.CvssScore);
+        Assert.Equal("checked", result.AdvisorySource.Status);
+        Assert.Equal("oci_scan", result.AdvisorySource.Source);
+    }
+
+    [Fact]
+    public async Task Oci_ScannedCleanImage_IsExplicitlyCheckedAndClean()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SeedScanResultAsync(orgId, versionId);
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.True(result.Vulnerabilities.Available);
+        Assert.Empty(result.Vulnerabilities.Scored);
+        Assert.Equal("checked", result.AdvisorySource.Status);
+        Assert.Equal("allowed", result.Verdict);
+    }
+
+    [Fact]
+    public async Task Oci_ImageWithNoScanResult_IsUnavailable_NeverClean()
+    {
+        var (orgId, _) = await SeedHostedImageAsync();
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.Equal("unavailable", result.AdvisorySource.Status);
+        Assert.Equal("no_scan_result", result.AdvisorySource.Reason);
+        Assert.Equal("warn", result.Verdict);
+    }
+
+    [Fact]
+    public async Task Oci_ScanResultIsReadFreshWhenItLands_NotServedFromTheLookupCache()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        var service = BuildOciService();
+
+        var before = (await service.LookupAsync(new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+        await SeedScanResultAsync(orgId, versionId, 0, ("DEBIAN-CVE-2024-0002", 6.0));
+        var after = (await service.LookupAsync(new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Equal("no_scan_result", before.AdvisorySource.Reason);
+        Assert.Equal("checked", after.AdvisorySource.Status);
+        Assert.Single(after.Vulnerabilities.Scored);
+    }
+
+    [Fact]
+    public async Task Oci_AnotherOrgsScanResult_IsNeverVisible()
+    {
+        var (orgA, versionA) = await SeedHostedImageAsync();
+        await SeedScanResultAsync(orgA, versionA, 0, ("DEBIAN-CVE-2024-0003", 9.0));
+        // Org B hosts an image of the same name and digest but holds no scan result of its own.
+        var (orgB, _) = await SeedHostedImageAsync();
+
+        var forB = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgB, "oci", "team/app", ImageDigest))).Result!;
+        var forA = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgA, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Empty(forB.Vulnerabilities.Scored);
+        Assert.Equal("no_scan_result", forB.AdvisorySource.Reason);
+        Assert.False(forB.Vulnerabilities.Available);
+        Assert.Single(forA.Vulnerabilities.Scored);
+    }
+
+    [Fact]
+    public async Task Oci_ProxiedImageSharedByTwoOrgs_ShowsEachOrgOnlyItsOwnScan()
+    {
+        string orgA = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        string orgB = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        string caId = Guid.NewGuid().ToString("N");
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO cache_artifact (id, ecosystem, name, version, filename, blob_key, content_hash) " +
+                "VALUES (@caId, 'oci', 'library/nginx', @digest, 'manifest', 'k', 'h')",
+                new { caId, digest = ImageDigest });
+            foreach (string org in new[] { orgA, orgB })
+            {
+                await conn.ExecuteAsync(
+                    "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@org, @caId)",
+                    new { org, caId });
+            }
+
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO oci_scan_coverage (
+                    id, org_id, owner_kind, cache_artifact_id, platform, scanner_version,
+                    extraction_version, osv_source, scanned_at, gaps_json, gap_count)
+                VALUES (@id, @orgA, 'cache_artifact', @caId, 'linux/amd64', '1', '1', 'remote', '2026-06-15T12:00:00.000Z', '[]', 0)
+                """,
+                new { id = Guid.NewGuid().ToString("N"), orgA, caId });
+        }
+
+        var service = BuildOciService();
+        var forA = (await service.LookupAsync(new PackageLookupRequest(orgA, "oci", "library/nginx", ImageDigest))).Result!;
+        var forB = (await service.LookupAsync(new PackageLookupRequest(orgB, "oci", "library/nginx", ImageDigest))).Result!;
+
+        Assert.Equal("checked", forA.AdvisorySource.Status);
+        Assert.Equal("no_scan_result", forB.AdvisorySource.Reason);
+    }
+
+    [Fact]
+    public async Task Oci_PartialScan_WithNoAdvisories_IsUnavailable_NotClean()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SeedScanResultAsync(orgId, versionId, gaps: 2);
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.False(result.Vulnerabilities.Available);
+        Assert.Equal("unavailable", result.AdvisorySource.Status);
+        Assert.Equal("scan_incomplete", result.AdvisorySource.Reason);
+        Assert.Equal("warn", result.Verdict);
+    }
+
+    [Fact]
+    public async Task Oci_PartialScan_StillReportsTheAdvisoriesItFound()
+    {
+        var (orgId, versionId) = await SeedHostedImageAsync();
+        await SeedScanResultAsync(orgId, versionId, 1, ("DEBIAN-CVE-2024-0004", 7.0));
+
+        var result = (await BuildOciService().LookupAsync(
+            new PackageLookupRequest(orgId, "oci", "team/app", ImageDigest))).Result!;
+
+        Assert.Single(result.Vulnerabilities.Scored);
+        Assert.Equal("scan_incomplete", result.AdvisorySource.Reason);
+        Assert.Contains("vulnerabilities", result.UnavailableChecks);
+    }
+
+    [Theory]
+    [InlineData("latest")]
+    [InlineData("1.25")]
+    [InlineData("sha256:abc")]
+    public async Task Oci_VersionThatIsNotADigest_IsRejected(string version)
+    {
+        var (orgId, _) = await SeedHostedImageAsync();
+
+        var outcome = await BuildOciService().LookupAsync(new PackageLookupRequest(orgId, "oci", "team/app", version));
+
+        Assert.Equal(PackageLookupStatus.InvalidInput, outcome.Status);
+        Assert.Equal("oci.digestRequired", outcome.Reason);
+    }
+
+    private async Task<string> SeedOrgWithApkUpstreamsAsync(params string[] urls)
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        foreach (string url in urls)
+        {
+            await registries.AddAsync(orgId, new NewUpstreamRegistry("apk", url));
+        }
+
+        return orgId;
+    }
+
     // ── Cargo / Go helpers ───────────────────────────────────────────────────────
 
     private static FakeOsvSource NoAdvisories() => new(_ => new List<OsvAdvisory>());
@@ -819,6 +2377,20 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         return orgId;
     }
 
+    private async Task<string> SeedOrgWithMavenUpstreamAsync()
+    {
+        string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        var registries = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
+        await registries.AddAsync(orgId, new NewUpstreamRegistry("maven", _server.Urls[0]));
+        return orgId;
+    }
+
+    private void StubWidgetMavenMetadata()
+        => _server.Given(Request.Create().WithPath("/com/acme/widget/maven-metadata.xml").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200).WithBody(
+                "<metadata><versioning><release>2.0.0</release>" +
+                "<versions><version>1.0.0</version><version>2.0.0</version></versions></versioning></metadata>"));
+
     private async Task<string> SeedOrgWithGoUpstreamAsync()
     {
         string orgId = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
@@ -833,6 +2405,38 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         await conn.ExecuteAsync(
             "UPDATE org_settings SET min_release_age_hours = @hours WHERE org_id = @orgId",
             new { hours, orgId });
+    }
+
+    private async Task SetEpssToleranceAsync(string orgId, double? probability, double? percentile)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET max_epss_tolerance = @probability, max_epss_percentile_tolerance = @percentile WHERE org_id = @orgId",
+            new { probability, percentile, orgId });
+    }
+
+    private async Task SetBlockKevAsync(string orgId, string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET block_kev = @mode WHERE org_id = @orgId",
+            new { mode, orgId });
+    }
+
+    private async Task SetOciScanEnforcementAsync(string orgId, string mode)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET oci_scan_enforcement = @mode WHERE org_id = @orgId",
+            new { mode, orgId });
+    }
+
+    private async Task SetMaxOsvScoreToleranceAsync(string orgId, double tolerance)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET max_osv_score_tolerance = @tolerance WHERE org_id = @orgId",
+            new { tolerance, orgId });
     }
 
     private async Task SetBlockDeprecatedAsync(string orgId, string mode)
@@ -928,7 +2532,10 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
     }
 
     private PackageLookupService BuildService(
-        IOsvSource osv, bool instanceAirGapped = false, TimeProvider? clock = null)
+        IOsvSource osv, bool instanceAirGapped = false, TimeProvider? clock = null,
+        IUpstreamLatestVersionResolver? latestResolverOverride = null,
+        Dependably.Infrastructure.OciScan.OciScanRepository? ociScans = null,
+        OciPullGateResolver? ociPullGate = null, QuarantineRepository? quarantine = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -951,7 +2558,8 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
 
         var registryRepo = new UpstreamRegistryRepository(_db, TimeProvider.System, TestEnvelope.Configured(_envelopeKey));
         var registryResolver = new UpstreamRegistryResolver(registryRepo);
-        var latestResolver = new UpstreamLatestVersionResolver(upstreamClient, registryResolver);
+        var latestResolver = latestResolverOverride
+            ?? new UpstreamLatestVersionResolver(upstreamClient, registryResolver, _reserved);
 
         var orgs = new OrgRepository(_db);
         var vulns = new VulnerabilityRepository(_db, TimeProvider.System);
@@ -960,7 +2568,8 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
 
         return new PackageLookupService(
             orgs, registryResolver, upstreamClient, latestResolver, osv, vulns, licenses,
-            airGap, clock ?? TimeProvider.System, cache);
+            airGap, clock ?? TimeProvider.System, cache, _reserved, ociScans: ociScans,
+            ociPullGate: ociPullGate, quarantine: quarantine);
     }
 
     /// <summary>
@@ -971,11 +2580,29 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
     private sealed class FakeOsvSource : IOsvSource
     {
         private readonly Func<string, List<OsvAdvisory>> _handler;
-        private readonly bool _reached;
-        public FakeOsvSource(Func<string, List<OsvAdvisory>> handler, bool reached = true)
+        private readonly Func<DistroScope, string, string, OsvScopedQueryResult>? _scoped;
+
+        public FakeOsvSource(
+            Func<string, List<OsvAdvisory>> handler, bool reached = true,
+            Func<DistroScope, string, string, OsvScopedQueryResult>? scoped = null)
         {
             _handler = handler;
-            _reached = reached;
+            Reached = reached;
+            _scoped = scoped;
+        }
+
+        public List<(string Scope, string Name, string Version)> ScopedCalls { get; } = [];
+
+        public List<string> QueryCalls { get; } = [];
+
+        public bool Reached { get; set; }
+
+        public Task<OsvScopedQueryResult> TryQueryDistroPackageAsync(
+            DistroScope scope, string name, string version, CancellationToken ct = default)
+        {
+            ScopedCalls.Add((scope.OsvEcosystem, name, version));
+            return Task.FromResult(_scoped?.Invoke(scope, name, version)
+                ?? new OsvScopedQueryResult([], Reached: false, Covered: false));
         }
 
         public Task<List<OsvAdvisory>> QueryAsync(string purl, CancellationToken ct = default)
@@ -984,8 +2611,18 @@ public sealed class PackageLookupServiceTests : IAsyncLifetime
         public Task<List<List<OsvAdvisory>>> QueryBatchAsync(IReadOnlyList<string> purls, CancellationToken ct = default)
             => Task.FromResult(purls.Select(_handler).ToList());
 
-        public Task<OsvQueryResult> TryQueryAsync(string purl, CancellationToken ct = default)
-            => Task.FromResult(new OsvQueryResult(_handler(purl), _reached));
+        public TaskCompletionSource? Gate { get; set; }
+
+        public async Task<OsvQueryResult> TryQueryAsync(string purl, CancellationToken ct = default)
+        {
+            QueryCalls.Add(purl);
+            if (Gate is not null)
+            {
+                await Gate.Task;
+            }
+
+            return new OsvQueryResult(_handler(purl), Reached);
+        }
     }
 
     private sealed class AllowAllValidator : IUpstreamUrlValidator

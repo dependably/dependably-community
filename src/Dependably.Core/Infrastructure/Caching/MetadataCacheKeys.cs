@@ -15,6 +15,27 @@ public interface IOrgScopedCacheKey
 }
 
 /// <summary>
+/// Marks a rendered-cache key whose document embeds absolute URLs built from the request's
+/// public base (<c>IPublicUrlBuilder.BaseUrl</c>: scheme and <c>Host</c>, port included). The
+/// host filter admits more than one authority for the same tenant (the apex, the loopback names,
+/// any port, every <c>HOST_ROUTING</c> host), so a document rendered for one authority must never
+/// answer a request through another: its tarball and registration URLs would send that client to
+/// the first requester's host until the entry expired.
+///
+/// <para>The key formatter leaves <see cref="PublicBase"/> out: the string it produces names the
+/// document's family, every base's variant of one package, and is what eviction addresses.
+/// <see cref="MetadataResponseCache{TKey,TValue}"/> stores each variant under
+/// <see cref="MetadataCacheKeys.PublicBaseVariant"/>, which adds the family's invalidation
+/// generation and the base, so evicting the family retires every variant without enumerating the
+/// hosts it was rendered for. A <see langword="null"/> base is the family itself, which is what an
+/// eviction site passes.</para>
+/// </summary>
+public interface IPublicBaseVariantKey
+{
+    string? PublicBase { get; }
+}
+
+/// <summary>
 /// Canonical cache-key formatters for each ecosystem's metadata responses. Each
 /// <c>RenderedResponseCache</c>/<c>MetadataResponseCache</c> singleton is constructed with the
 /// matching formatter, so every get/set/evict for a logical entry produces the identical string —
@@ -56,6 +77,8 @@ public static class MetadataCacheKeys
     /// requests between them; sharing one key would serve the stale wrong-path body until
     /// its TTL expired. Distinct keys prevent that, mirroring the NuGet registration key.
     /// </summary>
+    /// <remarks>The request's public base is a variant of this family, not part of it — see
+    /// <see cref="IPublicBaseVariantKey"/>.</remarks>
     public static string NpmPackument(NpmPackumentKey key) =>
         $"metadata:{key.OrgId}:npm:{key.FullName}{(key.IsProxy ? ":proxy" : "")}";
 
@@ -68,8 +91,19 @@ public static class MetadataCacheKeys
     /// from the local path to the proxy path. Sharing the same key would let a stale local-only
     /// cache entry be served as the merged upstream response. Distinct keys prevent that.
     /// </summary>
+    /// <remarks>The request's public base is a variant of this family, not part of it — see
+    /// <see cref="IPublicBaseVariantKey"/>.</remarks>
     public static string NuGetRegistration(NuGetRegistrationKey key) =>
         $"metadata:{key.OrgId}:nuget:{key.NormalizedId}:{(key.SemVer2 ? "sv2" : "sv1")}{(key.IsProxy ? ":proxy" : "")}";
+
+    /// <summary>
+    /// Storage key for one public-base variant of a rendered document: the family key, the
+    /// family's invalidation generation, and the base the document was rendered with. The
+    /// generation is what lets one eviction of the family retire every variant. <c>|</c> separates
+    /// the parts because no npm package name, NuGet id, or URL authority contains it.
+    /// </summary>
+    public static string PublicBaseVariant(string family, long generation, string publicBase) =>
+        $"{family}|g{generation}|{publicBase}";
 
     /// <summary>RPM merged-repodata key — org-scoped, one merged tuple per tenant.</summary>
     public static string RpmMergedRepodata(RpmMergedRepodataKey key) =>
@@ -82,11 +116,23 @@ public static class MetadataCacheKeys
     /// is <see langword="null"/> for the artifact-level request; the two flavours must never
     /// share a cache entry — they are different documents (version list vs. snapshot build
     /// list) even though they're both named <c>maven-metadata.xml</c> at adjacent path depths.
+    /// The <c>proxy</c>/<c>local</c> tag distinguishes a document rendered when proxying was
+    /// allowed for the coordinate (upstream-merged) from one rendered local-only, mirroring the
+    /// npm, PyPI and NuGet keys: a reservation or registry change moves subsequent requests
+    /// between the two, and a shared key would let a document rendered under the earlier decision
+    /// answer a request that decided otherwise. Mutation sites evict both variants of each flavour.
+    ///
+    /// Unlike those keys, the tag sits in a fixed position ahead of the coordinate rather than as
+    /// a trailing <c>:proxy</c> suffix. Their trailing segments are names that cannot contain a
+    /// colon; a Maven version is free text, so a suffix would let a local key for version
+    /// <c>proxy</c> (or <c>x:proxy</c>) spell the same string as a proxy key. After the tag the
+    /// coordinate is written as its repository path — groupId and artifactId never contain
+    /// <c>/</c>, and a version is a single path segment — so the artifact-level and version-level
+    /// forms are told apart by segment count, whatever the version text.
     /// </summary>
     public static string MavenMetadata(MavenMetadataKey key) =>
-        key.Version is null
-            ? $"metadata:{key.OrgId}:maven:{key.GroupId}/{key.ArtifactId}"
-            : $"metadata:{key.OrgId}:maven:{key.GroupId}/{key.ArtifactId}:{key.Version}";
+        $"metadata:{key.OrgId}:maven:{(key.IsProxy ? "proxy" : "local")}:{key.GroupId}/{key.ArtifactId}"
+        + (key.Version is null ? "" : $"/{key.Version}");
 
     /// <summary>
     /// RPM local-repodata key — one rendered gzipped document per (tenant, document type).
@@ -123,7 +169,7 @@ public readonly record struct PyPiSimpleIndexKey(string OrgId, string Name) : IO
 /// Identifies an npm packument by tenant, full (scoped) package name, and cache path
 /// (local-only vs proxy-merged — see <see cref="IsProxy"/>).
 /// </summary>
-public readonly record struct NpmPackumentKey(string OrgId, string FullName) : IOrgScopedCacheKey
+public readonly record struct NpmPackumentKey(string OrgId, string FullName) : IOrgScopedCacheKey, IPublicBaseVariantKey
 {
     /// <summary>
     /// <see langword="true"/> when the entry was built by the passthrough (upstream-merged)
@@ -131,6 +177,13 @@ public readonly record struct NpmPackumentKey(string OrgId, string FullName) : I
     /// evict both variants.
     /// </summary>
     public bool IsProxy { get; init; } = false;
+
+    /// <summary>
+    /// The public base (scheme and authority) the packument's tarball URLs were rendered with.
+    /// Every serving path sets it; an eviction site leaves it <see langword="null"/>, which
+    /// addresses every base's variant (see <see cref="IPublicBaseVariantKey"/>).
+    /// </summary>
+    public string? PublicBase { get; init; }
 }
 
 /// <summary>
@@ -139,13 +192,22 @@ public readonly record struct NpmPackumentKey(string OrgId, string FullName) : I
 /// (<see langword="true"/>) from entries built by the local-only path (<see langword="false"/>).
 /// Defaults to <see langword="false"/> so existing non-proxy callsites require no change.
 /// </summary>
-public readonly record struct NuGetRegistrationKey(string OrgId, string NormalizedId, bool SemVer2) : IOrgScopedCacheKey
+public readonly record struct NuGetRegistrationKey(string OrgId, string NormalizedId, bool SemVer2)
+    : IOrgScopedCacheKey, IPublicBaseVariantKey
 {
     /// <summary>
     /// <see langword="true"/> when the entry was built by <c>ServeProxyMergedRegistrationAsync</c>;
     /// <see langword="false"/> when built by <c>ServeLocalRegistrationAsync</c>.
     /// </summary>
     public bool IsProxy { get; init; } = false;
+
+    /// <summary>
+    /// The public base (scheme and authority) the document's registration and package-content
+    /// URLs were rendered with. Every serving path sets it; an eviction site leaves it
+    /// <see langword="null"/>, which addresses every base's variant (see
+    /// <see cref="IPublicBaseVariantKey"/>).
+    /// </summary>
+    public string? PublicBase { get; init; }
 }
 
 /// <summary>Identifies a tenant's merged RPM repodata tuple.</summary>
@@ -155,10 +217,20 @@ public readonly record struct RpmMergedRepodataKey(string OrgId) : IOrgScopedCac
 /// Identifies a Maven metadata document by tenant, groupId, and artifactId, plus an optional
 /// <see cref="Version"/> distinguishing the version-level SNAPSHOT document
 /// (<c>g/a/{version}/maven-metadata.xml</c>) from the artifact-level document
-/// (<c>g/a/maven-metadata.xml</c>, <see langword="null"/> version).
+/// (<c>g/a/maven-metadata.xml</c>, <see langword="null"/> version), and the rendering decision
+/// (see <see cref="IsProxy"/>).
 /// </summary>
 public readonly record struct MavenMetadataKey(string OrgId, string GroupId, string ArtifactId, string? Version = null)
-    : IOrgScopedCacheKey;
+    : IOrgScopedCacheKey
+{
+    /// <summary>
+    /// <see langword="true"/> when the request decided proxying was allowed for the coordinate
+    /// (an upstream registry is configured and no reservation covers the path), so the document
+    /// may carry upstream versions; <see langword="false"/> when it decided local-only. Mutation
+    /// sites evict both variants.
+    /// </summary>
+    public bool IsProxy { get; init; } = false;
+}
 
 /// <summary>
 /// Identifies a single locally-rendered RPM repodata document (primary, filelists, or other)

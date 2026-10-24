@@ -79,8 +79,8 @@ assert_not_contains() {  # <file> <needle> <message>
 # ── Source the script under test ────────────────────────────────────────────
 # Required env vars are stubbed; the BASH_SOURCE guard at the bottom of
 # ai-review.sh keeps `main` from running just because we sourced it.
-export OLLAMA_URL="http://stub.invalid:1"
-export OLLAMA_MODEL="stub-model"
+export AI_REVIEW_URL="http://stub.invalid:1"
+export AI_REVIEW_MODEL="stub-model"
 export CI_MERGE_REQUEST_IID="1"
 export CI_PROJECT_ID="1"
 export CI_API_V4_URL="http://stub.invalid:1/api/v4"

@@ -75,17 +75,35 @@ public sealed class ProxyVersionRecorder
                 return;
             }
 
-            var latest = await _latestResolver.ResolveAsync(req.Ecosystem, req.OrgId, req.PurlName, ct);
+            var latest = await _latestResolver.ResolveFreshAsync(req.Ecosystem, req.OrgId, req.PurlName, ct);
+
+            // A reserved name was never looked up upstream, so there is nothing to seed. The
+            // cache_artifact row is shared across orgs, so its versions_behind is left for an org
+            // that may consult upstream rather than cleared on this org's behalf.
+            if (latest is { IsReserved: true })
+            {
+                return;
+            }
+
             if (!string.IsNullOrWhiteSpace(latest?.Version))
             {
                 await _packages.UpdateUpstreamLatestAsync(pkg.Id, latest.Version, latest.PublishedAt, ct);
             }
 
-            if (cacheArtifactId is not null)
+            // The cache_artifact row is shared across orgs, so a count is written only when upstream
+            // actually answered with a stable-version list for this version. An unreachable, 404 or
+            // stale-declined lookup yields no count, and null here would erase a value another
+            // fetch recorded (Cargo has no daily refresh to restore it). A list with no
+            // stable versions is likewise not an answer: zero behind is a non-empty list with
+            // nothing newer, which CountNewerStable reports as 0.
+            if (cacheArtifactId is not null && !string.IsNullOrWhiteSpace(latest?.Version))
             {
                 int? versionsBehind = EcosystemVersionOrdering.CountNewerStable(
-                    req.Ecosystem, latest?.StableVersionsDescending, req.Version);
-                await _cacheArtifacts.UpdateVersionsBehindAsync(cacheArtifactId, versionsBehind, ct);
+                    req.Ecosystem, latest.StableVersionsDescending, req.Version);
+                if (versionsBehind is not null)
+                {
+                    await _cacheArtifacts.UpdateVersionsBehindAsync(cacheArtifactId, versionsBehind, ct);
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -160,9 +178,9 @@ public sealed class ProxyVersionRecorder
             }
         }
 
-        // Install/lifecycle-script detection on the freshly-cached artifact. Best-effort:
-        // a read or parse failure leaves has_install_script at its 0 default rather than
-        // failing the first-fetch — the artifact has already streamed to the client.
+        // Install/lifecycle-script detection on the freshly-cached artifact.
+        // A read or parse failure never fails the first-fetch (the artifact has already streamed
+        // to the client): npm records the unscannable verdict, the other ecosystems keep the 0 default.
         bool hasScript = false;
         string? scriptKind = null;
         try
@@ -177,7 +195,9 @@ public sealed class ProxyVersionRecorder
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Swallowed: detection is advisory; the cached version still serves.
+            var failed = ScriptDetectionService.FailClosedResult(req.Ecosystem);
+            hasScript = failed.HasScript;
+            scriptKind = failed.Kind;
         }
 
         // npm install-manifest extraction writes only to the global plane, same as license

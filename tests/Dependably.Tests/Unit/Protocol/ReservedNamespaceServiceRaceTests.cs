@@ -58,6 +58,43 @@ public sealed class ReservedNamespaceServiceRaceTests : IClassFixture<InMemoryDb
         Assert.Equal(0, sut.FillGuardCount);
     }
 
+    /// <summary>
+    /// Two overlapping list reads for one org share a generation; the second to store replaces the
+    /// first's entry. The replacement must not retire the generation the surviving entry is bound
+    /// to, so the list stays cached and the next check does not read the store again.
+    /// </summary>
+    [Fact]
+    public async Task OverlappingListFillsOfOneGeneration_LeaveTheSurvivingEntryCached()
+    {
+        string orgId = $"rns-overlap-{Guid.NewGuid():N}";
+        var cache = new EvictionObservingCache(TestTime.Frozen());
+        var sut = new ReservedNamespaceListCache(cache);
+        int reads = 0;
+
+        Task<IReadOnlyList<ReservedNamespaceEntry>> Read(CancellationToken _)
+        {
+            Interlocked.Increment(ref reads);
+            return Task.FromResult<IReadOnlyList<ReservedNamespaceEntry>>([]);
+        }
+
+        // Fill B starts and finishes inside fill A's read, so A's store replaces B's entry.
+        await sut.GetOrReadAsync(
+            orgId,
+            async ct =>
+            {
+                await sut.GetOrReadAsync(orgId, Read, ct);
+                return await Read(ct);
+            },
+            CancellationToken.None);
+        await cache.WhenEvictedAsync(ReservedNamespaceListCache.CacheKey(orgId), EvictionReason.Replaced);
+        Assert.Equal(2, reads);
+
+        await sut.GetOrReadAsync(orgId, Read, CancellationToken.None);
+
+        Assert.Equal(2, reads);
+        Assert.Equal(1, sut.FillGuardCount);
+    }
+
     private sealed class ThrowingAfterGuardStore : IMetadataStore
     {
         public DbProvider Provider => DbProvider.Sqlite;

@@ -120,7 +120,8 @@ public sealed class SbomSigningKeyRepository
         }
 
         var ecdsa = ECDsa.Create();
-        ecdsa.ImportFromPem(_envelope.Unprotect(row.PrivateKey));
+        ecdsa.ImportFromPem(_envelope.Unprotect(row.PrivateKey, new ProtectedSecretRow(
+            ProtectedSecretKinds.SbomSigningKey, "sbom_signing_key", row.Id, row.OrgId)));
         return new SbomSigningKey(row.Id, row.OrgId, ecdsa);
     }
 

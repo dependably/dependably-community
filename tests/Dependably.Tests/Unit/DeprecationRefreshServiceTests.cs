@@ -7,6 +7,7 @@ using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
+using Dependably.Tests.Infrastructure.Seeding;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -23,6 +24,15 @@ namespace Dependably.Tests.Unit;
 public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
+    private readonly ReservedNamespaceService _reserved;
+
+    public DeprecationRefreshServiceTests()
+    {
+        _reserved = new ReservedNamespaceService(
+            _db,
+            new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+            _clock);
+    }
     private readonly FakeTimeProvider _clock = TestTime.Frozen();
 
     public async Task InitializeAsync()
@@ -55,7 +65,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
             new { id = caId });
 
-        Assert.NotNull(checkedAt);
+        // The slot is yielded through this org's own refresh stamp; the shared row, which records
+        // when upstream last gave a verdict, is not written.
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), await RefreshStampAsync(caId));
+        Assert.Null(checkedAt);
         // The fetch produced no verdict, so the recorded deprecation must survive untouched — a
         // transient outage must not read as "no longer deprecated".
         Assert.Equal("already known", dep);
@@ -721,8 +734,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
             "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
             new { id = caId });
-        // The slot is still yielded (moves off the head of the staleness queue)…
-        Assert.NotNull(checkedAt);
+        // The slot is still yielded (moves off the head of the staleness queue) through this org's own
+        // refresh stamp; the shared row's verdict timestamp is not written…
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), await RefreshStampAsync(caId));
+        Assert.Null(checkedAt);
         // …but the recorded verdict and upstream-latest baseline are left untouched, not read
         // as "unknown" just because the ecosystem is disabled for this org.
         Assert.Equal("already known", dep);
@@ -749,7 +764,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
             "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
             new { id = caId });
-        Assert.NotNull(checkedAt);
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), await RefreshStampAsync(caId));
+        Assert.Null(checkedAt);
         Assert.Equal("already known", dep);
     }
 
@@ -784,7 +800,8 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         Assert.Equal("9.9.9", latest);
         string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM cache_artifact WHERE id = @id", new { id = caId });
-        Assert.NotNull(checkedAt);
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), await RefreshStampAsync(caId));
+        Assert.Null(checkedAt);
     }
 
     [Fact]
@@ -812,7 +829,138 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         Assert.Equal("9.9.9", latest);
         string? checkedAt = await conn.QuerySingleAsync<string?>(
             "SELECT deprecation_checked_at FROM cache_artifact WHERE id = @id", new { id = caId });
-        Assert.NotNull(checkedAt);
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), await RefreshStampAsync(caId));
+        Assert.Null(checkedAt);
+    }
+
+    // ── Reserved namespaces ─────────────────────────────────────────────────────
+
+    private const string WidgetMetadataXml =
+        "<metadata><versioning><release>2.0.0</release>" +
+        "<versions><version>1.0.0</version><version>2.0.0</version></versions></versioning></metadata>";
+
+    [Theory]
+    [InlineData("com.acme")]
+    [InlineData("com.acme.widget")]
+    public async Task MavenPackage_ReservedName_RefreshNeverConsultsUpstream_AndRecordsNoUpstreamFacts(string pattern)
+    {
+        // Both readings of com/acme/widget/maven-metadata.xml: the groupId (com.acme) and the
+        // group-level name (com.acme.widget). A reserved name sends no request; the org's own
+        // baseline recorded before the reservation is cleared to unknown, the shared
+        // cache_artifact row's versions_behind is not touched, and nothing is marked deprecated.
+        var (orgId, packageId, caId, _) = await SeedVersionAsync(
+            ecosystem: "maven", name: "com.acme:widget", version: "1.0.0", origin: "proxy",
+            deprecated: null, deprecationCheckedAt: null);
+        await SeedUpstreamRegistryAsync(orgId, "maven", "http://maven.test");
+        await _reserved.AddAsync(orgId, "maven", pattern, createdBy: null);
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE packages SET upstream_latest_version = '9.9.9' WHERE id = @id", new { id = packageId });
+            await seed.ExecuteAsync(
+                "UPDATE cache_artifact SET versions_behind = 4 WHERE id = @id", new { id = caId });
+        }
+
+        var requests = new List<string>();
+        var service = BuildServiceWithHandler(new RoutingHandler(url =>
+        {
+            requests.Add(url);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(WidgetMetadataXml) };
+        }));
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.Empty(requests);
+        await using var conn = await _db.OpenAsync();
+        Assert.Null(await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId }));
+        var (versionsBehind, deprecated, checkedAt, revokedAt) =
+            await conn.QuerySingleAsync<(int? VersionsBehind, string? Deprecated, string? CheckedAt, string? RevokedAt)>(
+                "SELECT versions_behind, deprecated, deprecation_checked_at, revoked_at FROM cache_artifact WHERE id = @id",
+                new { id = caId });
+        Assert.Equal(4, versionsBehind);
+        Assert.Null(deprecated);
+        Assert.Null(revokedAt);
+        // The slot moves on through this org's own refresh stamp, so the group cannot hold the
+        // queue head; the shared row's verdict timestamp is not written.
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), await RefreshStampAsync(caId));
+        Assert.Null(checkedAt);
+    }
+
+    [Fact]
+    public async Task MavenPackage_ReservedInOneOrgOnly_OtherOrgStillRefreshesFromOneRequest()
+    {
+        // Mixed pass: two orgs share one cached com.acme:widget row and only the first reserved
+        // com.acme. The first org's group sends nothing; the second org's group is refreshed from
+        // exactly one request and records the upstream latest. One org's reservation never
+        // applies to another, and the reserved org's pass never clears the shared row's
+        // versions_behind that the other org's pass wrote, whichever group runs first.
+        var (openOrg, openPkg, openCa, _) = await SeedVersionAsync(
+            ecosystem: "maven", name: "com.acme:widget", version: "1.0.0", origin: "proxy", deprecated: null);
+        string reservedOrg = await OrgSeeder.InsertAsync(_db, $"org-{Guid.NewGuid():N}");
+        string reservedPkg = Guid.NewGuid().ToString("N");
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                """
+                INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy, upstream_latest_version)
+                VALUES (@id, @orgId, 'maven', 'com.acme:widget', 'com.acme:widget', 1, '9.9.9')
+                """,
+                new { id = reservedPkg, orgId = reservedOrg });
+            await seed.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
+                new { orgId = reservedOrg, caId = openCa });
+        }
+        await SeedUpstreamRegistryAsync(reservedOrg, "maven", "http://maven.test");
+        await SeedUpstreamRegistryAsync(openOrg, "maven", "http://maven.test");
+        await _reserved.AddAsync(reservedOrg, "maven", "com.acme", createdBy: null);
+
+        var requests = new List<string>();
+        var service = BuildServiceWithHandler(new RoutingHandler(url =>
+        {
+            requests.Add(url);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(WidgetMetadataXml) };
+        }));
+        await service.RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.Equal("http://maven.test/com/acme/widget/maven-metadata.xml", Assert.Single(requests));
+        await using var conn = await _db.OpenAsync();
+        Assert.Null(await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = reservedPkg }));
+        Assert.Equal("2.0.0", await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = openPkg }));
+        Assert.Equal(1, await conn.QuerySingleAsync<int?>(
+            "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = openCa }));
+    }
+
+    [Fact]
+    public async Task MavenPackage_HostedUnderReservedName_ClearsOnlyItsOwnUpstreamState()
+    {
+        // A hosted version under a reserved name: no upstream request, and its versions_behind
+        // reads as unknown rather than a count derived from an upstream answer.
+        var (orgId, packageId, versionId, _) = await SeedVersionAsync(
+            ecosystem: "maven", name: "com.acme:internal-lib", version: "1.0.0", origin: "uploaded", deprecated: null);
+        await SeedUpstreamRegistryAsync(orgId, "maven", "http://maven.test");
+        await _reserved.AddAsync(orgId, "maven", "com.acme", createdBy: null);
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE packages SET upstream_latest_version = '3.0.0', upstream_latest_checked_at = @stale WHERE id = @id",
+                new { id = packageId, stale = _clock.GetUtcNow().AddDays(-30).ToUtcIso() });
+            await seed.ExecuteAsync(
+                "UPDATE package_versions SET versions_behind = 2 WHERE id = @id", new { id = versionId });
+        }
+
+        var handler = new RecordingHandler();
+        await BuildServiceWithHandler(handler).RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.False(handler.Invoked);
+        await using var conn = await _db.OpenAsync();
+        Assert.Null(await conn.QuerySingleAsync<string?>(
+            "SELECT upstream_latest_version FROM packages WHERE id = @id", new { id = packageId }));
+        Assert.Null(await conn.QuerySingleAsync<int?>(
+            "SELECT versions_behind FROM package_versions WHERE id = @id", new { id = versionId }));
+        Assert.Equal(1, await conn.QuerySingleAsync<int>(
+            "SELECT COUNT(1) FROM package_versions WHERE id = @id", new { id = versionId }));
     }
 
     // ── Upstream-resolve failure (decrypt error) doesn't crash the pass ─────────
@@ -846,8 +994,10 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var (dep, checkedAt) = await conn.QuerySingleAsync<(string?, string?)>(
             "SELECT deprecated, deprecation_checked_at FROM cache_artifact WHERE id = @id",
             new { id = caId });
-        // The slot is yielded (moves off the head of the staleness queue)…
-        Assert.NotNull(checkedAt);
+        // The slot is yielded (moves off the head of the staleness queue) through this org's own
+        // refresh stamp; the shared row's verdict timestamp is not written…
+        Assert.Equal(_clock.GetUtcNow().ToUtcIso(), await RefreshStampAsync(caId));
+        Assert.Null(checkedAt);
         // …but the recorded verdict survives the failed resolve untouched, same as any other
         // upstream-fetch failure.
         Assert.Equal("already known", dep);
@@ -1026,12 +1176,13 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
         var packages = new PackageRepository(_db, time: _clock);
         var cacheArtifacts = new CacheArtifactRepository(_db);
         var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured()));
-        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries);
+        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries, _reserved);
         return new DeprecationRefreshService(
             packages, cacheArtifacts, audit, upstream, latestResolver, registries, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
             _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
+            _reserved, new Dependably.Infrastructure.Hex.HexReleaseRepository(_db));
     }
 
     /// <summary>
@@ -1084,9 +1235,14 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
                 """,
                 new { id = caId, ecosystem, name, version, filename = $"{name}-{version}.tgz", blobKey, purl, deprecated, deprecationCheckedAt });
 
+            // The refresh pass schedules on the per-org stamp, so the seeded staleness is
+            // mirrored onto this org's access row.
             await conn.ExecuteAsync(
-                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
-                new { orgId, caId });
+                """
+                INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, refresh_checked_at)
+                VALUES (@orgId, @caId, @deprecationCheckedAt)
+                """,
+                new { orgId, caId, deprecationCheckedAt });
 
             return (orgId, packageId, caId, purl);
         }
@@ -1120,6 +1276,15 @@ public sealed class DeprecationRefreshServiceTests : IAsyncLifetime
             "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
             new { orgId, caId });
         return caId;
+    }
+
+    /// <summary>The per-org refresh stamp on the single access row seeded for a cached row.</summary>
+    private async Task<string?> RefreshStampAsync(string caId)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.QuerySingleAsync<string?>(
+            "SELECT refresh_checked_at FROM tenant_artifact_access WHERE cache_artifact_id = @id",
+            new { id = caId });
     }
 
     private async Task SetRevokedAtAsync(string caId, string revokedAt)

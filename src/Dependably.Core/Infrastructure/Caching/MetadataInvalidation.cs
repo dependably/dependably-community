@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Dependably.Infrastructure.Caching;
 
 /// <summary>
@@ -42,6 +44,38 @@ public sealed record MetadataInvalidation
     /// </summary>
     public string? Version { get; init; }
 
+    /// <summary>
+    /// True for the org-wide message (<see cref="ForOrg"/>), whose <see cref="Ecosystem"/> field
+    /// carries the message kind <see cref="MetadataInvalidationEcosystems.Org"/> rather than an
+    /// ecosystem id.
+    /// </summary>
+    public bool IsOrgWide => string.Equals(Ecosystem, MetadataInvalidationEcosystems.Org, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The message's <c>scope</c> metric attribute: <see cref="MetadataInvalidationScopes.Org"/>
+    /// for the org-wide message, <see cref="MetadataInvalidationScopes.Ecosystem"/> for a message
+    /// that names one ecosystem's caches (RPM's tenant-wide message included).
+    /// </summary>
+    public string Scope => IsOrgWide ? MetadataInvalidationScopes.Org : MetadataInvalidationScopes.Ecosystem;
+
+    /// <summary>
+    /// The attributes every invalidation-counter measurement carries for this message, shared by
+    /// the publish and receive sides. Always <c>scope</c>; <c>ecosystem</c> only for an
+    /// ecosystem-scoped message, so the <c>ecosystem</c> attribute never holds a value outside
+    /// the shared ecosystem vocabulary. The org id is never a tag. Callers add <c>outcome</c>
+    /// where the instrument records one.
+    /// </summary>
+    public TagList MetricTags()
+    {
+        var tags = new TagList { new KeyValuePair<string, object?>("scope", Scope) };
+        if (!IsOrgWide)
+        {
+            tags.Add(new KeyValuePair<string, object?>("ecosystem", Ecosystem));
+        }
+
+        return tags;
+    }
+
     /// <summary>npm packument invalidation for <paramref name="fullName"/> (scope included).</summary>
     public static MetadataInvalidation ForNpm(string orgId, string fullName) =>
         new() { OrgId = orgId, Ecosystem = MetadataInvalidationEcosystems.Npm, Name = fullName };
@@ -82,13 +116,31 @@ public sealed record MetadataInvalidation
     /// </summary>
     public static MetadataInvalidation ForRpm(string orgId) =>
         new() { OrgId = orgId, Ecosystem = MetadataInvalidationEcosystems.Rpm };
+
+    /// <summary>
+    /// Org-wide invalidation: everything a replica has cached from the org's reserved namespaces
+    /// and proxy settings (see <see cref="OrgWideCacheEviction"/>). Carries the org id and
+    /// nothing else. A reservation pattern covers names that cannot be enumerated and a policy
+    /// change can flip any version's advertised state, so there are no coordinates to name.
+    /// </summary>
+    public static MetadataInvalidation ForOrg(string orgId) =>
+        new() { OrgId = orgId, Ecosystem = MetadataInvalidationEcosystems.Org };
 }
 
 /// <summary>
-/// The bounded ecosystem vocabulary carried on <see cref="MetadataInvalidation.Ecosystem"/> and
-/// used as the <c>ecosystem</c> metric attribute on the invalidation counters. Bounded by
-/// construction — an unrecognized value is dropped by the coordinator rather than passed through
-/// to a metric label.
+/// The wire vocabulary of <see cref="MetadataInvalidation.Ecosystem"/>: the values the codec
+/// accepts and the coordinator expands. It is the message vocabulary only, not a metric label
+/// set — the invalidation counters derive their attributes through
+/// <see cref="MetadataInvalidation.MetricTags"/>, which emits <c>ecosystem</c> only for the real
+/// ecosystem ids here and counts <see cref="Org"/> under <c>scope=org</c> instead. An
+/// unrecognized value is dropped by the codec rather than applied.
+///
+/// <para><see cref="Org"/> is not an ecosystem but a message kind: the org-wide invalidation.
+/// It travels in this field, rather than as a new optional field on an existing ecosystem's
+/// message, because the codec of a build that predates it rejects an ecosystem it does not know.
+/// During a rolling deploy the older replicas therefore drop the message and converge on TTL,
+/// where an optional field they ignore would be read as a per-package message for whatever
+/// ecosystem it rode on.</para>
 /// </summary>
 public static class MetadataInvalidationEcosystems
 {
@@ -98,10 +150,29 @@ public static class MetadataInvalidationEcosystems
     public const string Maven = "maven";
     public const string Rpm = "rpm";
 
-    /// <summary>Every recognized ecosystem, in declaration order.</summary>
-    public static readonly IReadOnlyList<string> All = new[] { Npm, PyPi, NuGet, Maven, Rpm };
+    /// <summary>The org-wide message kind; see <see cref="MetadataInvalidation.ForOrg"/>.</summary>
+    public const string Org = "org";
+
+    /// <summary>Every recognized value, in declaration order.</summary>
+    public static readonly IReadOnlyList<string> All = new[] { Npm, PyPi, NuGet, Maven, Rpm, Org };
 
     /// <summary>True when <paramref name="ecosystem"/> is one this instance knows how to expand.</summary>
     public static bool IsKnown(string? ecosystem) =>
         ecosystem is not null && All.Contains(ecosystem, StringComparer.Ordinal);
+}
+
+/// <summary>
+/// The bounded <c>scope</c> attribute on the invalidation counters: which kind of cache set a
+/// message clears.
+/// </summary>
+public static class MetadataInvalidationScopes
+{
+    /// <summary>A message naming one ecosystem's caches (npm, PyPI, NuGet, Maven, RPM).</summary>
+    public const string Ecosystem = "ecosystem";
+
+    /// <summary>The org-wide message; see <see cref="MetadataInvalidation.ForOrg"/>.</summary>
+    public const string Org = "org";
+
+    /// <summary>Every value, in declaration order.</summary>
+    public static readonly IReadOnlyList<string> All = new[] { Ecosystem, Org };
 }

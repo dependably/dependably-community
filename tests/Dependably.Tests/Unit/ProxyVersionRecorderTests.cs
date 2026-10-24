@@ -32,7 +32,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
     {
         string orgId = await SeedOrgAsync();
         var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
-        resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+        resolver.ResolveFreshAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null)));
         var recorder = BuildRecorder(resolver);
         string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
@@ -41,7 +41,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
             extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
 
         Assert.Equal("9.9.9", await ReadUpstreamLatestAsync(orgId, "left-pad"));
-        await resolver.Received(1).ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>());
+        await resolver.Received(1).ResolveFreshAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         string orgId = await SeedOrgAsync();
         var publishedAt = new DateTimeOffset(2024, 1, 2, 3, 4, 5, TimeSpan.Zero);
         var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
-        resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+        resolver.ResolveFreshAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", publishedAt)));
         var recorder = BuildRecorder(resolver);
         string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
@@ -70,7 +70,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         // A prior pass already recorded a baseline; the daily refresh owns currency from here.
         await SeedPackageWithLatestAsync(orgId, "left-pad", "5.0.0");
         var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
-        resolver.ResolveAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        resolver.ResolveFreshAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null)));
         var recorder = BuildRecorder(resolver);
         string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.1.0");
@@ -79,7 +79,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
             extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
 
         Assert.Equal("5.0.0", await ReadUpstreamLatestAsync(orgId, "left-pad"));
-        await resolver.DidNotReceive().ResolveAsync(
+        await resolver.DidNotReceive().ResolveFreshAsync(
             Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
@@ -89,7 +89,7 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         string orgId = await SeedOrgAsync();
         string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
         var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
-        resolver.ResolveAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+        resolver.ResolveFreshAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new UpstreamLatestVersion("9.9.9", null,
                 StableVersionsDescending: new[] { "3.0.0", "2.0.0", "1.0.0" })));
         var recorder = BuildRecorder(resolver);
@@ -102,6 +102,61 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
         int? behind = await conn.QuerySingleAsync<int?>(
             "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = caId });
         Assert.Equal(2, behind); // 2.0.0 and 3.0.0 are newer than the held 1.0.0
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecordAsync_FirstFetch_UnansweredLookupLeavesSharedVersionsBehindUntouched(bool answeredWithoutStableList)
+    {
+        string orgId = await SeedOrgAsync();
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE cache_artifact SET versions_behind = 3 WHERE id = @id", new { id = caId });
+        }
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        resolver.ResolveFreshAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(answeredWithoutStableList
+                ? new UpstreamLatestVersion("9.9.9", null, StableVersionsDescending: Array.Empty<string>())
+                : UpstreamLatestVersion.None));
+        var recorder = BuildRecorder(resolver);
+
+        await recorder.RecordAsync(
+            await BuildRequestAsync(orgId, "left-pad", "1.0.0"),
+            extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
+
+        await using var conn = await _db.OpenAsync();
+        int? behind = await conn.QuerySingleAsync<int?>(
+            "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Equal(3, behind);
+    }
+
+    [Fact]
+    public async Task RecordAsync_FirstFetch_AnswerOverwritesSharedVersionsBehind()
+    {
+        string orgId = await SeedOrgAsync();
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync(
+                "UPDATE cache_artifact SET versions_behind = 3 WHERE id = @id", new { id = caId });
+        }
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        resolver.ResolveFreshAsync("npm", orgId, "left-pad", Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(new UpstreamLatestVersion("1.0.0", null,
+                StableVersionsDescending: new[] { "1.0.0" })));
+        var recorder = BuildRecorder(resolver);
+
+        await recorder.RecordAsync(
+            await BuildRequestAsync(orgId, "left-pad", "1.0.0"),
+            extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
+
+        await using var conn = await _db.OpenAsync();
+        int? behind = await conn.QuerySingleAsync<int?>(
+            "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = caId });
+        Assert.Equal(0, behind);
     }
 
     /// <summary>
@@ -190,6 +245,33 @@ public sealed class ProxyVersionRecorderTests : IAsyncLifetime
             "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id) VALUES (@orgId, @caId)",
             new { orgId, caId });
         return caId;
+    }
+
+    [Theory]
+    [InlineData("npm", 1, "npm:unscannable-manifest")]
+    [InlineData("pypi", 0, null)]
+    public async Task RecordAsync_BlobReadFails_InstallScriptFlagFailsClosedForNpmOnly(
+        string ecosystem, int expectedFlag, string? expectedKind)
+    {
+        string orgId = await SeedOrgAsync();
+        var resolver = Substitute.For<IUpstreamLatestVersionResolver>();
+        var recorder = BuildRecorder(resolver);
+        string caId = await SeedCacheArtifactAsync(orgId, "left-pad", "1.0.0");
+        var request = await BuildRequestAsync(orgId, "left-pad", "1.0.0");
+        request = request with
+        {
+            Ecosystem = ecosystem,
+            Blob = request.Blob with { OpenAsync = _ => throw new IOException("storage fault") },
+        };
+
+        await recorder.RecordAsync(request, extractLicenses: null, extractManifest: null, cacheArtifactId: caId);
+
+        await using var conn = await _db.OpenAsync();
+        var (Flag, Kind) = await conn.QuerySingleAsync<(int Flag, string? Kind)>(
+            "SELECT has_install_script AS Flag, install_script_kind AS Kind FROM cache_artifact WHERE id = @id",
+            new { id = caId });
+        Assert.Equal(expectedFlag, Flag);
+        Assert.Equal(expectedKind, Kind);
     }
 
     private ProxyVersionRecorder BuildRecorder(IUpstreamLatestVersionResolver resolver) =>

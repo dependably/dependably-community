@@ -66,7 +66,8 @@ public sealed class SsoOnlyRevokesPasswordSessionsTests : IClassFixture<Dependab
         // A session minted AFTER the flip via SAML — the adversarial twin. The bump must not
         // turn the SSO-only flip into a sign-everyone-out event for the sessions it was never
         // meant to touch.
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string nameId = $"post-flip-{Guid.NewGuid():N}";
         string email = $"{nameId}@example.com";

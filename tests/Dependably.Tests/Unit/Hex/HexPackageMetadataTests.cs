@@ -162,4 +162,140 @@ public sealed class HexPackageMetadataTests
         Assert.Empty(meta.Links);
         Assert.Null(meta.Elixir);
     }
+
+    private const string Identity = "{<<\"name\">>,<<\"demo\">>}.\n{<<\"version\">>,<<\"1.0.0\">>}.\n";
+
+    [Fact]
+    public void CharlistFields_AreAcceptedForOptionalStrings_ButNotForTheRequiredIdentity()
+    {
+        var meta = HexPackageMetadata.Parse(Identity + "{<<\"description\">>,\"A charlist description\"}.\n{<<\"elixir\">>,\"~> 1.14\"}.");
+
+        Assert.Equal("A charlist description", meta.Description);
+        Assert.Equal("~> 1.14", meta.Elixir);
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexPackageMetadata.Parse(
+            "{<<\"name\">>,\"demo\"}.\n{<<\"version\">>,<<\"1.0.0\">>}."));
+        Assert.Contains("missing name", ex.Message);
+    }
+
+    [Fact]
+    public void NonStringOptionalFields_FallBackToTheirDefaults()
+    {
+        var meta = HexPackageMetadata.Parse(Identity + "{<<\"description\">>,42}.\n{<<\"app\">>,42}.\n{<<\"licenses\">>,<<\"MIT\">>}.");
+
+        Assert.Null(meta.Description);
+        Assert.Equal("demo", meta.App);
+        Assert.Empty(meta.Licenses);
+    }
+
+    [Fact]
+    public void StringLists_KeepStringsAndCharlists_AndDropOtherItems()
+    {
+        var meta = HexPackageMetadata.Parse(Identity + "{<<\"licenses\">>,[<<\"MIT\">>,\"Apache-2.0\",7,{<<\"x\">>}]}.");
+
+        Assert.Equal(new[] { "MIT", "Apache-2.0" }, meta.Licenses);
+    }
+
+    [Fact]
+    public void Links_AcceptAMapOrAProplist_AndSkipNonStringEntries()
+    {
+        var fromMap = HexPackageMetadata.Parse(
+            Identity + "{<<\"links\">>,#{<<\"GitHub\">> => <<\"https://github.com/michalmuskala/jason\">>, <<\"Bad\">> => 5, 3 => <<\"x\">>}}.");
+        var fromProplist = HexPackageMetadata.Parse(
+            Identity + "{<<\"links\">>,[{<<\"Docs\">>,<<\"https://hexdocs.pm/jason\">>},{<<\"Bad\">>,5},<<\"stray\">>]}.");
+        var neither = HexPackageMetadata.Parse(Identity + "{<<\"links\">>,<<\"https://example.com\">>}.");
+
+        Assert.Equal(new Dictionary<string, string> { ["GitHub"] = "https://github.com/michalmuskala/jason" }, fromMap.Links);
+        Assert.Equal(new Dictionary<string, string> { ["Docs"] = "https://hexdocs.pm/jason" }, fromProplist.Links);
+        Assert.Empty(neither.Links);
+    }
+
+    [Fact]
+    public void TopLevelTermsThatAreNotKeyedPairs_AreIgnored()
+    {
+        var meta = HexPackageMetadata.Parse(Identity + "{1,2}.\n{<<\"a\">>,1,2}.\nfoo.\n[1,2].");
+
+        Assert.Equal("demo", meta.Name);
+    }
+
+    [Fact]
+    public void Requirements_NamedAsMap_SkipNonStringKeys_AndReadOptionalAndRepository()
+    {
+        var meta = HexPackageMetadata.Parse(Identity + """
+            {<<"requirements">>,#{
+              <<"plug">> => #{<<"requirement">> => <<"~> 1.14">>, <<"optional">> => false, <<"repository">> => <<"hexpm">>},
+              <<"cowboy">> => #{<<"requirement">> => "~> 2.9", <<"optional">> => true, <<"app">> => <<"cowboy_app">>},
+              7 => #{<<"requirement">> => <<"~> 1.0">>}}}.
+            """);
+
+        Assert.Equal(2, meta.Requirements.Count);
+        var plug = meta.Requirements.Single(r => r.Name == "plug");
+        Assert.Equal("~> 1.14", plug.Requirement);
+        Assert.False(plug.Optional);
+        Assert.Equal("hexpm", plug.Repository);
+        Assert.Null(plug.App);
+        var cowboy = meta.Requirements.Single(r => r.Name == "cowboy");
+        Assert.Equal("~> 2.9", cowboy.Requirement);
+        Assert.True(cowboy.Optional);
+        Assert.Equal("cowboy_app", cowboy.App);
+    }
+
+    [Fact]
+    public void Requirements_OptionalAtomTrue_IsOptional_AndAnyOtherValueIsNot()
+    {
+        var meta = HexPackageMetadata.Parse(Identity + """
+            {<<"requirements">>,[
+              {<<"jason">>,[{<<"requirement">>,<<"~> 1.0">>},{<<"optional">>,true}]},
+              {<<"telemetry">>,[{<<"requirement">>,<<"~> 1.0">>},{<<"optional">>,<<"true">>}]}]}.
+            """);
+
+        Assert.True(meta.Requirements.Single(r => r.Name == "jason").Optional);
+        Assert.False(meta.Requirements.Single(r => r.Name == "telemetry").Optional);
+    }
+
+    [Fact]
+    public void LegacyRequirement_WithoutAName_IsRefused()
+    {
+        var ex = Assert.Throws<HexProtocolException>(() => HexPackageMetadata.Parse(Identity + """
+            {<<"requirements">>,[[{<<"requirement">>,<<"~> 1.0">>}]]}.
+            """));
+
+        Assert.Equal("metadata.config requirement is missing its name.", ex.Message);
+    }
+
+    [Fact]
+    public void Requirements_EntryOfUnknownShape_IsRefused()
+    {
+        var ex = Assert.Throws<HexProtocolException>(() => HexPackageMetadata.Parse(Identity + "{<<\"requirements\">>,[<<\"jason\">>]}."));
+
+        Assert.Equal("metadata.config requirements entry has an unrecognized shape.", ex.Message);
+    }
+
+    [Fact]
+    public void Requirements_BodyOfUnknownShape_IsRefused()
+    {
+        var ex = Assert.Throws<HexProtocolException>(() => HexPackageMetadata.Parse(
+            Identity + "{<<\"requirements\">>,[{<<\"jason\">>,<<\"~> 1.0\">>}]}."));
+
+        Assert.Equal("metadata.config requirement body has an unrecognized shape.", ex.Message);
+    }
+
+    [Fact]
+    public void Requirements_ProplistBodyKeepsOnlyStringKeyedPairs()
+    {
+        var meta = HexPackageMetadata.Parse(Identity + """
+            {<<"requirements">>,[{<<"jason">>,[{<<"requirement">>,<<"~> 1.0">>},{1,2},stray]}]}.
+            """);
+
+        Assert.Equal("~> 1.0", Assert.Single(meta.Requirements).Requirement);
+    }
+
+    [Fact]
+    public void Requirements_EmptyRequirementString_IsRefused()
+    {
+        var ex = Assert.Throws<HexProtocolException>(() => HexPackageMetadata.Parse(
+            Identity + "{<<\"requirements\">>,[{<<\"jason\">>,[{<<\"requirement\">>,<<>>}]}]}."));
+
+        Assert.Contains("requirement for jason has no version requirement", ex.Message);
+    }
 }

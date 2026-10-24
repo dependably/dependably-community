@@ -6,7 +6,8 @@ namespace Dependably.Infrastructure;
 /// SaaS-style deployments use <see cref="SubdomainTenantResolver"/>.
 ///
 /// Resolution returns a 404-ish <see cref="TenantContext.Uninitialized"/> for unknown subdomains
-/// or when no tenant exists yet — the middleware translates that into a 404/503 response.
+/// or when no tenant exists yet — <c>TenantStatusEnforcementMiddleware</c> answers a protocol
+/// request under it (or under <see cref="TenantContext.Apex"/>) with a 404 response.
 /// </summary>
 public interface ITenantResolver
 {

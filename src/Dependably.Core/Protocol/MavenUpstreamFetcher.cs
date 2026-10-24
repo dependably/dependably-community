@@ -378,6 +378,29 @@ public sealed class MavenUpstreamFetcher
         string artifactPath,
         CancellationToken ct,
         string? authorizationHeader = null)
+        => (await FetchUpstreamMetadataAsync(upstreamBase, artifactPath, ct, authorizationHeader))?.Versions;
+
+    /// <summary>
+    /// Fetches the <c>maven-metadata.xml</c> at <paramref name="artifactPath"/> once and reads it
+    /// as both documents that path can name. <c>g/a/maven-metadata.xml</c> for artifact
+    /// <c>g:a</c> and the group-level document for group <c>g.a</c> are the same URL, so the
+    /// path alone cannot say which one upstream holds; the body's shape does.
+    ///
+    /// <see cref="MavenUpstreamMetadata.Versions"/> is the artifact-level reading (every
+    /// <c>&lt;version&gt;</c> element, empty when the body declares none or does not parse).
+    /// <see cref="MavenUpstreamMetadata.PluginGroupDocument"/> carries the raw upstream bytes
+    /// only when the body is a group-level plugin-prefix document — see
+    /// <see cref="IsPluginGroupDocument"/>. The two are mutually exclusive: a body that declares
+    /// any version is an artifact-level document and never a plugin-group one.
+    ///
+    /// Returns null on an upstream non-success status, a transport failure, or air-gap mode, the
+    /// same cases <see cref="FetchUpstreamVersionsAsync"/> reports as null.
+    /// </summary>
+    public async Task<MavenUpstreamMetadata?> FetchUpstreamMetadataAsync(
+        string upstreamBase,
+        string artifactPath,
+        CancellationToken ct,
+        string? authorizationHeader = null)
     {
         string upstreamUrl = $"{upstreamBase.TrimEnd('/')}/{artifactPath.TrimStart('/')}/maven-metadata.xml";
 
@@ -389,8 +412,11 @@ public sealed class MavenUpstreamFetcher
                 return null;
             }
 
-            string xml = response.BodyAsString();
-            return ParseVersionsFromMetadata(xml);
+            var versions = ParseVersionsFromMetadata(response.BodyAsString());
+            byte[]? pluginGroup = versions.Count == 0 && IsPluginGroupDocument(response.Body)
+                ? response.Body
+                : null;
+            return new MavenUpstreamMetadata(versions, pluginGroup);
         }
         catch (AirGappedException)
         {
@@ -402,6 +428,53 @@ public sealed class MavenUpstreamFetcher
                 "ExceptionType={ExceptionType} Maven upstream metadata fetch failed for {Url}",
                 ex.GetType().Name, upstreamUrl);
             return null;
+        }
+    }
+
+    // Strict decoder: the served body is re-encoded from a UTF-8 string, so a body that is not
+    // valid UTF-8 would not survive the round trip byte-for-byte and its .sha1/.md5 sidecars
+    // would describe bytes nobody received.
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    /// <summary>
+    /// True when <paramref name="body"/> is a group-level plugin-prefix document: a
+    /// <c>&lt;metadata&gt;</c> root with a <c>&lt;plugins&gt;</c> child and no
+    /// <c>&lt;versioning&gt;</c> child, which is how Maven Central serves
+    /// <c>org/apache/maven/plugins/maven-metadata.xml</c>. Maven resolves a short plugin prefix
+    /// (<c>mvn help:help</c>) through this document.
+    ///
+    /// The body is relayed to clients verbatim, so the check is stricter than the version parse:
+    /// a DOCTYPE is refused outright (no DTD processing, no resolver, so neither entity
+    /// expansion nor an external fetch can run here or be forwarded to a client), and the body
+    /// must be well-formed XML and valid UTF-8. Anything else is not a plugin-group document,
+    /// and the caller treats it as a document listing no versions.
+    /// </summary>
+    private static bool IsPluginGroupDocument(byte[] body)
+    {
+        try
+        {
+            _ = StrictUtf8.GetCharCount(body);
+
+            var settings = new System.Xml.XmlReaderSettings
+            {
+                DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+                XmlResolver = null,
+            };
+            using var stream = new MemoryStream(body, writable: false);
+            using var reader = System.Xml.XmlReader.Create(stream, settings);
+            var root = XDocument.Load(reader).Root;
+            if (root is null || root.Name.LocalName != "metadata")
+            {
+                return false;
+            }
+
+            var ns = root.Name.Namespace;
+            return root.Element(ns + "plugins") is not null
+                && root.Element(ns + "versioning") is null;
+        }
+        catch (Exception ex) when (ex is System.Xml.XmlException or DecoderFallbackException)
+        {
+            return false;
         }
     }
 
@@ -642,6 +715,19 @@ public sealed record MavenArtifactFetchResult(
     /// same posture <see cref="Api.MavenController"/> already takes for a missing signal.
     /// </summary>
     DateTimeOffset? PublishedAt = null);
+
+/// <summary>
+/// One upstream <c>maven-metadata.xml</c> body, read as both documents its path can name. See
+/// <see cref="MavenUpstreamFetcher.FetchUpstreamMetadataAsync"/>.
+/// </summary>
+/// <param name="Versions">Every version the body declares; empty when it declares none.</param>
+/// <param name="PluginGroupDocument">
+/// The upstream bytes, unmodified, when the body is a group-level plugin-prefix document; null
+/// otherwise. Only ever set when <paramref name="Versions"/> is empty.
+/// </param>
+public sealed record MavenUpstreamMetadata(
+    List<string> Versions,
+    byte[]? PluginGroupDocument);
 
 /// <summary>
 /// Parsed representation of a SNAPSHOT version-level <c>maven-metadata.xml</c> document.

@@ -1160,14 +1160,11 @@ public sealed class TerraformController : OrgScopedControllerBase
     /// True when <paramref name="url"/> sits on the same scheme+host+port authority as
     /// <paramref name="baseUrl"/>. Both the credential-scoping decision and the registry
     /// no-checksum guard turn on "is this URL on the configured upstream's own authority", so they
-    /// share one comparison rather than drifting apart.
+    /// share one comparison rather than drifting apart — the same origin rule every other
+    /// ecosystem's credential pin applies (<see cref="UpstreamHostPin.IsSameOrigin"/>).
     /// </summary>
     private static bool IsSameAuthority(string baseUrl, string url) =>
-        Uri.TryCreate(url, UriKind.Absolute, out var target)
-        && Uri.TryCreate(baseUrl, UriKind.Absolute, out var b)
-        && string.Equals(target.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(target.Host, b.Host, StringComparison.OrdinalIgnoreCase)
-        && target.Port == b.Port;
+        UpstreamHostPin.IsSameOrigin(baseUrl, url);
 
     /// <summary>
     /// Resolves which configured upstream serves this provider, walking the org's list in priority

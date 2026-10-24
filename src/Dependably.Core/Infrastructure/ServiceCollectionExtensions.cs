@@ -103,6 +103,7 @@ public static partial class ServiceCollectionExtensions
 
         // Two-tier storage formalisation
         services.AddSingleton<CacheArtifactRepository>();
+        services.AddSingleton<NpmManifestRescan>();
         services.AddSingleton<TenantArtifactAccessRepository>();
         services.AddSingleton<CacheAccessRecorder>();
         // Serialises the shared-key refcount check + physical delete of a content-addressed

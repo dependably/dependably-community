@@ -82,10 +82,10 @@ public sealed partial class PackageLookupService
         string? version = requestedVersion;
         if (version is null)
         {
-            var (resolved, transient) = await TryResolveLatestAsync("npm", orgId, name, ct);
-            if (transient)
+            var (resolved, noAnswer) = await TryResolveLatestAsync("npm", orgId, name, ct);
+            if (noAnswer is not null)
             {
-                return FactsOutcome.Unavailable;
+                return noAnswer;
             }
 
             if (resolved is null)
@@ -179,10 +179,10 @@ public sealed partial class PackageLookupService
         string? version = requestedVersion;
         if (version is null)
         {
-            var (resolved, transient) = await TryResolveLatestAsync("pypi", orgId, name, ct);
-            if (transient)
+            var (resolved, noAnswer) = await TryResolveLatestAsync("pypi", orgId, name, ct);
+            if (noAnswer is not null)
             {
-                return FactsOutcome.Unavailable;
+                return noAnswer;
             }
 
             // The resolver's own algorithm agrees with PyPI's own "latest" pointer for
@@ -292,10 +292,10 @@ public sealed partial class PackageLookupService
         string? version = requestedVersion;
         if (version is null)
         {
-            var (resolved, transient) = await TryResolveLatestAsync("nuget", orgId, id, ct);
-            if (transient)
+            var (resolved, noAnswer) = await TryResolveLatestAsync("nuget", orgId, id, ct);
+            if (noAnswer is not null)
             {
-                return FactsOutcome.Unavailable;
+                return noAnswer;
             }
 
             if (resolved is null)
@@ -414,10 +414,10 @@ public sealed partial class PackageLookupService
         string? version = requestedVersion;
         if (version is null)
         {
-            var (resolved, transient) = await TryResolveLatestAsync("maven", orgId, coordinate, ct);
-            if (transient)
+            var (resolved, noAnswer) = await TryResolveLatestAsync("maven", orgId, coordinate, ct);
+            if (noAnswer is not null)
             {
-                return FactsOutcome.Unavailable;
+                return noAnswer;
             }
 
             if (resolved is null)
@@ -534,10 +534,10 @@ public sealed partial class PackageLookupService
         string? version = requestedVersion;
         if (version is null)
         {
-            var (resolved, transient) = await TryResolveLatestAsync("cargo", orgId, name, ct);
-            if (transient)
+            var (resolved, noAnswer) = await TryResolveLatestAsync("cargo", orgId, name, ct);
+            if (noAnswer is not null)
             {
-                return FactsOutcome.Unavailable;
+                return noAnswer;
             }
 
             // Same belt-and-braces as PyPI: fall back to the highest stable non-yanked entry in
@@ -586,7 +586,7 @@ public sealed partial class PackageLookupService
         // The API lives on crates.io while the configured index is index.crates.io, so the
         // host-pin drops the credential — expressed through the shared helper rather than a
         // hardcoded null so the invariant stays testable and survives a same-host registry.
-        string? authorizationHeader = UpstreamHostPin.IsSameHost(source.Url, apiUrl)
+        string? authorizationHeader = UpstreamHostPin.IsSameOrigin(source.Url, apiUrl)
             ? source.AuthorizationHeader
             : null;
 

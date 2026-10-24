@@ -56,6 +56,22 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
     /// </summary>
     public IReadOnlyDictionary<string, string>? Settings { get; init; }
 
+    /// <summary>
+    /// Answers every OCI upstream request in place of the network, as
+    /// <see cref="DependablyFactory.OciUpstreamHandler"/> does for the single-tenant host.
+    /// </summary>
+    public Func<HttpRequestMessage, HttpResponseMessage>? OciUpstreamHandler { get; init; }
+
+    private sealed class StubbedOciUpstreamHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
+        public StubbedOciUpstreamHandler(Func<HttpRequestMessage, HttpResponseMessage> responder)
+            => _responder = responder;
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(_responder(request));
+    }
+
     private readonly IntegrationDatabase _db = new();
 
     protected override IHost CreateHost(IHostBuilder _)
@@ -92,6 +108,13 @@ public sealed class DependablyMultiFactory : WebApplicationFactory<Program>, IAs
         builder.Services.RemoveAll<TieredBlobStorage>();
         builder.Services.AddSingleton(new TieredBlobStorage(BlobStore, BlobStore));
         _db.ConfigureServices(builder.Services);
+
+        if (OciUpstreamHandler is not null)
+        {
+            var responder = OciUpstreamHandler;
+            builder.Services.AddHttpClient("OciUpstream")
+                .ConfigurePrimaryHttpMessageHandler(() => new StubbedOciUpstreamHandler(responder));
+        }
 
         if (MailSenderOverride is not null)
         {

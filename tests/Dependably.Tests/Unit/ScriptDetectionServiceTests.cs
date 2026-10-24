@@ -67,11 +67,11 @@ public sealed class ScriptDetectionServiceTests
     }
 
     [Fact]
-    public void Npm_InvalidGzip_FailsSoftToNone()
+    public void Npm_InvalidGzip_FailsClosed()
     {
         var result = ScriptDetectionService.Detect("npm", "x.tgz", "not gzip"u8.ToArray());
-        Assert.False(result.HasScript);
-        Assert.Null(result.Kind);
+        Assert.True(result.HasScript);
+        Assert.Equal("npm:unscannable-manifest", result.Kind);
     }
 
     // ── PyPI ─────────────────────────────────────────────────────────────────
@@ -386,6 +386,50 @@ public sealed class ScriptDetectionServiceTests
     }
 
     [Fact]
+    public async Task DetectAsync_Npm_ReadFailure_FailsClosed()
+    {
+        using var stream = new ThrowingReadStream();
+        var result = await ScriptDetectionService.DetectAsync("npm", "acme-1.0.0.tgz", stream);
+
+        Assert.True(result.HasScript);
+        Assert.Equal("npm:unscannable-manifest", result.Kind);
+    }
+
+    [Fact]
+    public async Task DetectAsync_Pypi_ReadFailure_StaysFailSoft()
+    {
+        using var stream = new ThrowingReadStream();
+        var result = await ScriptDetectionService.DetectAsync("pypi", "acme-1.0.0.tar.gz", stream);
+
+        Assert.False(result.HasScript);
+    }
+
+    [Fact]
+    public void FailClosedResult_Npm_IsScriptedUnscannable_OthersNone()
+    {
+        Assert.Equal(new InstallScriptResult(true, "npm:unscannable-manifest"),
+            ScriptDetectionService.FailClosedResult("npm"));
+        Assert.Equal(InstallScriptResult.None, ScriptDetectionService.FailClosedResult("pypi"));
+        Assert.Equal(InstallScriptResult.None, ScriptDetectionService.FailClosedResult("nuget"));
+    }
+
+    private sealed class ThrowingReadStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("storage fault");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+            => throw new IOException("storage fault");
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
     public async Task DetectAsync_UnknownEcosystem_SkipsBufferingAndReturnsNone()
     {
         using var stream = new MemoryStream(BuildZip(("tools/install.ps1", "x")));
@@ -397,7 +441,7 @@ public sealed class ScriptDetectionServiceTests
     public void MixedBatch_SomeDetectSomeFailSoft_EachIndependent()
     {
         // House rule: a fan-out over artefacts must handle "some succeed, some fail in the same
-        // pass". A corrupt artefact returns None (fail-soft) without affecting its neighbours, and
+        // pass". A corrupt npm artefact fails closed (reported as scripted) without affecting its neighbours, and
         // a clean one still reports no script.
         byte[] withScript = BuildTarball(
             ("package/package.json", """{"name":"a","version":"1.0.0","scripts":{"postinstall":"x"}}"""));
@@ -414,8 +458,32 @@ public sealed class ScriptDetectionServiceTests
 
         Assert.True(batch[0].HasScript);
         Assert.Equal("npm:postinstall", batch[0].Kind);
-        Assert.False(batch[1].HasScript); // fail-soft, not a thrown exception
+        Assert.True(batch[1].HasScript); // fail-closed, not a thrown exception
         Assert.False(batch[2].HasScript);
+    }
+
+    [Theory]
+    [InlineData("""{"name":"acme","version":"1.0.0","scripts":{},"scripts":{"postinstall":"evil"}}""")]
+    [InlineData("""{"name":"acme","version":"1.0.0","description":"a","description":"b","scripts":{"postinstall":"evil"}}""")]
+    [InlineData("""{"name":"acme","version":"1.0.0","scripts":{"postinstall":"a","postinstall":"b"}}""")]
+    public void Npm_DuplicateKeyManifest_FailsClosed(string manifest)
+    {
+        byte[] bytes = BuildTarball(("package/package.json", manifest));
+
+        var result = ScriptDetectionService.Detect("npm", "acme-1.0.0.tgz", bytes);
+
+        Assert.True(result.HasScript);
+        Assert.Equal("npm:unscannable-manifest", result.Kind);
+    }
+
+    [Fact]
+    public void Npm_DuplicateKeyFreeCleanManifest_StillNone()
+    {
+        byte[] bytes = BuildTarball(
+            ("package/package.json",
+             """{"name":"acme","version":"1.0.0","description":"a","scripts":{"test":"jest"}}"""));
+
+        Assert.Equal(InstallScriptResult.None, ScriptDetectionService.Detect("npm", "acme-1.0.0.tgz", bytes));
     }
 
     private static byte[] BuildTarball(params (string Name, string Content)[] entries)

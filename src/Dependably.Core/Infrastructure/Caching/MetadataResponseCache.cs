@@ -27,6 +27,12 @@ public class MetadataResponseCache<TKey, TValue>
     // captures the generation before reading state can then discard a Set whose snapshot predates
     // an intervening Evict (the lost-invalidation race). Bounded by the number of distinct keys
     // ever evicted — the same package/org coordinate cardinality that flows through the cache.
+    //
+    // Keyed by the formatter's string, which for an IPublicBaseVariantKey is the document's family
+    // (every public-base variant of one package). The generation is also part of each variant's
+    // storage key, so one Evict of the family retires every variant at once: the next read
+    // formats the bumped generation and misses, without the evicting side having to know which
+    // hosts the document was rendered for.
     private readonly ConcurrentDictionary<string, long> _generations = new();
 
     public MetadataResponseCache(IMemoryCache cache, Func<TKey, string> keyFormatter)
@@ -49,17 +55,31 @@ public class MetadataResponseCache<TKey, TValue>
         _epochStore = epochStore;
     }
 
-    /// <summary>Formats <paramref name="key"/> to its canonical cache-key string.</summary>
-    protected string FormatKey(TKey key) => _keyFormatter(key);
+    /// <summary>
+    /// The string an entry for <paramref name="key"/> is stored under right now: the formatter's
+    /// key, plus — for an <see cref="IPublicBaseVariantKey"/> carrying a public base — the
+    /// family's current generation and that base (<see cref="MetadataCacheKeys.PublicBaseVariant"/>).
+    /// </summary>
+    protected string FormatKey(TKey key)
+    {
+        string family = _keyFormatter(key);
+        return StorageKey(key, family, CurrentGeneration(family));
+    }
+
+    private static string StorageKey(TKey key, string family, long generation) =>
+        key is IPublicBaseVariantKey { PublicBase: { } publicBase }
+            ? MetadataCacheKeys.PublicBaseVariant(family, generation, publicBase)
+            : family;
 
     /// <summary>True when an entry for <paramref name="key"/> is present; sets <paramref name="value"/> on hit.</summary>
     public virtual bool TryGet(TKey key, out TValue? value) =>
-        _cache.TryGetValue(_keyFormatter(key), out value);
+        _cache.TryGetValue(FormatKey(key), out value);
 
     /// <summary>
     /// The current invalidation generation for <paramref name="key"/>. Increments on every
     /// <see cref="Evict"/>. A rebuild path captures this before reading state and passes it to
-    /// <see cref="SetIfGenerationUnchanged"/> so a concurrent Evict cannot be lost.
+    /// <see cref="SetIfGenerationUnchanged"/> so a concurrent Evict cannot be lost. Every
+    /// public-base variant of a key shares its family's generation.
     /// </summary>
     public long GetGeneration(TKey key) =>
         _generations.TryGetValue(_keyFormatter(key), out long g) ? g : 0;
@@ -79,6 +99,22 @@ public class MetadataResponseCache<TKey, TValue>
         _epochStore is not null && key is IOrgScopedCacheKey scoped ? _epochStore.GetToken(scoped.OrgId) : null;
 
     /// <summary>
+    /// Captures the same org policy-epoch token as <see cref="CaptureEpochToken"/>, keyed by org
+    /// rather than by a cache key. A request handler whose rendering decision (which key variant
+    /// to read, which settings to render with) depends on org state read <em>before</em> the key
+    /// is known calls this first, ahead of every one of those reads, and passes the token through
+    /// to the eventual write. Capturing at the cache call instead leaves a gap: a reservation or
+    /// proxy-settings change that bumps the epoch between the decision and the capture would let
+    /// a document rendered from the pre-change decision bind to the post-change epoch and be
+    /// served until its TTL. Returns <see langword="null"/> exactly when
+    /// <see cref="CaptureEpochToken"/> would.
+    /// </summary>
+    public IChangeToken? CaptureOrgEpochToken(string orgId) =>
+        _epochStore is not null && typeof(IOrgScopedCacheKey).IsAssignableFrom(typeof(TKey))
+            ? _epochStore.GetToken(orgId)
+            : null;
+
+    /// <summary>
     /// Stores <paramref name="value"/> only when the key's invalidation generation still equals
     /// <paramref name="expectedGeneration"/> — i.e. no <see cref="Evict"/> has landed since the
     /// caller captured it via <see cref="GetGeneration"/>. Returns true when the write is kept.
@@ -93,17 +129,18 @@ public class MetadataResponseCache<TKey, TValue>
     public bool SetIfGenerationUnchanged(
         TKey key, TValue value, TimeSpan ttl, long size, long expectedGeneration, IChangeToken? epochToken = null)
     {
-        string formatted = _keyFormatter(key);
-        if (CurrentGeneration(formatted) != expectedGeneration)
+        string family = _keyFormatter(key);
+        if (CurrentGeneration(family) != expectedGeneration)
         {
             return false;
         }
 
-        SetFormatted(key, formatted, value, ttl, size, epochToken);
+        string stored = StorageKey(key, family, expectedGeneration);
+        SetFormatted(key, stored, value, ttl, size, epochToken);
 
-        if (CurrentGeneration(formatted) != expectedGeneration)
+        if (CurrentGeneration(family) != expectedGeneration)
         {
-            _cache.Remove(formatted);
+            _cache.Remove(stored);
             return false;
         }
 
@@ -116,7 +153,7 @@ public class MetadataResponseCache<TKey, TValue>
     /// <paramref name="size"/> — this overload always sets it.
     /// </summary>
     public void Set(TKey key, TValue value, TimeSpan ttl, long size) =>
-        SetFormatted(key, _keyFormatter(key), value, ttl, size, epochToken: null);
+        SetFormatted(key, FormatKey(key), value, ttl, size, epochToken: null);
 
     // epochToken, when non-null, is used as-is (already captured by the caller before its read).
     // When null the org's *current* epoch token is fetched fresh — safe for direct Set() callers,
@@ -147,14 +184,22 @@ public class MetadataResponseCache<TKey, TValue>
 
     /// <summary>
     /// Removes the entry for <paramref name="key"/>, if any, and bumps its invalidation
-    /// generation so a rebuild whose snapshot predates this call discards its Set.
+    /// generation so a rebuild whose snapshot predates this call discards its Set. For an
+    /// <see cref="IPublicBaseVariantKey"/> the bump retires every public-base variant of the
+    /// family, whichever base <paramref name="key"/> names (or none): their storage keys carry the
+    /// old generation, so no read reaches them again and they age out of the size-bounded cache.
     /// </summary>
     public void Evict(TKey key)
     {
-        string formatted = _keyFormatter(key);
+        string family = _keyFormatter(key);
+        string current = StorageKey(key, family, CurrentGeneration(family));
         // Bump the generation before removing so a concurrent SetIfGenerationUnchanged observes
         // the change (its post-write re-check catches a Set that raced ahead of the removal).
-        _generations.AddOrUpdate(formatted, 1, (_, v) => v + 1);
-        _cache.Remove(formatted);
+        _generations.AddOrUpdate(family, 1, (_, v) => v + 1);
+        _cache.Remove(family);
+        if (!string.Equals(current, family, StringComparison.Ordinal))
+        {
+            _cache.Remove(current);
+        }
     }
 }

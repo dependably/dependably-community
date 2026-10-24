@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Dependably.Infrastructure;
 using Dependably.Security;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -11,8 +12,9 @@ public sealed partial class SystemController
     // Operators manage other operators here. Three guards beyond the route-level scope check:
     //   1. no-self: operator cannot modify themselves through these endpoints (self-rotation
     //      lives at POST /me/password). Returns 403 reason=cannot_modify_self.
-    //   2. last-active: disable/lock/delete refuse if doing so would leave zero active admins.
-    //      Returns 409 reason=last_active_admin.
+    //   2. last-active: disable/lock refuse if doing so would leave zero active admins, checked
+    //      atomically with the write. Delete needs no check of its own because it only removes
+    //      already-disabled rows. Returns 409 reason=last_active_admin.
     //   3. delete-requires-disabled: hard-delete only succeeds when target is already
     //      account_status='disabled'. Returns 409 reason=must_disable_first.
 
@@ -126,17 +128,15 @@ public sealed partial class SystemController
             return NotFound();
         }
 
-        if (req.AccountStatus != "active")
+        // The last-active guard runs inside the repository, in the same serialized transaction as
+        // the write, so two operators disabling each other concurrently cannot both pass it.
+        var change = await _systemAdmins.SetAccountStatusAsync(id, req.AccountStatus, ct);
+        if (change == AdminAccountStatusChange.LastActiveAdmin)
         {
-            int otherActive = await _systemAdmins.CountActiveExcludingAsync(id, ct);
-            if (otherActive == 0)
-            {
-                return _problems.ConflictActionKey("error.admin.lastActive", reason: "last_active_admin");
-            }
+            return _problems.ConflictActionKey("error.admin.lastActive", reason: "last_active_admin");
         }
 
-        bool ok = await _systemAdmins.SetAccountStatusAsync(id, req.AccountStatus, ct);
-        if (!ok)
+        if (change == AdminAccountStatusChange.NotFound)
         {
             return NotFound();
         }

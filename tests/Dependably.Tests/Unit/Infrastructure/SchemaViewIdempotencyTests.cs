@@ -143,6 +143,80 @@ public sealed class SchemaViewIdempotencyTests : IAsyncLifetime
         Assert.Equal(reindented, await StoredDefinitionAsync());
     }
 
+    /// <summary>
+    /// A boot with a pending migration is the boot a blue-green cutover actually performs: the
+    /// previous release is still serving reads through the views while the new one applies its
+    /// migrations. A migration whose body is plain DML touches nothing a view depends on, so it
+    /// must not take the view drop with it — the views would otherwise be missing for the whole
+    /// length of the body and every read through them on the old slot would fail. The tenant
+    /// refresh-stamp backfill is such a migration; clearing its ledger row reproduces the boot.
+    /// </summary>
+    [Fact]
+    public async Task PendingDataOnlyMigration_PerformsNoViewDdl()
+    {
+        const string migration = "backfill_tenant_artifact_access_refresh_checked_at";
+        await using (var conn = await _db.OpenAsync())
+        {
+            int removed = await conn.ExecuteAsync(
+                "DELETE FROM _applied_migrations WHERE name = @migration", new { migration });
+            Assert.Equal(1, removed);
+        }
+
+        long before = await SchemaVersionAsync();
+        await new SchemaInitializer(_db).InitializeAsync();
+
+        Assert.Equal(before, await SchemaVersionAsync());
+        await using (var conn = await _db.OpenAsync())
+        {
+            long recorded = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM _applied_migrations WHERE name = @migration", new { migration });
+            Assert.Equal(1, recorded);
+        }
+    }
+
+    /// <summary>
+    /// The direct form: a migration body that declares no view dependency runs with every view still
+    /// resolvable.
+    /// </summary>
+    [Fact]
+    public async Task RunOnce_DataOnlyBody_RunsWithEveryViewPresent()
+    {
+        var initializer = new SchemaInitializer(_db);
+        await using var conn = await _db.OpenAsync();
+        long seen = -1;
+
+        await initializer.RunOnceAsync(conn, "test_data_only_body", async c => seen = await ViewCountAsync(c));
+
+        Assert.Equal(SchemaInitializer.ViewDefinitions.Length, seen);
+    }
+
+    /// <summary>
+    /// The other half: a body that declares it reshapes a table still gets the views out of its way,
+    /// and the next apply puts them back.
+    /// </summary>
+    [Fact]
+    public async Task RunOnce_ReshapeBody_RunsWithTheViewsDropped_AndTheApplyRestoresThem()
+    {
+        var initializer = new SchemaInitializer(_db);
+        long seen = -1;
+        await using (var conn = await _db.OpenAsync())
+        {
+            await initializer.RunOnceAsync(
+                conn, "test_reshape_body", async c => seen = await ViewCountAsync(c), dropsViews: true);
+        }
+
+        Assert.Equal(0, seen);
+
+        await new SchemaInitializer(_db).InitializeAsync();
+        await using (var conn = await _db.OpenAsync())
+        {
+            Assert.Equal(SchemaInitializer.ViewDefinitions.Length, await ViewCountAsync(conn));
+        }
+    }
+
+    private static Task<long> ViewCountAsync(DbConnection conn) =>
+        conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM sqlite_master WHERE type = 'view'");
+
     private async Task<long> SchemaVersionAsync()
     {
         await using var conn = await _db.OpenAsync();

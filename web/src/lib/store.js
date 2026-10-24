@@ -9,7 +9,7 @@ import { pathFor, searchFor, routesEqual } from './routes.js'
  * @typedef {{ page: string, params: Record<string, any> }} Route
  *
  * @typedef {{ mode?: 'single' | 'multi', isApex?: boolean, apexHost?: string,
- *             tenantSlug?: string, airGapped?: boolean, insecureHttp?: boolean,
+ *             tenantDomain?: string, tenantSlug?: string, airGapped?: boolean, insecureHttp?: boolean,
  *             capabilities?: Record<string, any> } & Record<string, any>} BootstrapInfo
  */
 
@@ -287,7 +287,7 @@ export function cancelTransition() {
 export function scrollToTop() {
   if (typeof window === 'undefined' || typeof window.scrollTo !== 'function') return
   // A newer placement supersedes any restore still re-applying an older entry's offset.
-  cancelScrollRestore()
+  cancelScrollRestore?.()
   window.scrollTo(0, 0)
   // The arriving page mounts after this tick. As the outgoing page is torn down and the new
   // one's placeholders grow the document back, the browser's scroll anchoring re-applies the
@@ -312,7 +312,7 @@ const SCROLL_RESTORE_BUDGET_MS = 3_000
 const SCROLL_RESTORE_ABORT_EVENTS = ['wheel', 'touchstart', 'keydown', 'pointerdown']
 
 /** Stops the in-flight restore, if any. Set by restoreScroll while one is running. */
-let cancelScrollRestore = () => {}
+let cancelScrollRestore = null
 
 /**
  * Reapplies a popped history entry's stamped offset, retrying across frames until it sticks.
@@ -330,14 +330,13 @@ export function restoreScroll(state) {
   if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return
   const top = state?.scroll ?? 0
   if (top === 0) { scrollToTop(); return }
-  cancelScrollRestore()
+  cancelScrollRestore?.()
 
-  let active = true
-  let startedAt = null
+  const attempt = { active: true, startedAt: null }
   const stop = () => {
-    active = false
+    attempt.active = false
     for (const type of SCROLL_RESTORE_ABORT_EVENTS) window.removeEventListener(type, stop, true)
-    if (cancelScrollRestore === stop) cancelScrollRestore = () => {}
+    if (cancelScrollRestore === stop) cancelScrollRestore = null
   }
   cancelScrollRestore = stop
   for (const type of SCROLL_RESTORE_ABORT_EVENTS) {
@@ -345,22 +344,25 @@ export function restoreScroll(state) {
   }
 
   const apply = (now) => {
-    if (!active) return
-    if (typeof window.scrollTo !== 'function') { stop(); return }
-    startedAt ??= now
-    window.scrollTo(0, top)
-    // Landed, or the page never grew tall enough to hold the offset — either way, stop.
-    if (Math.abs((window.scrollY ?? 0) - top) < 1 || now - startedAt >= SCROLL_RESTORE_BUDGET_MS) {
-      stop()
-      return
-    }
+    if (!attempt.active) return
+    if (scrollRestoreSettled(top, attempt, now)) { stop(); return }
     window.requestAnimationFrame(apply)
   }
   window.requestAnimationFrame(apply)
 }
 
+/** Makes one restore attempt and reports whether the retry should end. */
+function scrollRestoreSettled(top, attempt, now) {
+  if (typeof window.scrollTo !== 'function') return true
+  attempt.startedAt ??= now
+  window.scrollTo(0, top)
+  // Landed, or the page never grew tall enough to hold the offset — either way, stop.
+  return Math.abs((window.scrollY ?? 0) - top) < 1 || now - attempt.startedAt >= SCROLL_RESTORE_BUDGET_MS
+}
+
 // ── Bootstrap info (populated once on App.svelte mount) ────────────────────────
-// Shape: { mode: 'single' | 'multi', isApex: boolean, apexHost?: string, tenantSlug?: string, capabilities: object }
+// Shape: { mode: 'single' | 'multi', isApex: boolean, apexHost?: string, tenantDomain?: string, tenantSlug?: string, capabilities: object }
+// tenantDomain is the parent domain tenants live under; it equals apexHost unless TENANT_DOMAIN is set.
 // Single mode: includes tenantSlug. Multi at apex: isApex=true. Multi at tenant subdomain:
 // isApex=false, tenantSlug omitted (the SPA infers identity from window.location.hostname).
 /** @type {import('svelte/store').Writable<BootstrapInfo | null>} */
@@ -374,9 +376,9 @@ export const currentOrg = derived(bootstrapInfo, $info => {
   if ($info.mode === 'single') return { slug: $info.tenantSlug }
   if ($info.mode === 'multi' && !$info.isApex) {
     const host = typeof window !== 'undefined' ? window.location.hostname : ''
-    const apex = $info.apexHost || ''
-    const slug = apex && host.endsWith('.' + apex) ? host.slice(0, -apex.length - 1) : null
-    return slug ? { slug } : null
+    const parent = $info.tenantDomain || $info.apexHost || ''
+    const slug = parent && host.endsWith('.' + parent) ? host.slice(0, -parent.length - 1) : null
+    return slug && !slug.includes('.') ? { slug } : null
   }
   return null
 })

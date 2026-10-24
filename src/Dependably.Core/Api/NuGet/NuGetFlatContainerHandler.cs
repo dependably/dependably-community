@@ -76,7 +76,7 @@ public sealed class NuGetFlatContainerHandler(
         var signals = await LoadCombinedVulnSignalsAsync(localVersions, ct);
         var now = time.GetUtcNow();
 
-        var versionSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var versionSet = new HashSet<string>(VersionIdentity.Comparer("nuget"));
         CollectLocalVersions(localVersions, versionSet, settings!, signals, now);
 
         // Merge upstream regardless of pkg.IsProxy — a name with uploaded versions is still a
@@ -820,7 +820,7 @@ public sealed class NuGetFlatContainerHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string normalizedId, CancellationToken ct)
     {
-        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct);
+        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct: ct);
         return ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions);
     }
 

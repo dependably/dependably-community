@@ -2,7 +2,9 @@ using Dapper;
 using Dependably.Infrastructure;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Tests.Unit.Infrastructure;
 
@@ -39,11 +41,11 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         string id = await OrgSeeder.InsertAsync(_fixture.Store, $"acme-{Guid.NewGuid():N}");
 
         // Not-yet-soft-deleted: RestoreOrgAsync is a no-op (returns false).
-        Assert.False(await _repo.RestoreOrgAsync(id));
+        Assert.False((await _repo.RestoreOrgAsync(id)).Applied);
 
         await _repo.SoftDeleteOrgAsync(id);
-        Assert.True(await _repo.RestoreOrgAsync(id));
-        Assert.False(await _repo.RestoreOrgAsync(id));   // already-active row → still false
+        Assert.True((await _repo.RestoreOrgAsync(id)).Applied);
+        Assert.False((await _repo.RestoreOrgAsync(id)).Applied);   // already-active row → still false
     }
 
     [Fact]
@@ -217,6 +219,30 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         var settings = await _repo.GetSettingsAsync(org.Id);
         Assert.NotNull(settings);
         Assert.Equal("off", settings!.LicenseEnforcementMode);
+    }
+
+    [Fact]
+    public async Task CreateOrgAsync_EvictsACachedNoSuchTenantResolutionForTheSlug()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        var resolver = new SubdomainTenantResolver(
+            _fixture.Store,
+            new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["BASE_URL"] = "https://example.com" })
+                .Build(),
+            cache);
+        var repo = new OrgRepository(_fixture.Store, time: TestTime.Frozen(), tenantCache: resolver);
+        string slug = $"newco-{Guid.NewGuid():N}"[..20];
+        var probe = new DefaultHttpContext();
+        probe.Request.Host = new HostString(slug + ".example.com");
+
+        Assert.True((await resolver.ResolveAsync(probe)).IsUninitialized);
+
+        var org = await repo.CreateOrgAsync(slug);
+
+        var resolved = await resolver.ResolveAsync(probe);
+        Assert.True(resolved.IsTenant);
+        Assert.Equal(org.Id, resolved.TenantId);
     }
 
     // ── Shared SELECT projection — both GetSettingsAsync paths agree ──────────
@@ -502,11 +528,11 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     {
         string id = await OrgSeeder.InsertAsync(_fixture.Store, $"toggle-{Guid.NewGuid():N}");
 
-        Assert.True(await _repo.UpdateOrgStatusAsync(id, "suspended"));
+        Assert.True((await _repo.UpdateOrgStatusAsync(id, "suspended")).Applied);
         var suspended = await _repo.GetByIdAsync(id);
         Assert.Equal("suspended", suspended!.Status);
 
-        Assert.True(await _repo.UpdateOrgStatusAsync(id, "active"));
+        Assert.True((await _repo.UpdateOrgStatusAsync(id, "active")).Applied);
         var active = await _repo.GetByIdAsync(id);
         Assert.Equal("active", active!.Status);
     }
@@ -516,11 +542,11 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     {
         string id = await OrgSeeder.InsertAsync(_fixture.Store, $"ro-{Guid.NewGuid():N}");
 
-        Assert.True(await _repo.UpdateOrgStatusAsync(id, "read_only"));
+        Assert.True((await _repo.UpdateOrgStatusAsync(id, "read_only")).Applied);
         var readOnly = await _repo.GetByIdAsync(id);
         Assert.Equal("read_only", readOnly!.Status);
 
-        Assert.True(await _repo.UpdateOrgStatusAsync(id, "active"));
+        Assert.True((await _repo.UpdateOrgStatusAsync(id, "active")).Applied);
         var active = await _repo.GetByIdAsync(id);
         Assert.Equal("active", active!.Status);
     }
@@ -533,7 +559,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     public async Task UpdateOrgStatusAsync_RejectsNonOperatorStates(string status)
     {
         string id = await OrgSeeder.InsertAsync(_fixture.Store, $"reject-{Guid.NewGuid():N}");
-        Assert.False(await _repo.UpdateOrgStatusAsync(id, status));
+        Assert.False((await _repo.UpdateOrgStatusAsync(id, status)).Applied);
         var unchanged = await _repo.GetByIdAsync(id);
         Assert.Equal("active", unchanged!.Status); // default, never overwritten
     }
@@ -541,7 +567,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     [Fact]
     public async Task UpdateOrgStatusAsync_ReturnsFalse_OnUnknownId()
     {
-        Assert.False(await _repo.UpdateOrgStatusAsync($"missing-{Guid.NewGuid():N}", "suspended"));
+        Assert.False((await _repo.UpdateOrgStatusAsync($"missing-{Guid.NewGuid():N}", "suspended")).Applied);
     }
 
     [Fact]
@@ -551,7 +577,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         await _repo.SoftDeleteOrgAsync(id);
 
         // Soft-deleted tenants are not gated by status — restore must happen first.
-        Assert.False(await _repo.UpdateOrgStatusAsync(id, "suspended"));
+        Assert.False((await _repo.UpdateOrgStatusAsync(id, "suspended")).Applied);
     }
 
     // ── CountByStatusAsync — dashboard rollup ────────────────────────────────
@@ -636,11 +662,12 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
     }
 
     [Fact]
-    public async Task SetUserAccountStatusAsync_Activate_DoesNotBumpTokenVersion()
+    public async Task SetUserAccountStatusAsync_ActivateFromLocked_BumpsTokenVersion()
     {
-        // Re-enabling a locked account must not bump token_version — the user has no live
-        // sessions while locked, and bumping on re-activation would stale a session that
-        // was legitimately re-issued after the lock was lifted.
+        // Re-enabling a locked account bumps token_version too: a lock written by a path that
+        // skipped the bump must not let re-activation revive the sessions issued before it. A
+        // locked user holds no working session to lose (the version store answers null for one),
+        // and a session minted after re-activation carries the post-bump version.
         var store = MakeVersionStore(_fixture.Store);
         var repo = RepoWithVersionStore(store);
 
@@ -654,7 +681,7 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
 
         Assert.True(ok);
         long versionAfter = await ReadTokenVersionAsync(userId);
-        Assert.Equal(versionBefore, versionAfter);
+        Assert.Equal(versionBefore + 1, versionAfter);
     }
 
     [Fact]
@@ -678,10 +705,10 @@ public sealed class OrgRepositoryTests : IClassFixture<InMemoryDbFixture>
         // Lock evicts the cache entry so the next read hits the DB.
         await repo.SetUserAccountStatusAsync(email, slug, "locked");
 
-        // The cache entry for this user must be gone — GetCurrentVersionAsync re-reads the DB
-        // and returns the bumped version rather than the stale cached one.
-        long versionAfterLock = (await store.GetCurrentVersionAsync(userId))!.Value;
-        Assert.Equal(versionBefore + 1, versionAfterLock);
+        // The cache entry for this user must be gone — GetCurrentVersionAsync re-reads the DB,
+        // where a locked user has no current version, rather than serving the stale cached one.
+        Assert.Null(await store.GetCurrentVersionAsync(userId));
+        Assert.Equal(versionBefore + 1, await ReadTokenVersionAsync(userId));
     }
 
     [Fact]

@@ -36,7 +36,9 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
     // configuration from one source of truth.
     private readonly Dependably.Protocol.Provenance.ProvenanceAnchorStatusResolver _anchors;
     private readonly Dependably.Infrastructure.Sbom.SbomSignatureVerifier _sbomSignature;
-    private readonly OrgCacheEpochStore _cacheEpoch;
+    private readonly MetadataInvalidationCoordinator _invalidation;
+    private readonly Dependably.Infrastructure.OciScan.OciScanOptions? _ociScan;
+    private readonly Dependably.Infrastructure.OciScan.OciScanRepository? _ociScanners;
 
     // Dependency-injection constructor; the parameter list is the controller's declared
     // dependency set and grouping it into an aggregate would hide dependencies without
@@ -53,9 +55,13 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         IRequireMfaMode requireMfa,
         Dependably.Protocol.Provenance.ProvenanceAnchorStatusResolver anchors,
         Dependably.Infrastructure.Sbom.SbomSignatureVerifier sbomSignature,
-        OrgCacheEpochStore cacheEpoch)
+        MetadataInvalidationCoordinator invalidation,
+        Dependably.Infrastructure.OciScan.OciScanOptions? ociScan = null,
+        Dependably.Infrastructure.OciScan.OciScanRepository? ociScanners = null)
 #pragma warning restore S107
     {
+        _ociScan = ociScan;
+        _ociScanners = ociScanners;
         _settings = settings;
         _guard = guard;
         _audit = audit;
@@ -66,7 +72,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         _requireMfa = requireMfa;
         _anchors = anchors;
         _sbomSignature = sbomSignature;
-        _cacheEpoch = cacheEpoch;
+        _invalidation = invalidation;
     }
 
     /// <summary>GET /api/v1/orgs/{org}/settings</summary>
@@ -347,6 +353,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
         string orgId = CurrentTenantId();
         var settings = await _settings.GetSettingsAsync(orgId, ct);
         var anchors = await _anchors.ResolveAsync(orgId, ct);
+        string? ociScannerLastSeen = await OciScannerLastSeenAsync(orgId, ct);
         return Ok(new
         {
             proxy_passthrough_enabled = settings?.ProxyPassthroughEnabled ?? true,
@@ -359,6 +366,13 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             block_kev = settings?.BlockKev ?? "off",
             block_kev_ransomware = settings?.BlockKevRansomware ?? "off",
             block_ssvc_exploitation = settings?.BlockSsvcExploitation ?? "off",
+            oci_scan_enforcement = settings?.OciScanEnforcement ?? "off",
+            // Whether this instance runs image scanning at all, so the UI can disable the OCI
+            // scan enforcement control and explain why when moving it off 'off' would be refused.
+            oci_scan_enabled = _ociScan?.Enabled ?? false,
+            // When this org's scanner last called the scan API, or null if none ever has. The
+            // control stays at 'off' until one has, for the same reason as the instance flag.
+            oci_scanner_last_seen_at = ociScannerLastSeen,
             max_epss_percentile_tolerance = settings?.MaxEpssPercentileTolerance,
             max_epss_tolerance = settings?.MaxEpssTolerance,
             block_install_scripts = settings?.BlockInstallScripts ?? "off",
@@ -435,6 +449,12 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
 
         string orgId = CurrentTenantId();
 
+        var ociScanError = await ValidateOciScanEnforcementAsync(req.OciScanEnforcement, orgId, ct);
+        if (ociScanError is not null)
+        {
+            return ociScanError;
+        }
+
         var sigVerify = await ValidateSignatureVerificationFieldsAsync(req, orgId, ct);
         if (sigVerify.Error is not null)
         {
@@ -453,16 +473,19 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 MaxEpssPercentileTolerance: req.MaxEpssPercentileTolerance,
                 BlockSsvcExploitation: blockPolicy.BlockSsvcExploitation,
                 BlockMaliciousLive: blockPolicy.BlockMaliciousLive,
-                VerifySbomSignatures: sigVerify.VerifySbomSignatures),
+                VerifySbomSignatures: sigVerify.VerifySbomSignatures,
+                OciScanEnforcement: req.OciScanEnforcement),
             ct);
 
         // The block/verify gates and thresholds just persisted can flip the advertised state of
         // every version across every package this org has published or proxied. There is no
         // enumerable list of affected cache keys to Evict one at a time (the way publish/unpublish
-        // do), so instead bump the org's rendered-cache policy epoch: every npm packument, NuGet
-        // registration, PyPI simple index, and Maven metadata document cached for this org expires
-        // immediately rather than serving the pre-flip gate state until its TTL.
-        _cacheEpoch.Invalidate(orgId);
+        // do), so instead expire everything cached for the org: the settings record, then the
+        // rendered-cache policy epoch (every npm packument, NuGet registration, PyPI simple index,
+        // and Maven metadata document) and the lookup outcomes. The coordinator broadcasts the
+        // same org-wide invalidation, so every other replica stops serving the pre-flip gate
+        // state too rather than waiting out its TTL.
+        _invalidation.InvalidateOrg(orgId);
 
         // Every leave-unchanged-on-absent field below (all but the six verify_* fields, which
         // sigVerify already normalizes the same way) is logged as the raw request value, so a
@@ -484,6 +507,7 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
                 block_kev = blockPolicy.BlockKev,
                 block_kev_ransomware = blockPolicy.BlockKevRansomware,
                 block_ssvc_exploitation = blockPolicy.BlockSsvcExploitation,
+                oci_scan_enforcement = req.OciScanEnforcement,
                 max_epss_percentile_tolerance = req.MaxEpssPercentileTolerance.IsPresent
                     ? req.MaxEpssPercentileTolerance.Value : null,
                 max_epss_tolerance = AuditProxySettingValue(req.MaxEpssTolerance),
@@ -577,6 +601,48 @@ public sealed class OrgSettingsController : OrgScopedControllerBase
             ? _problems.ValidationErrorActionKey("block_deprecated", "error.settings.deprecatedPolicyInvalid")
             : null;
     }
+
+    // Validates oci_scan_enforcement. Absent leaves the stored value alone. A present value must
+    // be one of the three. A move off 'off' is refused while the instance has image scanning
+    // disabled, and while scanning is enabled but this org's scanner has never called the scan
+    // API: with no scanner every image is unscanned, so 'block' would refuse every OCI pull and
+    // 'warn' would warn on every one. A scanner that was seen and later stops calling does not
+    // reopen this check; its org keeps the posture and fails closed. Re-sending the value already stored is not a move and
+    // is accepted, because a stored posture is kept when the instance flag is later cleared (it
+    // fails closed and is reported at startup) and a save of an unrelated field must not be
+    // refused over it. Moving to 'off' is always allowed.
+    private async Task<IActionResult?> ValidateOciScanEnforcementAsync(string? value, string orgId, CancellationToken ct)
+    {
+        if (value is not (null or "off" or "warn" or "block"))
+        {
+            return _problems.ValidationErrorActionKey("oci_scan_enforcement", "error.settings.offWarnBlock");
+        }
+
+        if (value is not ("warn" or "block"))
+        {
+            return null;
+        }
+
+        string? refusal = _ociScan?.Enabled != true
+            ? "error.settings.ociScanDisabled"
+            : await OciScannerLastSeenAsync(orgId, ct) is null ? "error.settings.ociScannerNotSeen" : null;
+        if (refusal is null)
+        {
+            return null;
+        }
+
+        string? stored = (await _settings.GetSettingsAsync(orgId, ct))?.OciScanEnforcement;
+        return string.Equals(stored, value, StringComparison.Ordinal)
+            ? null
+            : _problems.ValidationErrorActionKey("oci_scan_enforcement", refusal);
+    }
+
+    // Null while scanning is disabled, so a scanner row left from before the flag was cleared
+    // never reads as a scanner this instance can use.
+    private async Task<string?> OciScannerLastSeenAsync(string orgId, CancellationToken ct) =>
+        _ociScan?.Enabled == true && _ociScanners is not null
+            ? await _ociScanners.GetScannerLastSeenAsync(orgId, ct)
+            : null;
 
     // Validates the block-policy enum fields (malicious, KEV, install-scripts, revoked). An
     // omitted field means "leave the stored value unchanged" — a client still sending the

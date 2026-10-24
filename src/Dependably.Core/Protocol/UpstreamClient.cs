@@ -37,6 +37,7 @@ public sealed partial class UpstreamClient
     private readonly OrgRepository? _orgs;
     private readonly string _stagingPath;
     private readonly CancellationToken _hostStopping;
+    private readonly TimeProvider _time;
 
     // Dedup in-flight blob fetches: only one upstream request per blob key at a time.
     // Single shared work item produces (sha, size, key) — no shared byte[]. Concurrent
@@ -79,7 +80,8 @@ public sealed partial class UpstreamClient
         IHostApplicationLifetime? lifetime = null,
         MetadataResponseCache? metadataCache = null,
         EdgeStatusTracker? edgeStatus = null,
-        OrgRepository? orgs = null)
+        OrgRepository? orgs = null,
+        TimeProvider? time = null)
 #pragma warning restore S107
     {
         _httpClientFactory = httpClientFactory;
@@ -108,6 +110,7 @@ public sealed partial class UpstreamClient
         // null dependency the same as "no quota configured" (unlimited).
         _orgs = orgs;
         _hostStopping = lifetime?.ApplicationStopping ?? CancellationToken.None;
+        _time = time ?? TimeProvider.System;
 
         // Staging dir for hash-and-stage MISS path, plus the hard floor for available
         // staging disk space — both resolved by StagingOptions so the path probed by
@@ -478,6 +481,20 @@ public sealed partial class UpstreamClient
     public const long MaxMetadataResponseBytes = 32L * 1024 * 1024; // 32 MB
 
     /// <summary>
+    /// Overall deadline for one shared metadata fetch, covering the response headers and the
+    /// body together. Matches the upstream HttpClient's header timeout, which stops applying
+    /// once headers arrive.
+    /// </summary>
+    public static readonly TimeSpan MetadataFetchDeadline = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Longest an artifact body may go without delivering a byte before the fetch fails. A
+    /// no-progress window rather than an overall deadline, so a large artifact on a slow but
+    /// live link still completes.
+    /// </summary>
+    public static readonly TimeSpan UpstreamBodyIdleTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>
     /// Hash-and-stage MISS path: streams upstream → temp file (with SHA-256
     /// computed inline via <see cref="IncrementalHash"/> and a running byte counter
     /// that throws on the 600 MB cap) → verifies checksum → uploads verified bytes to
@@ -803,7 +820,9 @@ public sealed partial class UpstreamClient
             // Stream upstream → temp file, hashing inline. HashingFileStream wraps the
             // FileStream and forwards writes to disk AND to IncrementalHash, throwing on
             // the 600 MB cap.
-            await using (var responseStream = await ctx.Response.Content.ReadAsStreamAsync(fetchCt))
+            await using (var responseStream = new IdleTimeoutReadStream(
+                await ctx.Response.Content.ReadAsStreamAsync(fetchCt), UpstreamBodyIdleTimeout, _time,
+                $"Upstream body from {ctx.Url}"))
             {
                 var fileStream = new FileStream(
                     tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,

@@ -178,6 +178,10 @@ public sealed partial class UpstreamClient
     // served looks like a healthy link. Exactly one outcome is recorded per fetch: a genuine
     // 2xx/404 = success, a stale-serve = failure. A transient failure with no stale entry to
     // serve rethrows and is recorded once by the caller's catch, not here.
+    //
+    // A stale-served response is a copy flagged UpstreamMetadataResponse.IsStale, so a caller that
+    // records upstream facts can tell it from a live answer; the cached entry itself is never
+    // flagged, and its body and status are relayed unchanged.
     private async Task<UpstreamMetadataResponse> GetOrFetchMetadataCachedAsync(
         string url, string cacheKey, long maxBytes, string? authorizationHeader, string? accept, CancellationToken ct)
     {
@@ -196,7 +200,7 @@ public sealed partial class UpstreamClient
                 // though the caller receives a usable 2xx from the cache.
                 RecordEdgeMetadataOutcome(reachable: false);
                 MetadataResponseCache.LogServedStale(_logger, url, ex, upstreamStatus: null);
-                return stale;
+                return stale with { IsStale = true };
             }
 
             // No stale entry to fall back on: let the transient failure propagate. The caller's
@@ -219,7 +223,7 @@ public sealed partial class UpstreamClient
             // unreachable, so record a failure even though a stale 2xx is returned.
             RecordEdgeMetadataOutcome(reachable: false);
             MetadataResponseCache.LogServedStale(_logger, url, cause: null, upstreamStatus: response.StatusCode);
-            return stale;
+            return stale with { IsStale = true };
         }
 
         // A genuine upstream answer reached us: 2xx/404 proves reachability, a non-stale-served
@@ -240,10 +244,11 @@ public sealed partial class UpstreamClient
         // the same URL never share a fetch; genuinely identical requests still collapse to one.
         string inflightKey = url + "\n" + maxBytes + "\n" + AuthHeaderHash(authorizationHeader) + "\n" + (accept ?? "");
 
-        // CancellationToken.None: a disconnect from the first caller must not fault the
-        // shared Lazy and cancel every other waiter (mirrors the blob-fetch convention).
+        // No caller token: a disconnect from the first caller must not fault the shared Lazy and
+        // cancel every other waiter (mirrors the blob-fetch convention). The fetch is bounded by
+        // its own deadline instead, so a stalled upstream cannot hold the entry forever.
         var lazy = _metadataInflight.GetOrAdd(inflightKey, _ => new Lazy<Task<UpstreamMetadataResponse>>(
-            () => FetchMetadataBufferedAsync(url, maxBytes, authorizationHeader, accept, CancellationToken.None)));
+            () => FetchMetadataWithDeadlineAsync(url, maxBytes, authorizationHeader, accept)));
         ScheduleInflightRemoval(_metadataInflight, inflightKey, lazy);
 
         return await lazy.Value.WaitAsync(ct);
@@ -271,6 +276,29 @@ public sealed partial class UpstreamClient
 
     private static bool IsTransientStatus(int status) =>
         status is >= ServerErrorRangeStart and <= ServerErrorRangeEnd;
+
+    // HttpClient.Timeout stops applying once the response headers arrive, so an upstream that
+    // sends headers and then stalls the body would keep the shared fetch, its in-flight entry,
+    // and every joining caller waiting until the process restarts. The deadline is measured on
+    // the injected clock and covers the headers and the body together; host shutdown still
+    // cancels the fetch early.
+    private async Task<UpstreamMetadataResponse> FetchMetadataWithDeadlineAsync(
+        string url, long maxBytes, string? authorizationHeader, string? accept)
+    {
+        using var deadline = new CancellationTokenSource(MetadataFetchDeadline, _time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_hostStopping, deadline.Token);
+        try
+        {
+            return await FetchMetadataBufferedAsync(url, maxBytes, authorizationHeader, accept, linked.Token);
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !_hostStopping.IsCancellationRequested)
+        {
+            // Reported as an upstream failure, not a cancellation: it is transient (stale-serve
+            // eligible) and lands in the callers' existing HttpRequestException handling.
+            string message = $"Upstream metadata fetch from {url} exceeded {MetadataFetchDeadline.TotalSeconds:0} seconds.";
+            throw new HttpRequestException(message, new TimeoutException(message));
+        }
+    }
 
     private async Task<UpstreamMetadataResponse> FetchMetadataBufferedAsync(
         string url, long maxBytes, string? authorizationHeader, string? accept, CancellationToken ct)

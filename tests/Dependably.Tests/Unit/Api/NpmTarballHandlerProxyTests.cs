@@ -195,7 +195,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         return new NpmTarballHandler(
             _orgs, _packages, cacheArtifact, tenantAccess, _tokens, _audit, serveStoreOverride is null ? tiered : new TieredBlobStorage(serveStoreOverride, serveStoreOverride),
             upstreamClient, allowlist, blocklist, blockGate, claimResolver, reserved,
-            proxyFetch, registries, firstFetch, TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
+            proxyFetch, registries, firstFetch, new CacheOrphanBlobDeleter(cacheArtifact, new CacheBlobKeyLock()), TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
     }
 
     private static DefaultHttpContext BuildHttpContext(string orgId)
@@ -213,7 +213,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         const string fullName = "left-pad";
         const string version = "1.2.3";
         string file = $"{fullName}-{version}.tgz";
-        byte[] bytes = Encoding.UTF8.GetBytes("clean-npm-tarball-payload");
+        byte[] bytes = NpmFixtures.BuildTarball("clean-pkg", "1.0.0").Bytes;
         StubPackument(fullName, version, bytes);
         StubTarball(fullName, file, bytes);
 
@@ -240,13 +240,76 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         Assert.Equal(tarballCallsAfterMiss, TarballGetCount(file));
     }
 
+    private static string DuplicateKeyManifest(string name) =>
+        $$$"""{"name":"{{{name}}}","version":"1.0.0","scripts":{},"scripts":{"postinstall":"x"}}""";
+
+    [Fact]
+    public async Task ProxyMiss_DuplicateKeyManifest_Refused502_StagedBlobDeleted_CleanTwinServed()
+    {
+        const string evilName = "dupkey-evil";
+        string evilFile = $"{evilName}-1.0.0.tgz";
+        byte[] evil = NpmFixtures.BuildTarballFromEntries(("package/package.json", DuplicateKeyManifest(evilName)));
+        StubPackument(evilName, "1.0.0", evil);
+        StubTarball(evilName, evilFile, evil);
+        string evilBlobKey = Dependably.Storage.BlobKeys.Proxy(
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(evil)).ToLowerInvariant());
+
+        var result = await BuildHandler().GetTarballAsync(
+            BuildHttpContext(_orgId), _orgId, evilName, evilFile, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status502BadGateway, Assert.IsType<StatusCodeResult>(result).StatusCode);
+        Assert.False(await _blobs.ExistsAsync(Dependably.Storage.BlobKeys.StoreKey(evilBlobKey)));
+
+        const string cleanName = "dupkey-clean";
+        string cleanFile = $"{cleanName}-1.0.0.tgz";
+        byte[] clean = NpmFixtures.BuildTarballFromEntries(
+            ("package/package.json", $$$"""{"name":"{{{cleanName}}}","version":"1.0.0"}"""));
+        StubPackument(cleanName, "1.0.0", clean);
+        StubTarball(cleanName, cleanFile, clean);
+        var served = await BuildHandler().GetTarballAsync(
+            BuildHttpContext(_orgId), _orgId, cleanName, cleanFile, CancellationToken.None);
+        Assert.IsType<FileStreamResult>(served).FileStream.Dispose();
+    }
+
+    [Fact]
+    public async Task ProxyMiss_RefusedTarball_BlobStillReferencedByAnotherRow_IsKept()
+    {
+        const string name = "dupkey-shared";
+        string file = $"{name}-1.0.0.tgz";
+        byte[] evil = NpmFixtures.BuildTarballFromEntries(("package/package.json", DuplicateKeyManifest(name)));
+        StubPackument(name, "1.0.0", evil);
+        StubTarball(name, file, evil);
+        string blobKey = Dependably.Storage.BlobKeys.Proxy(
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(evil)).ToLowerInvariant());
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        await new CacheArtifactRepository(_db).InsertAsync(new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "npm",
+            Name = "other-pkg",
+            Version = "9.9.9",
+            Filename = "other-pkg-9.9.9.tgz",
+            BlobKey = blobKey,
+            ContentHash = "sha256:x",
+            SizeBytes = evil.Length,
+            FirstCachedAt = now,
+            LastAccessedAt = now,
+        });
+
+        var result = await BuildHandler().GetTarballAsync(
+            BuildHttpContext(_orgId), _orgId, name, file, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status502BadGateway, Assert.IsType<StatusCodeResult>(result).StatusCode);
+        Assert.True(await _blobs.ExistsAsync(Dependably.Storage.BlobKeys.StoreKey(blobKey)));
+    }
+
     [Fact]
     public async Task ProxyCacheHit_AnonymousPullDisabled_NoToken_Returns401()
     {
         const string fullName = "left-pad-private";
         const string version = "1.0.0";
         string file = $"{fullName}-{version}.tgz";
-        byte[] bytes = Encoding.UTF8.GetBytes("private-npm-tarball-payload");
+        byte[] bytes = NpmFixtures.BuildTarball("private-pkg", "1.0.0").Bytes;
         StubPackument(fullName, version, bytes);
         StubTarball(fullName, file, bytes);
 
@@ -277,7 +340,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         const string version = "1.0.0";
         string fullName = $"@{scope}/{pkg}";
         string file = $"{pkg}-{version}.tgz";
-        byte[] bytes = Encoding.UTF8.GetBytes("blocked-scoped-npm-tarball");
+        byte[] bytes = NpmFixtures.BuildTarball("blocked-scoped-pkg", "1.0.0").Bytes;
         StubPackument(fullName, version, bytes);
         StubTarball(fullName, file, bytes);
 
@@ -303,7 +366,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         const string version = "2.1.0";
         string fullName = $"@{scope}/{pkg}";
         string file = $"{pkg}-{version}.tgz";
-        byte[] bytes = Encoding.UTF8.GetBytes("allowlisted-scoped-npm-tarball");
+        byte[] bytes = NpmFixtures.BuildTarball("allowlisted-scoped-pkg", "1.0.0").Bytes;
         StubPackument(fullName, version, bytes);
         StubTarball(fullName, file, bytes);
 
@@ -328,7 +391,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         const string fullName = "flaky-pkg";
         const string version = "3.0.0";
         string file = $"{fullName}-{version}.tgz";
-        byte[] bytes = Encoding.UTF8.GetBytes("db-fault-npm-tarball");
+        byte[] bytes = NpmFixtures.BuildTarball("db-fault-pkg", "1.0.0").Bytes;
         StubPackument(fullName, version, bytes);
         StubTarball(fullName, file, bytes);
 
@@ -352,7 +415,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         const string fullName = "unclassified-fault-pkg";
         const string version = "3.0.0";
         string file = $"{fullName}-{version}.tgz";
-        byte[] bytes = Encoding.UTF8.GetBytes("unclassified-fault-npm-tarball");
+        byte[] bytes = NpmFixtures.BuildTarball("unclassified-fault-pkg", "1.0.0").Bytes;
         StubPackument(fullName, version, bytes);
         StubTarball(fullName, file, bytes);
 
@@ -366,6 +429,27 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ProxyMiss_StagedBlobVanished_Answers502_AndRecordsNoRow()
+    {
+        // A concurrent refusal can delete the content-addressed staged blob between the fetch and
+        // the scan. The request must not carry on to record a catalogue row for bytes that are gone.
+        const string fullName = "vanished-staged-pkg";
+        string file = $"{fullName}-1.0.0.tgz";
+        byte[] bytes = NpmFixtures.BuildTarball(fullName, "1.0.0").Bytes;
+        StubPackument(fullName, "1.0.0", bytes);
+        StubTarball(fullName, file, bytes);
+
+        var handler = BuildHandler(new AlwaysMissingReadBlobStore());
+        var result = await handler.GetTarballAsync(
+            BuildHttpContext(_orgId), _orgId, fullName, file, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status502BadGateway, Assert.IsType<StatusCodeResult>(result).StatusCode);
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE name = @n", new { n = fullName }));
+    }
+
+    [Fact]
     public async Task ProxyFetch_OperationCanceled_Propagates_NotMaskedAs404()
     {
         // A client disconnect or host shutdown inside the fetch-and-cache try block is control
@@ -374,7 +458,7 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         const string fullName = "cancelled-pkg";
         const string version = "3.0.0";
         string file = $"{fullName}-{version}.tgz";
-        byte[] bytes = Encoding.UTF8.GetBytes("cancelled-npm-tarball");
+        byte[] bytes = NpmFixtures.BuildTarball("cancelled-pkg", "1.0.0").Bytes;
         StubPackument(fullName, version, bytes);
         StubTarball(fullName, file, bytes);
 
@@ -434,6 +518,25 @@ public sealed class NpmTarballHandlerProxyTests : IAsyncLifetime
         public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => Task.FromResult(0L);
         public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
             => throw new InvalidOperationException("unclassified blob range-read fault");
+        public async IAsyncEnumerable<BlobInfo> ListAsync(
+            string prefix, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
+
+    // Reads report "no such blob" while writes, existence checks and deletes succeed — models the
+    // staged blob being deleted by a concurrent refusal after it was written.
+    private sealed class AlwaysMissingReadBlobStore : IBlobStore
+    {
+        public Task<Stream?> GetAsync(string key, CancellationToken ct = default) => Task.FromResult<Stream?>(null);
+        public Task PutAsync(string key, Stream data, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> ExistsAsync(string key, CancellationToken ct = default) => Task.FromResult(false);
+        public Task DeleteAsync(string key, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<long> GetTotalSizeAsync(CancellationToken ct = default) => Task.FromResult(0L);
+        public Task<RangedStream?> GetRangeAsync(string key, long from, long to, CancellationToken ct = default)
+            => Task.FromResult<RangedStream?>(null);
         public async IAsyncEnumerable<BlobInfo> ListAsync(
             string prefix, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
         {

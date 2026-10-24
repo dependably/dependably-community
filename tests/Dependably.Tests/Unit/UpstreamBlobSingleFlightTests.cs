@@ -5,6 +5,7 @@ using Dependably.Infrastructure;
 using Dependably.Protocol;
 using Dependably.Security;
 using Dependably.Storage;
+using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -286,9 +287,104 @@ public sealed class UpstreamBlobSingleFlightTests
         Assert.Equal(2, gate.CallCount);
     }
 
+    // ── Stalled upstream body ─────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task StalledArtifactBody_FailsAtIdleTimeout_AndNextFetchRunsFresh(bool byBlobKey)
+    {
+        // An upstream that sends headers and then never another byte must fail the shared fetch
+        // once the body goes idle, so the in-flight entry is evicted rather than holding every
+        // later caller for the artifact until the process restarts. Covers both staging paths:
+        // the blob-key fetch and the URL-keyed (no pre-known SHA) fetch.
+        var time = TestTime.Frozen();
+        byte[] body = RandomBytes(64);
+        var handler = new StalledArtifactHandler(body);
+        var (client, _) = BuildClient(handler, time);
+        const string url = "http://upstream.invalid/pkg-1.0.0.whl";
+        var spec = new ChecksumSpec(ChecksumAlgorithm.Sha256, Sha256Hex(body));
+        string blobKey = BlobKeys.Proxy(Sha256Hex(body));
+
+        Task Fetch() => byBlobKey
+            ? client.GetOrFetchToBlobKeyAsync(blobKey, url, spec, "pypi", ct: default)
+            : client.FetchAndCacheByUrlAsync(url, spec, "pypi");
+
+        var stalled = Fetch();
+        await handler.BodyReadStarted.WaitAsync(TimeSpan.FromSeconds(10));
+        time.Advance(UpstreamClient.UpstreamBodyIdleTimeout);
+
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => stalled.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Contains(ExceptionChain(ex), e => e is TimeoutException);
+
+        handler.StallBody = false;
+        await Fetch().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(2, handler.CallCount);
+    }
+
+    private static IEnumerable<Exception> ExceptionChain(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            yield return e;
+        }
+    }
+
+    // Answers 200 with a declared length immediately; while StallBody is set, the body then never
+    // yields a byte until its read is cancelled — a half-open upstream connection.
+    private sealed class StalledArtifactHandler : HttpMessageHandler
+    {
+        private readonly byte[] _body;
+        private readonly TaskCompletionSource _bodyReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int CallCount;
+        public volatile bool StallBody = true;
+
+        public StalledArtifactHandler(byte[] body) => _body = body;
+
+        public Task BodyReadStarted => _bodyReadStarted.Task;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref CallCount);
+            HttpContent content = StallBody
+                ? new StreamContent(new StallingStream(_bodyReadStarted))
+                : new ByteArrayContent(_body);
+            content.Headers.ContentLength = _body.Length;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        }
+    }
+
+    private sealed class StallingStream : Stream
+    {
+        private readonly TaskCompletionSource _readStarted;
+        public StallingStream(TaskCompletionSource readStarted) => _readStarted = readStarted;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            _readStarted.TrySetResult();
+            await new TaskCompletionSource().Task.WaitAsync(cancellationToken);
+            return 0;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static (UpstreamClient Client, InMemoryBlobStore Blobs) BuildClient(HttpMessageHandler handler)
+    private static (UpstreamClient Client, InMemoryBlobStore Blobs) BuildClient(
+        HttpMessageHandler handler, TimeProvider? time = null)
     {
         var factory = new FactoryFor(handler);
         var blobs = new InMemoryBlobStore();
@@ -305,7 +401,8 @@ public sealed class UpstreamBlobSingleFlightTests
             new DisabledAirGap(),
             new Dependably.Infrastructure.DriveInfoStagingDiskInfo(stagingDir),
             Dependably.Infrastructure.StagingOptions.Resolve(config),
-            NullLogger<UpstreamClient>.Instance);
+            NullLogger<UpstreamClient>.Instance,
+            time: time);
         return (client, blobs);
     }
 

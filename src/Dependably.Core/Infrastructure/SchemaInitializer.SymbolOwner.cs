@@ -61,6 +61,58 @@ public sealed partial class SchemaInitializer
         }
     }
 
+    // Postgres auto-named the original table-level UNIQUE (org_id, ssqp_key, pdb_filename,
+    // package_version_id) and truncated the name to 63 bytes.
+    private const string LegacySymbolIndexUniqueKey = "nuget_symbol_index_org_id_ssqp_key_pdb_filename_package_ver_key";
+
+    /// <summary>
+    /// Drops the table-level UNIQUE key a Postgres database created before the polymorphic owner
+    /// shape still carries. The owner reshape replaced it with the partial
+    /// <c>idx_nuget_symbol_index_pv_key</c> / <c>idx_nuget_symbol_index_ca_key</c> pair but never
+    /// removed it, so upgraded databases kept a constraint fresh installs do not have.
+    ///
+    /// <para>Safe for both binaries during a blue-green cutover: every insert into this table uses a
+    /// bare <c>ON CONFLICT DO NOTHING</c>, which any unique index satisfies, and
+    /// <c>idx_nuget_symbol_index_pv_key</c> enforces the same uniqueness for package-version rows.
+    /// The legacy key could never fire for cache-artifact rows, whose <c>package_version_id</c> is
+    /// NULL. Runs every boot. <c>DROP CONSTRAINT IF EXISTS</c> takes ACCESS EXCLUSIVE before it
+    /// checks existence, so the statement is only issued after a <c>pg_constraint</c> read finds the
+    /// key, and then under the bounded lock retry: a table held by the previous release's slot
+    /// defers the drop to the next boot with a warning instead of stalling the boot and every reader
+    /// queued behind it. SQLite rebuilt the table in the reshape and has no such key.</para>
+    /// </summary>
+    internal async Task DropLegacySymbolIndexUniqueKeyAsync(DbConnection conn)
+    {
+        if (_db.Provider != DbProvider.Postgres)
+        {
+            return;
+        }
+
+        // xtenant: reads the Postgres system catalogue, not application data — there is no tenant
+        // column to filter on.
+        long present = await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*)
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE c.conname = @name
+              AND t.relname = 'nuget_symbol_index'
+              AND n.nspname = current_schema()
+            """,
+            new { name = LegacySymbolIndexUniqueKey });
+        if (present == 0)
+        {
+            return;
+        }
+
+        // rawsql: the constraint name is the private compile-time constant above.
+        await AlterWithLockRetryAsync(
+            conn, "nuget_symbol_index",
+            $"ALTER TABLE nuget_symbol_index DROP CONSTRAINT IF EXISTS {LegacySymbolIndexUniqueKey}",
+            "drop_legacy_symbol_index_unique_key", ConstraintLockRetry, failOnExhaustion: false);
+    }
+
     private Task AddSymbolIndexOwnerInvariantAsync(DbConnection conn) =>
         _db.Provider == DbProvider.Postgres
             ? AddSymbolIndexOwnerInvariantPostgresAsync(conn)

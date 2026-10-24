@@ -87,6 +87,15 @@ public sealed class LicenseBackfillService : ScheduledBackgroundService
             return;
         }
 
+        // npm rows stamped with no licence before the extractor read non-`package/` wrapper
+        // directories are requeued exactly once; the marker makes later passes skip this.
+        int requeued = await _cacheArtifacts.RequeueEmptyNpmLicenceChecksOnceAsync(_time, ct: ct);
+        if (requeued >= 0)
+        {
+            _logger.LogInformation(
+                "Requeued {Requeued} npm artifact(s) with no recorded licence for re-extraction.", requeued);
+        }
+
         // now-ok: measures real elapsed time for a duration log/metric only — no control
         // flow branches on the value, so a substitutable clock would change the reported
         // number without changing what the code does.

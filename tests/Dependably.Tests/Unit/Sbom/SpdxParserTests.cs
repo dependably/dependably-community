@@ -630,4 +630,310 @@ public sealed class SpdxParserTests
         Assert.Equal(expectedName, parsed.ToolName);
         Assert.Equal(expectedVersion, parsed.ToolVersion);
     }
+
+    // ── malformed and edge-case documents ────────────────────────────────────────────────────
+
+    private static CycloneDxDocument ParseRaw(string document) =>
+        SpdxParser.Parse(JsonDocument.Parse(document).RootElement);
+
+    // A document with caller-chosen creationInfo/packages/trailing members; the trailing members
+    // string must begin with a comma when non-empty.
+    private static string Doc(string creationInfo, string packages, string trailing = "") =>
+        "{\"spdxVersion\":\"SPDX-2.3\",\"SPDXID\":\"SPDXRef-DOCUMENT\",\"name\":\"doc\"" +
+        (creationInfo.Length == 0 ? "" : ",\"creationInfo\":" + creationInfo) +
+        ",\"packages\":[" + packages + "]" + trailing + "}";
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("\"SPDX-2.3\"")]
+    [InlineData("null")]
+    public void Parse_RootThatIsNotAnObject_IsMalformed_AndNotRecognisedAsSpdx(string raw)
+    {
+        var ex = Assert.Throws<SbomParseException>(() => ParseRaw(raw));
+
+        Assert.Equal(SbomParseFailure.Malformed, ex.Failure);
+        Assert.False(SpdxParser.IsSpdx(JsonDocument.Parse(raw).RootElement));
+    }
+
+    [Theory]
+    [InlineData("""{"SPDXID":"SPDXRef-DOCUMENT","packages":[]}""")]
+    [InlineData("""{"spdxVersion":2.3,"packages":[]}""")]
+    [InlineData("""{"spdxVersion":"   ","packages":[]}""")]
+    public void Parse_MissingOrNonStringSpdxVersion_IsMalformed(string raw)
+    {
+        var ex = Assert.Throws<SbomParseException>(() => ParseRaw(raw));
+
+        Assert.Equal(SbomParseFailure.Malformed, ex.Failure);
+    }
+
+    [Theory]
+    [InlineData("SPDX-3.0", true)]
+    [InlineData("SPDX-2.2", true)]
+    [InlineData("spdx-2.3", false)]
+    [InlineData("CycloneDX", false)]
+    public void IsSpdx_MatchesTheSpdxPrefixCaseSensitively(string version, bool expected)
+    {
+        var root = JsonDocument.Parse("{\"spdxVersion\":\"" + version + "\"}").RootElement;
+
+        Assert.Equal(expected, SpdxParser.IsSpdx(root));
+    }
+
+    [Fact]
+    public void Parse_WithoutCreationInfo_HasNoTool()
+    {
+        var parsed = ParseRaw(Doc(creationInfo: "", packages: ""));
+
+        Assert.Null(parsed.ToolName);
+        Assert.Null(parsed.ToolVersion);
+    }
+
+    [Theory]
+    [InlineData("""{"creators":["Organization: Acme", "Person: Jane"]}""", null, null)]
+    [InlineData("""{"creators":[7, null, "Tool: trivy-0.50.0"]}""", "trivy", "0.50.0")]
+    [InlineData("""{"creators":["Tool: noversion"]}""", "noversion", null)]
+    [InlineData("""{"creators":["Tool: trailing-"]}""", "trailing-", null)]
+    [InlineData("""{"creators":["Tool: my-tool-v2-beta"]}""", "my-tool-v2-beta", null)]
+    [InlineData("""{"creators":["tool: syft-1.0"]}""", null, null)]
+    [InlineData("""{"created":"2026-08-01T10:10:00Z"}""", null, null)]
+    public void Parse_ToolCreator_IsTheFirstCaseSensitiveToolEntryWithADigitLedVersionSegment(
+        string creationInfo, string? expectedName, string? expectedVersion)
+    {
+        var parsed = ParseRaw(Doc(creationInfo, packages: ""));
+
+        Assert.Equal(expectedName, parsed.ToolName);
+        Assert.Equal(expectedVersion, parsed.ToolVersion);
+    }
+
+    private const string TwoPackages =
+        "{\"name\":\"subject\",\"SPDXID\":\"SPDXRef-subject\"},{\"name\":\"left-pad\",\"SPDXID\":\"SPDXRef-left-pad\"}";
+
+    [Fact]
+    public void Parse_DocumentDescribes_SkipsNonStringAndBlankEntriesToTheFirstRealOne()
+    {
+        var parsed = ParseRaw(Doc("", TwoPackages, ",\"documentDescribes\":[7,null,\"   \",\"SPDXRef-subject\"]"));
+
+        Assert.Equal("subject", parsed.Root!.Name);
+        Assert.Equal("left-pad", Assert.Single(parsed.Components).Name);
+    }
+
+    [Fact]
+    public void Parse_DocumentDescribesWithOnlyUnusableEntries_FallsBackToTheDescribesRelationship()
+    {
+        var parsed = ParseRaw(Doc("", TwoPackages,
+            ",\"documentDescribes\":[\"   \"],\"relationships\":[" +
+            "{\"spdxElementId\":\"SPDXRef-DOCUMENT\",\"relatedSpdxElement\":\"SPDXRef-subject\",\"relationshipType\":\"DESCRIBES\"}]"));
+
+        Assert.Equal("subject", parsed.Root!.Name);
+    }
+
+    [Fact]
+    public void Parse_DescribesRelationship_IgnoresOtherSubjectsMalformedEntriesAndTargetlessEdges()
+    {
+        var parsed = ParseRaw(Doc("", TwoPackages,
+            ",\"relationships\":[" +
+            "\"not-an-object\"," +
+            "{\"spdxElementId\":\"SPDXRef-other-doc\",\"relatedSpdxElement\":\"SPDXRef-left-pad\",\"relationshipType\":\"DESCRIBES\"}," +
+            "{\"spdxElementId\":\"SPDXRef-DOCUMENT\",\"relationshipType\":\"DESCRIBES\"}," +
+            "{\"spdxElementId\":\"SPDXRef-DOCUMENT\",\"relatedSpdxElement\":\"SPDXRef-left-pad\",\"relationshipType\":\"CONTAINS\"}," +
+            "{\"spdxElementId\":\"SPDXRef-DOCUMENT\",\"relatedSpdxElement\":\"SPDXRef-subject\",\"relationshipType\":\"DESCRIBES\"}]"));
+
+        Assert.Equal("subject", parsed.Root!.Name);
+        Assert.Equal("left-pad", Assert.Single(parsed.Components).Name);
+    }
+
+    [Fact]
+    public void Parse_DescribesRelationshipWithNoSourceElement_IsAccepted()
+    {
+        var parsed = ParseRaw(Doc("", TwoPackages,
+            ",\"relationships\":[{\"relatedSpdxElement\":\"SPDXRef-subject\",\"relationshipType\":\"DESCRIBES\"}]"));
+
+        Assert.Equal("subject", parsed.Root!.Name);
+    }
+
+    [Fact]
+    public void Parse_NothingDescribed_LeavesEveryPackageAComponent()
+    {
+        var parsed = ParseRaw(Doc("", TwoPackages));
+
+        Assert.Null(parsed.Root);
+        Assert.Equal(2, parsed.Components.Count);
+    }
+
+    [Fact]
+    public void Parse_SkipsNonObjectPackages()
+    {
+        var parsed = ParseRaw(Doc("", "7,\"left-pad\",null,{\"name\":\"left-pad\",\"SPDXID\":\"SPDXRef-left-pad\"}"));
+
+        Assert.Equal("left-pad", Assert.Single(parsed.Components).Name);
+    }
+
+    [Fact]
+    public void Parse_Purl_SkipsAnExternalRefWithoutALocatorAndOtherPackageManagerTypes()
+    {
+        var component = ParseOne("""
+            {
+              "name": "left-pad", "SPDXID": "SPDXRef-left-pad",
+              "externalRefs": [
+                { "referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl" },
+                { "referenceCategory": "PACKAGE-MANAGER", "referenceType": "npm", "referenceLocator": "left-pad@1.3.0" },
+                { "referenceCategory": "OTHER", "referenceType": "purl", "referenceLocator": "pkg:npm/wrong@1" },
+                { "referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:npm/left-pad@1.3.0" },
+                { "referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:npm/second@2" }
+              ]
+            }
+            """);
+
+        Assert.Equal("pkg:npm/left-pad@1.3.0", component.Purl);
+    }
+
+    [Fact]
+    public void Parse_AdditionalIdentifiers_CoverCpeSwhAndGitoid_AndDropEverythingElse()
+    {
+        string tooLong = "cpe:2.3:a:" + new string('x', 400);
+        var component = ParseOne(
+            "{\"name\":\"openssl\",\"SPDXID\":\"SPDXRef-openssl\",\"externalRefs\":[" +
+            "{\"referenceCategory\":\"SECURITY\",\"referenceType\":\"cpe22Type\",\"referenceLocator\":\"cpe:/a:openssl:openssl:3.0.7\"}," +
+            "{\"referenceCategory\":\"SECURITY\",\"referenceType\":\"cpe23Type\"}," +
+            "{\"referenceCategory\":\"SECURITY\",\"referenceType\":\"cpe23Type\",\"referenceLocator\":\"" + tooLong + "\"}," +
+            "{\"referenceCategory\":\"SECURITY\",\"referenceType\":\"advisory\",\"referenceLocator\":\"https://example.com/advisory\"}," +
+            "{\"referenceCategory\":\"PERSISTENT-ID\",\"referenceType\":\"swh\",\"referenceLocator\":\"swh:1:cnt:abc\"}," +
+            "{\"referenceCategory\":\"PERSISTENT-ID\",\"referenceType\":\"gitoid\",\"referenceLocator\":\"gitoid:blob:sha1:def\"}," +
+            "{\"referenceCategory\":\"PERSISTENT-ID\",\"referenceType\":\"other\",\"referenceLocator\":\"ignored\"}]}");
+
+        Assert.Equal(
+            """[{"kind":"cpe","value":"cpe:/a:openssl:openssl:3.0.7"},{"kind":"swhid","value":"swh:1:cnt:abc"},{"kind":"omnibor","value":"gitoid:blob:sha1:def"}]""",
+            component.AdditionalIdentifiersJson);
+    }
+
+    [Fact]
+    public void Parse_EntityWithAnUnterminatedParenthetical_IsKeptWhole()
+    {
+        var component = ParseOne("""
+            { "name": "x", "SPDXID": "SPDXRef-x", "supplier": "Person: Jane (unterminated", "originator": "Acme Corp" }
+            """);
+
+        Assert.Equal("Jane (unterminated", component.Producer);
+        Assert.Equal("Acme Corp", component.Author);
+    }
+
+    [Fact]
+    public void Parse_ToolPrefixedOriginator_LosesThePrefix()
+    {
+        var component = ParseOne("""
+            { "name": "x", "SPDXID": "SPDXRef-x", "originator": "Tool: bazel-7.0.0" }
+            """);
+
+        Assert.Equal("bazel-7.0.0", component.Author);
+    }
+
+    [Fact]
+    public void Parse_LinkedUrls_RequireHttpAndAreClipped()
+    {
+        string longUrl = "https://example.com/" + new string('a', 500);
+        var ftp = ParseOne("""
+            { "name": "x", "SPDXID": "SPDXRef-x", "homepage": "ftp://example.com/x", "downloadLocation": "git+https://github.com/a/b.git" }
+            """);
+        Assert.Null(ftp.WebsiteUrl);
+        Assert.Null(ftp.DistributionUrl);
+
+        var plainHttp = ParseOne("""
+            { "name": "x", "SPDXID": "SPDXRef-x", "homepage": "http://example.com/x", "downloadLocation": "NONE" }
+            """);
+        Assert.Equal("http://example.com/x", plainHttp.WebsiteUrl);
+        Assert.Null(plainHttp.DistributionUrl);
+
+        var clipped = ParseOne("{\"name\":\"x\",\"SPDXID\":\"SPDXRef-x\",\"homepage\":\"" + longUrl + "\"}");
+        Assert.Equal(longUrl[..400], clipped.WebsiteUrl);
+    }
+
+    [Fact]
+    public void Parse_TextFields_AreClippedAtTheirBounds()
+    {
+        var component = ParseOne(
+            "{\"name\":\"x\",\"SPDXID\":\"SPDXRef-x\",\"description\":\"" + new string('d', 1001) +
+            "\",\"copyrightText\":\"" + new string('c', 401) + "\"}");
+
+        Assert.Equal(1000, component.Description!.Length);
+        Assert.Equal(400, component.Copyright!.Length);
+    }
+
+    [Fact]
+    public void Parse_Checksums_DropEntriesMissingAnAlgorithmOrValue_AndOversizedSetsWhole()
+    {
+        var component = ParseOne("""
+            { "name": "x", "SPDXID": "SPDXRef-x", "checksums": [
+                { "algorithm": "SHA256", "checksumValue": "abc" }, { "algorithm": "SHA1" }, { "checksumValue": "zzz" } ] }
+            """);
+        Assert.Equal("""[{"alg":"SHA256","content":"abc"}]""", component.HashesJson);
+
+        var noneValid = ParseOne("""{ "name": "x", "SPDXID": "SPDXRef-x", "checksums": [ { "algorithm": "SHA1" } ] }""");
+        Assert.Null(noneValid.HashesJson);
+
+        string many = string.Join(",", Enumerable.Range(0, 20).Select(i =>
+            "{\"algorithm\":\"SHA512\",\"checksumValue\":\"" + new string('a', 128) + "\"}"));
+        var oversized = ParseOne("{\"name\":\"x\",\"SPDXID\":\"SPDXRef-x\",\"checksums\":[" + many + "]}");
+        Assert.Null(oversized.HashesJson);
+    }
+
+    [Fact]
+    public void Parse_Relationships_BuildAdjacencyOnlyFromWellFormedDependencyEdges()
+    {
+        var parsed = ParseRaw(Doc("", TwoPackages + ",{\"name\":\"is-odd\",\"SPDXID\":\"SPDXRef-is-odd\"}",
+            ",\"relationships\":[" +
+            "\"not-an-object\"," +
+            "{\"relatedSpdxElement\":\"SPDXRef-left-pad\",\"relationshipType\":\"DEPENDS_ON\"}," +
+            "{\"spdxElementId\":\"SPDXRef-subject\",\"relationshipType\":\"DEPENDS_ON\"}," +
+            "{\"spdxElementId\":\"SPDXRef-subject\",\"relatedSpdxElement\":\"SPDXRef-left-pad\"}," +
+            "{\"spdxElementId\":\"SPDXRef-subject\",\"relatedSpdxElement\":\"SPDXRef-left-pad\",\"relationshipType\":\"GENERATED_FROM\"}," +
+            "{\"spdxElementId\":\"SPDXRef-subject\",\"relatedSpdxElement\":\"SPDXRef-left-pad\",\"relationshipType\":\"DEPENDS_ON\"}," +
+            "{\"spdxElementId\":\"SPDXRef-is-odd\",\"relatedSpdxElement\":\"SPDXRef-left-pad\",\"relationshipType\":\"BUILD_DEPENDENCY_OF\"}]"));
+
+        Assert.Equal(2, parsed.Dependencies.Count);
+        Assert.Equal(new[] { "SPDXRef-left-pad" }, parsed.Dependencies["SPDXRef-subject"]);
+        Assert.Equal(new[] { "SPDXRef-is-odd" }, parsed.Dependencies["SPDXRef-left-pad"]);
+    }
+
+    [Theory]
+    [InlineData("DEPENDENCY_OF")]
+    [InlineData("BUILD_DEPENDENCY_OF")]
+    [InlineData("RUNTIME_DEPENDENCY_OF")]
+    [InlineData("DEV_DEPENDENCY_OF")]
+    [InlineData("OPTIONAL_DEPENDENCY_OF")]
+    [InlineData("PROVIDED_DEPENDENCY_OF")]
+    [InlineData("TEST_DEPENDENCY_OF")]
+    public void Parse_EveryDependencyOfForm_ReadsTheTargetAsParentAndTheSourceAsChild(string relationshipType)
+    {
+        var parsed = ParseRaw(Doc("", TwoPackages,
+            ",\"relationships\":[{\"spdxElementId\":\"SPDXRef-left-pad\",\"relatedSpdxElement\":\"SPDXRef-subject\"," +
+            "\"relationshipType\":\"" + relationshipType + "\"}]"));
+
+        Assert.Equal(new[] { "SPDXRef-left-pad" }, Assert.Single(parsed.Dependencies).Value);
+        Assert.Equal("SPDXRef-subject", Assert.Single(parsed.Dependencies).Key);
+    }
+
+    [Fact]
+    public void Parse_ContainsEdges_IgnoreMalformedEntriesAndPackagesWithNoSpdxId()
+    {
+        var parsed = ParseRaw(Doc("", "{\"name\":\"anonymous\"},{\"name\":\"left-pad\",\"SPDXID\":\"SPDXRef-left-pad\"}",
+            ",\"relationships\":[" +
+            "7," +
+            "{\"spdxElementId\":\"SPDXRef-DOCUMENT\",\"relationshipType\":\"CONTAINS\"}," +
+            "{\"spdxElementId\":\"SPDXRef-DOCUMENT\",\"relatedSpdxElement\":\"SPDXRef-left-pad\",\"relationshipType\":\"CONTAINS\"}]"));
+
+        Assert.False(parsed.Components.Single(c => c.Name == "anonymous").ContainmentDeclared);
+        Assert.True(parsed.Components.Single(c => c.Name == "left-pad").ContainmentDeclared);
+    }
+
+    [Fact]
+    public void Parse_PackageCountAtTheCeiling_IsAccepted_AndOneMoreIsRefused()
+    {
+        int ceiling = SbomDocumentLimits.MaxComponents;
+        static string Packages(int count) => string.Join(",", Enumerable.Repeat("{\"name\":\"p\"}", count));
+
+        Assert.Equal(ceiling, ParseRaw(Doc("", Packages(ceiling))).Components.Count);
+
+        var ex = Assert.Throws<SbomParseException>(() => ParseRaw(Doc("", Packages(ceiling + 1))));
+        Assert.Equal(SbomParseFailure.TooManyComponents, ex.Failure);
+        Assert.Equal(ceiling.ToString(System.Globalization.CultureInfo.InvariantCulture), ex.Diagnostic);
+    }
 }

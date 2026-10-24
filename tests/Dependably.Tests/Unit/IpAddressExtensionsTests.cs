@@ -193,4 +193,92 @@ public class IpAddressExtensionsTests
         HttpContext? ctx = null;
         Assert.Null(ctx.GetRateLimitPartitionIp());
     }
+
+    [Fact]
+    public void GetRateLimitPartitionIp_ReturnsNull_WhenNoRemoteAddressIsAvailable()
+    {
+        var ctx = new DefaultHttpContext();
+        Assert.Null(ctx.GetRateLimitPartitionIp());
+    }
+
+    [Fact]
+    public void GetRateLimitPartitionIp_HonoursAnExplicitPrefix_AndKeepsIPv4Whole()
+    {
+        var v6 = new DefaultHttpContext();
+        v6.Connection.RemoteIpAddress = IPAddress.Parse("2001:db8:1:2::abcd");
+        Assert.Equal("2001:db8:1::/48", v6.GetRateLimitPartitionIp(48));
+
+        var mapped = new DefaultHttpContext();
+        mapped.Connection.RemoteIpAddress = IPAddress.Parse("::ffff:198.51.100.9");
+        Assert.Equal("198.51.100.9", mapped.GetRateLimitPartitionIp(48));
+    }
+
+    [Theory]
+    [InlineData(0, "::/0")]
+    [InlineData(56, "2001:db8:1:200::/56")]
+    [InlineData(60, "2001:db8:1:230::/60")]
+    [InlineData(128, "2001:db8:1:234:5678:9abc:def0:1234/128")]
+    [InlineData(-8, "::/0")]
+    [InlineData(500, "2001:db8:1:234:5678:9abc:def0:1234/128")]
+    public void NormalizeForRateLimit_MasksToThePrefixAndClampsOutOfRangeValues(int prefix, string expected)
+    {
+        var ip = IPAddress.Parse("2001:db8:1:234:5678:9abc:def0:1234");
+
+        Assert.Equal(expected, IpAddressExtensions.NormalizeForRateLimit(ip, prefix));
+    }
+
+    // ---------- NormalizeForAuditMinimization(IPAddress?, int, int) ----------
+
+    [Fact]
+    public void NormalizeForAuditMinimization_ReturnsNull_ForNullInput()
+    {
+        Assert.Null(IpAddressExtensions.NormalizeForAuditMinimization(null));
+    }
+
+    [Theory]
+    [InlineData(0, "0.0.0.0/0")]
+    [InlineData(8, "198.0.0.0/8")]
+    [InlineData(20, "198.51.96.0/20")]
+    [InlineData(25, "198.51.100.0/25")]
+    [InlineData(32, "198.51.100.77/32")]
+    [InlineData(-3, "0.0.0.0/0")]
+    [InlineData(99, "198.51.100.77/32")]
+    public void NormalizeForAuditMinimization_IPv4PrefixesMaskMidByteAndClamp(int prefix, string expected)
+    {
+        var ip = IPAddress.Parse("198.51.100.77");
+
+        Assert.Equal(expected, IpAddressExtensions.NormalizeForAuditMinimization(ip, prefix));
+    }
+
+    [Theory]
+    [InlineData(0, "::/0")]
+    [InlineData(52, "2001:db8:1234:5000::/52")]
+    [InlineData(64, "2001:db8:1234:5678::/64")]
+    [InlineData(128, "2001:db8:1234:5678:9abc:def0:1234:5678/128")]
+    [InlineData(-1, "::/0")]
+    [InlineData(200, "2001:db8:1234:5678:9abc:def0:1234:5678/128")]
+    public void NormalizeForAuditMinimization_IPv6PrefixesMaskMidByteAndClamp(int prefix, string expected)
+    {
+        var ip = IPAddress.Parse("2001:db8:1234:5678:9abc:def0:1234:5678");
+
+        Assert.Equal(expected, IpAddressExtensions.NormalizeForAuditMinimization(ip, ipv6PrefixBits: prefix));
+    }
+
+    [Fact]
+    public void NormalizeForAuditMinimization_MappedIPv4UsesTheIPv4PrefixNotTheIPv6One()
+    {
+        var mapped = IPAddress.Parse("::ffff:198.51.100.77");
+
+        Assert.Equal(
+            "198.51.100.0/24",
+            IpAddressExtensions.NormalizeForAuditMinimization(mapped, ipv4PrefixBits: 24, ipv6PrefixBits: 8));
+    }
+
+    [Fact]
+    public void Defaults_AreSlash64ForRateLimitingAndSlash24Slash48ForAuditMinimization()
+    {
+        Assert.Equal(64, IpAddressExtensions.DefaultIpv6PartitionPrefixBits);
+        Assert.Equal(24, IpAddressExtensions.DefaultAuditIpv4PrefixBits);
+        Assert.Equal(48, IpAddressExtensions.DefaultAuditIpv6PrefixBits);
+    }
 }

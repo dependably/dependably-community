@@ -38,6 +38,39 @@ public sealed class ScheduledBackgroundServiceLeaseTests
     // Real-time safety bound for the polls below; a healthy run satisfies them immediately.
     private static readonly TimeSpan PollTimeout = TimeSpan.FromSeconds(10);
 
+    // Real-time hang guard for the renewal loop arming its next timer; a healthy run is immediate.
+    private static readonly TimeSpan ArmGuard = TimeSpan.FromSeconds(30);
+
+    // Moves virtual time to the next renewal. Waits for the heartbeat to arm its delay timer and
+    // advances by exactly that timer's due time, so the advance cannot be lost to a loop that has
+    // not reached its Task.Delay yet, and cannot overshoot.
+    //
+    // The virtual timeline (TTL 60s, renewal interval 20s, margin 20s, so the loop gives up at
+    // expiry - 20s) is what makes "exactly" matter. Attempt n fires at t = 20n. A throwing attempt
+    // leaves the recorded expiry unchanged, so the retry is due 20s later (remaining = 20s); a
+    // successful one pushes expiry to t + 60s, so the next delay is again 20s. Every timer is
+    // therefore due 20s out. Advancing before the loop has re-read the clock after a failed
+    // attempt is what loses the lease: at t = 40 against an unrenewed expiry of 60s the remaining
+    // time is zero, the lease is declared lost, and no timer is ever armed again.
+    private static async Task AdvanceToNextRenewalAsync(TimerSignallingClock clock)
+    {
+        TimeSpan due;
+        try
+        {
+            due = await clock.NextTimerArmedAsync().WaitAsync(ArmGuard);
+        }
+        catch (TimeoutException ex)
+        {
+            // Name where the heartbeat stopped: attempt n is due at t = 20n of virtual time.
+            throw new TimeoutException(
+                $"the heartbeat armed no renewal timer within {ArmGuard.TotalSeconds:0}s (virtual time " +
+                $"{clock.GetUtcNow():O}); it gave up the lease or exited its loop", ex);
+        }
+
+        Assert.Equal(RenewStep, due);
+        clock.Advance(due);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, string because)
     {
         var deadline = Task.Delay(PollTimeout);
@@ -158,7 +191,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
     [Fact]
     public async Task LongTick_RenewsLease_SecondReplicaStillRefusedPastTtl()
     {
-        var clock = TestTime.Frozen();
+        var clock = new TimerSignallingClock(TestTime.KnownNow);
         var locks = new LeasedTestLock(clock);
         var svc = new LongRunningLeaderService(locks, clock);
         using var cts = new CancellationTokenSource();
@@ -169,7 +202,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
         // 6 x 20s = 120s inside the tick — twice the 60s TTL.
         for (int step = 1; step <= 6; step++)
         {
-            clock.Advance(RenewStep);
+            await AdvanceToNextRenewalAsync(clock);
             int expected = step;
             await WaitUntilAsync(() => locks.ExtendAttempts >= expected, $"renewal attempt {expected}");
         }
@@ -192,7 +225,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
     [Fact]
     public async Task RenewalRefused_RunningTickIsCancelled_ServiceSurvives()
     {
-        var clock = TestTime.Frozen();
+        var clock = new TimerSignallingClock(TestTime.KnownNow);
         var locks = new LeasedTestLock(clock) { ExtendBehavior = _ => ExtendOutcome.Refuse };
         var svc = new LongRunningLeaderService(locks, clock);
         using var cts = new CancellationTokenSource();
@@ -200,7 +233,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
         await svc.StartAsync(cts.Token);
         await svc.TickStarted.WaitAsync(PollTimeout);
 
-        clock.Advance(RenewStep);
+        await AdvanceToNextRenewalAsync(clock);
         await WaitUntilAsync(() => svc.TickObservedCancellation, "the running tick to observe its lost lease");
 
         Assert.False(svc.TickRanToCompletion, "a tick that lost its lease must abort, not run to completion");
@@ -266,7 +299,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
         var outcomes = new List<string>();
         using var listener = JobOutcomeListener(jobName, outcome => outcomes.Add(outcome));
 
-        var clock = TestTime.Frozen();
+        var clock = new TimerSignallingClock(TestTime.KnownNow);
         var locks = new LeasedTestLock(clock) { ExtendBehavior = _ => ExtendOutcome.Refuse };
         var svc = new LongRunningLeaderService(
             locks, clock,
@@ -278,7 +311,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
         await svc.StartAsync(cts.Token);
         await svc.TickStarted.WaitAsync(PollTimeout);
 
-        clock.Advance(RenewStep);
+        await AdvanceToNextRenewalAsync(clock);
         await WaitUntilAsync(() => svc.TickObservedCancellation, "the running tick to observe its lost lease");
 
         await StopAsync(svc, cts);
@@ -299,7 +332,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
     [Fact]
     public async Task RenewalThrowsThenSucceeds_TickNotAborted_AndCompletes()
     {
-        var clock = TestTime.Frozen();
+        var clock = new TimerSignallingClock(TestTime.KnownNow);
         var locks = new LeasedTestLock(clock)
         {
             ExtendBehavior = attempt => attempt is 1 or 4 ? ExtendOutcome.Throw : ExtendOutcome.Renew,
@@ -312,7 +345,7 @@ public sealed class ScheduledBackgroundServiceLeaseTests
 
         for (int step = 1; step <= 6; step++)
         {
-            clock.Advance(RenewStep);
+            await AdvanceToNextRenewalAsync(clock);
             int expected = step;
             await WaitUntilAsync(() => locks.ExtendAttempts >= expected, $"renewal attempt {expected}");
         }

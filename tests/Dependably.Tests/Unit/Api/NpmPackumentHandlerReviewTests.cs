@@ -112,8 +112,10 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task1);
         http1.Request.Host = new HostString("evil.example.test");
 
-        // Caller 2 (different host again) joins the SAME in-flight rebuild via single-flight.
-        var http2 = BuildContext("second.example.test");
+        // Caller 2, on the initiating caller's host, joins the SAME in-flight rebuild via
+        // single-flight (the rendered cache is keyed per public base, so only a same-host caller
+        // shares it).
+        var http2 = BuildContext("good.example.test");
         var task2 = handler.GetPackageAsync(http2, _orgId, "lodash", CancellationToken.None);
 
         // Release upstream so the shared rebuild completes and caches its bytes.
@@ -123,7 +125,7 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
         string tarball = ExtractTarball(served.FileContents, "4.17.21");
         Assert.Contains("good.example.test", tarball);
         Assert.DoesNotContain("evil.example.test", tarball);
-        Assert.DoesNotContain("second.example.test", tarball);
+        Assert.Equal(1, gate.CallCount);
     }
 
     // ── Finding 2: local render must not re-cache after a concurrent Evict ────────
@@ -134,7 +136,7 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
         // Passthrough OFF → local-only path. Anonymous reads allowed. One hosted version.
         await SeedLocalPackageAsync();
 
-        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg");
+        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg") { PublicBase = "https://host.example.test" };
         var cache = new EvictDuringReadCache(
             new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
             MetadataCacheKeys.NpmPackument,
@@ -161,7 +163,7 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
         // the second read is a genuine cache hit.
         await SeedLocalPackageAsync();
 
-        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg");
+        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg") { PublicBase = "https://host.example.test" };
         var cache = new RenderedResponseCache<NpmPackumentKey>(
             new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
             MetadataCacheKeys.NpmPackument);
@@ -184,7 +186,7 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
         await SeedLocalPackageAsync();
 
         var epochStore = new OrgCacheEpochStore();
-        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg");
+        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg") { PublicBase = "https://host.example.test" };
         var cache = new InvalidateEpochDuringReadCache(
             new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
             MetadataCacheKeys.NpmPackument, epochStore, cacheKey, _orgId);
@@ -215,7 +217,7 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
         await SeedLocalPackageAsync();
 
         var epochStore = new OrgCacheEpochStore();
-        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg");
+        var cacheKey = new NpmPackumentKey(_orgId, "hosted-pkg") { PublicBase = "https://host.example.test" };
         var cache = new RenderedResponseCache<NpmPackumentKey>(
             new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
             MetadataCacheKeys.NpmPackument, epochStore);
@@ -227,6 +229,132 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
 
         Assert.True(cache.TryGet(cacheKey, out byte[]? cached) && cached is not null,
             "with no intervening Invalidate the render must be cached");
+    }
+
+    [Fact]
+    public async Task Passthrough_ProxySettingsInvalidateAfterSettingsReadBeforeRebuild_StaleRenderIsNotCached()
+    {
+        // The seam invalidates the org's epoch at the passthrough path's first cache lookup:
+        // after the handler read the settings the packument renders with, before the
+        // single-flight rebuild starts. A token captured at the rebuild would be the fresh one
+        // and keep the pre-flip render for the full proxy TTL.
+        var gate = await SeedPassthroughUpstreamAsync();
+        gate.Release();
+
+        var epochStore = new OrgCacheEpochStore();
+        var cacheKey = new NpmPackumentKey(_orgId, "lodash") { IsProxy = true, PublicBase = "https://host.example.test" };
+        var cache = new InvalidateEpochDuringReadCache(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.NpmPackument, epochStore, cacheKey, _orgId);
+        var handler = BuildHandler(cache, gate);
+
+        Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+            BuildContext("host.example.test"), _orgId, "lodash", CancellationToken.None));
+
+        Assert.False(cache.TryGet(cacheKey, out _),
+            "a render whose settings predate a concurrent proxy-settings invalidate must not be cached");
+    }
+
+    [Fact]
+    public async Task Passthrough_NoConcurrentInvalidate_RenderIsCached()
+    {
+        var gate = await SeedPassthroughUpstreamAsync();
+        gate.Release();
+
+        var epochStore = new OrgCacheEpochStore();
+        var cacheKey = new NpmPackumentKey(_orgId, "lodash") { IsProxy = true, PublicBase = "https://host.example.test" };
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.NpmPackument, epochStore);
+        var handler = BuildHandler(cache, gate);
+
+        Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+            BuildContext("host.example.test"), _orgId, "lodash", CancellationToken.None));
+
+        Assert.True(cache.TryGet(cacheKey, out byte[]? cached) && cached is not null,
+            "with no intervening Invalidate the passthrough render must be cached");
+    }
+
+    // ── Host independence: the rendered URLs belong to the requesting host ───────
+
+    [Fact]
+    public async Task LocalOnly_FilledFromOneHost_AnotherHostReceivesItsOwnTarballUrls()
+    {
+        // The packument embeds absolute tarball URLs built from the request's scheme and Host.
+        // A fill from one authority (a stray port, a loopback name the host filter always admits)
+        // must not hand those URLs to a client that asked through a different authority.
+        await SeedLocalPackageAsync();
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.NpmPackument);
+        var handler = BuildHandler(cache);
+
+        var fromA = Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+            BuildContext("repo.example.test:1"), _orgId, "hosted-pkg", CancellationToken.None));
+        var fromB = Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+            BuildContext("repo.example.test"), _orgId, "hosted-pkg", CancellationToken.None));
+        var fromAAgain = Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+            BuildContext("repo.example.test:1"), _orgId, "hosted-pkg", CancellationToken.None));
+
+        Assert.StartsWith("https://repo.example.test:1/npm/tarballs/", ExtractTarball(fromA.FileContents, "1.0.0"));
+        Assert.StartsWith("https://repo.example.test/npm/tarballs/", ExtractTarball(fromB.FileContents, "1.0.0"));
+        Assert.StartsWith("https://repo.example.test:1/npm/tarballs/", ExtractTarball(fromAAgain.FileContents, "1.0.0"));
+    }
+
+    [Fact]
+    public async Task Passthrough_FilledFromOneHost_AnotherHostReceivesItsOwnTarballUrls()
+    {
+        var gate = await SeedPassthroughUpstreamAsync();
+        gate.Release();
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.NpmPackument);
+        var handler = BuildHandler(cache, gate);
+
+        var fromA = Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+            BuildContext("localhost"), _orgId, "lodash", CancellationToken.None));
+        var fromB = Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+            BuildContext("registry.example.test"), _orgId, "lodash", CancellationToken.None));
+
+        Assert.StartsWith("https://localhost/npm/tarballs/", ExtractTarball(fromA.FileContents, "4.17.21"));
+        Assert.StartsWith("https://registry.example.test/npm/tarballs/", ExtractTarball(fromB.FileContents, "4.17.21"));
+    }
+
+    [Fact]
+    public async Task LocalOnly_PackageEviction_ExpiresEveryHostVariant()
+    {
+        // The invalidation coordinator evicts by package coordinates and cannot name the hosts a
+        // document was rendered for. Every host's variant must still go, while another package's
+        // cached documents stay.
+        await SeedLocalPackageAsync();
+        await SeedSecondLocalPackageAsync();
+        var cache = new RenderedResponseCache<NpmPackumentKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.NpmPackument);
+        var handler = BuildHandler(cache);
+
+        foreach (string host in new[] { "a.example.test", "b.example.test" })
+        {
+            Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+                BuildContext(host), _orgId, "hosted-pkg", CancellationToken.None));
+            Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+                BuildContext(host), _orgId, "other-pkg", CancellationToken.None));
+        }
+
+        await AddLocalVersionAsync("pkg-local", "hosted-pkg", "2.0.0");
+        await AddLocalVersionAsync("pkg-other", "other-pkg", "2.0.0");
+        cache.Evict(new NpmPackumentKey(_orgId, "hosted-pkg"));
+
+        foreach (string host in new[] { "a.example.test", "b.example.test" })
+        {
+            var evicted = Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+                BuildContext(host), _orgId, "hosted-pkg", CancellationToken.None));
+            Assert.StartsWith($"https://{host}/npm/tarballs/", ExtractTarball(evicted.FileContents, "2.0.0"));
+
+            var untouched = Assert.IsType<FileContentResult>(await handler.GetPackageAsync(
+                BuildContext(host), _orgId, "other-pkg", CancellationToken.None));
+            Assert.Null(JsonNode.Parse(untouched.FileContents)!["versions"]!["2.0.0"]);
+        }
     }
 
     // ── Cache mechanism: the generation gate in isolation ────────────────────────
@@ -254,6 +382,38 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
+    // Passthrough on, anonymous reads allowed, one npm upstream answering with a one-version
+    // packument once the returned gate is released.
+    private async Task<GateHandler> SeedPassthroughUpstreamAsync()
+    {
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO org_settings (org_id, anonymous_pull, proxy_passthrough_enabled) VALUES (@id, 1, 1)",
+                new { id = _orgId });
+            await conn.ExecuteAsync("""
+                INSERT INTO upstream_registry (id, org_id, ecosystem, url, position, auth_type)
+                VALUES (@id, @o, 'npm', 'http://upstream.invalid', 0, 'anonymous')
+                """,
+                new { id = Guid.NewGuid().ToString("N"), o = _orgId });
+        }
+
+        return new GateHandler(HttpStatusCode.OK, """
+            {
+              "name": "lodash",
+              "dist-tags": { "latest": "4.17.21" },
+              "versions": {
+                "4.17.21": {
+                  "name": "lodash",
+                  "version": "4.17.21",
+                  "dist": { "tarball": "http://upstream.invalid/lodash/-/lodash-4.17.21.tgz" }
+                }
+              },
+              "time": { "4.17.21": "2020-01-01T00:00:00Z" }
+            }
+            """);
+    }
+
     private async Task SeedLocalPackageAsync()
     {
         await using var conn = await _db.OpenAsync();
@@ -273,6 +433,36 @@ public sealed class NpmPackumentHandlerReviewTests : IAsyncLifetime
             {
                 id = "ver-local",
                 bk = "registry/hosted-pkg-1.0.0.tgz",
+                ts = _clock.GetUtcNow().ToUtcIso(),
+            });
+    }
+
+    private async Task SeedSecondLocalPackageAsync()
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("""
+            INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
+            VALUES ('pkg-other', @o, 'npm', 'other-pkg', 'other-pkg', 0)
+            """,
+            new { o = _orgId });
+        await AddLocalVersionAsync("pkg-other", "other-pkg", "1.0.0");
+    }
+
+    private async Task AddLocalVersionAsync(string packageId, string name, string version)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("""
+            INSERT INTO package_versions (id, package_id, version, purl, blob_key, origin, filename, created_at)
+            VALUES (@id, @p, @v, @purl, @bk, 'uploaded', @fn, @ts)
+            """,
+            new
+            {
+                id = $"{packageId}-{version}",
+                p = packageId,
+                v = version,
+                purl = $"pkg:npm/{name}@{version}",
+                bk = $"registry/{name}-{version}.tgz",
+                fn = $"{name}-{version}.tgz",
                 ts = _clock.GetUtcNow().ToUtcIso(),
             });
     }

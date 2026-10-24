@@ -17,8 +17,9 @@ namespace Dependably.Tests.Unit;
 /// Covers the versions-behind operational-risk count computed by
 /// <see cref="DeprecationRefreshService"/>: per-ecosystem counting against the resolver's
 /// stable-versions list, dual-plane parity (cache_artifact and package_versions both carry the
-/// count for a package that is both proxied and hosted), NULL-never-0 on an unreachable upstream,
-/// and a mixed pass where one group succeeds while a sibling group's upstream call fails.
+/// count for a package that is both proxied and hosted), the recorded count kept when no upstream
+/// source answers, and a mixed pass where one group succeeds while a sibling group's upstream call
+/// fails.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class VersionsBehindRefreshTests : IAsyncLifetime
@@ -95,13 +96,13 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task NuGet_UnreachableUpstream_SetsNullNeverZero()
+    public async Task NuGet_UnreachableUpstream_KeepsTheRecordedCount()
     {
         var (orgId, _, caId, _) = await SeedProxyVersionAsync("nuget", "unreachable.pkg", "1.0.0");
         await SeedUpstreamRegistryAsync(orgId, "nuget", "http://nuget.test/v3");
 
-        // Pre-seed a stale non-null value to prove the refresh pass actively resets it to
-        // unknown, rather than merely leaving the schema default in place.
+        // A pass in which no source answers is not a verdict: the recorded count is neither reset
+        // to unknown nor zeroed.
         await using (var seedConn = await _db.OpenAsync())
         {
             await seedConn.ExecuteAsync(
@@ -114,7 +115,7 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
         await using var conn = await _db.OpenAsync();
         int? behind = await conn.QuerySingleAsync<int?>(
             "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = caId });
-        Assert.Null(behind);
+        Assert.Equal(99, behind);
     }
 
     [Fact]
@@ -122,8 +123,8 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
     {
         // Two independent npm groups refreshed in the SAME pass: "good-pkg" gets a normal
         // packument; "bad-pkg" gets a 500 from upstream. The failing group must not prevent the
-        // healthy group from updating, and must itself reset to unknown rather than being skipped
-        // silently with a stale value left behind.
+        // healthy group from updating, and keeps its recorded count: a 500 is no answer, so it
+        // neither zeroes the count nor resets it to unknown.
         var (orgGood, _, caGood, _) = await SeedProxyVersionAsync("npm", "good-pkg", "1.0.0");
         await SeedUpstreamRegistryAsync(orgGood, "npm", "http://npm.test");
         var (orgBad, _, caBad, _) = await SeedProxyVersionAsync("npm", "bad-pkg", "1.0.0");
@@ -153,7 +154,7 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
             "SELECT versions_behind FROM cache_artifact WHERE id = @id", new { id = caBad });
 
         Assert.Equal(1, behindGood);
-        Assert.Null(behindBad);
+        Assert.Equal(7, behindBad);
     }
 
     // ── Seeding helpers (self-contained — mirrors DeprecationRefreshServiceTests' shape) ──────
@@ -277,12 +278,14 @@ public sealed class VersionsBehindRefreshTests : IAsyncLifetime
         var packages = new PackageRepository(_db, time: _clock);
         var cacheArtifacts = new CacheArtifactRepository(_db);
         var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, TestEnvelope.Unconfigured()));
-        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries);
+        var reserved = new Dependably.Protocol.ReservedNamespaceService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock);
+        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries, reserved);
         return new DeprecationRefreshService(
             packages, cacheArtifacts, audit, upstream, latestResolver, registries, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
             _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
+            reserved, new Dependably.Infrastructure.Hex.HexReleaseRepository(_db));
     }
 
     private sealed class FixedResponseHandler : HttpMessageHandler

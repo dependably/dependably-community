@@ -28,6 +28,13 @@ public interface IThreatFeedSource
     /// both, so the caller can leave their rows unstamped and retry next pass.
     /// </summary>
     Task<EpssQueryResult> GetEpssScoresAsync(IReadOnlyCollection<string> cveIds, CancellationToken ct = default);
+
+    /// <summary>
+    /// FIRST.org's full daily EPSS file: a score for every CVE the model covers, not just the ones
+    /// this instance has stored. Throws on fetch or parse failure (including a file whose header is
+    /// not the expected shape) — the refresh pass treats that as "keep the stored copy".
+    /// </summary>
+    Task<EpssBulkFile> GetEpssBulkAsync(CancellationToken ct = default);
 }
 
 /// <summary>
@@ -78,3 +85,11 @@ public sealed record EpssScore(double Probability, double? Percentile);
 public sealed record EpssQueryResult(
     IReadOnlyDictionary<string, EpssScore> Scores,
     IReadOnlySet<string> Queried);
+
+/// <summary>The parsed daily EPSS file.</summary>
+/// <param name="Scores">Score and percentile per CVE id (case-insensitive key).</param>
+/// <param name="ScoreDate">
+/// The calendar date (<c>YYYY-MM-DD</c>) FIRST.org stamped on the file, or null when the file
+/// carried no such header.
+/// </param>
+public sealed record EpssBulkFile(IReadOnlyDictionary<string, EpssScore> Scores, string? ScoreDate);

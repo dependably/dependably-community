@@ -63,6 +63,41 @@ describe('currentOrg (derived)', () => {
   })
 })
 
+describe('currentOrg with a tenant domain distinct from the apex', () => {
+  /** @type {import('./store.js').BootstrapInfo} */
+  const info = {
+    mode: 'multi', isApex: false, apexHost: 'master.example.com', tenantDomain: 'example.com',
+  }
+
+  it('derives the slug from tenantDomain', async () => {
+    Object.defineProperty(window, 'location', { configurable: true, value: { hostname: 'acme.example.com' } })
+    const { currentOrg, bootstrapInfo } = await import('./store.js')
+    bootstrapInfo.set(info)
+    expect(get(currentOrg)).toEqual({ slug: 'acme' })
+  })
+
+  it('returns null for a host outside the tenant domain', async () => {
+    Object.defineProperty(window, 'location', { configurable: true, value: { hostname: 'acme.other.com' } })
+    const { currentOrg, bootstrapInfo } = await import('./store.js')
+    bootstrapInfo.set(info)
+    expect(get(currentOrg)).toBeNull()
+  })
+
+  it('falls back to apexHost when tenantDomain is absent', async () => {
+    Object.defineProperty(window, 'location', { configurable: true, value: { hostname: 'acme.master.example.com' } })
+    const { currentOrg, bootstrapInfo } = await import('./store.js')
+    bootstrapInfo.set({ mode: 'multi', isApex: false, apexHost: 'master.example.com' })
+    expect(get(currentOrg)).toEqual({ slug: 'acme' })
+  })
+
+  it('yields no slug for a multi-label prefix under the tenant domain', async () => {
+    Object.defineProperty(window, 'location', { configurable: true, value: { hostname: 'acme.master.example.com' } })
+    const { currentOrg, bootstrapInfo } = await import('./store.js')
+    bootstrapInfo.set(info)
+    expect(get(currentOrg)).toBeNull()
+  })
+})
+
 describe('theme store', () => {
   it('falls back to "light" when localStorage has nothing', async () => {
     const { theme } = await import('./store.js')

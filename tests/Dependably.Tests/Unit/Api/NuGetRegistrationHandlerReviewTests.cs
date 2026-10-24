@@ -53,7 +53,7 @@ public sealed class NuGetRegistrationHandlerReviewTests : IAsyncLifetime
         await SeedLocalPackageAsync();
 
         var epochStore = new OrgCacheEpochStore();
-        var cacheKey = new NuGetRegistrationKey(_orgId, "hosted-pkg", SemVer2: true);
+        var cacheKey = new NuGetRegistrationKey(_orgId, "hosted-pkg", SemVer2: true) { PublicBase = "https://host.example.test" };
         var cache = new InvalidateEpochDuringReadCache(
             new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
             MetadataCacheKeys.NuGetRegistration, epochStore, cacheKey, _orgId);
@@ -83,7 +83,7 @@ public sealed class NuGetRegistrationHandlerReviewTests : IAsyncLifetime
         await SeedLocalPackageAsync();
 
         var epochStore = new OrgCacheEpochStore();
-        var cacheKey = new NuGetRegistrationKey(_orgId, "hosted-pkg", SemVer2: true);
+        var cacheKey = new NuGetRegistrationKey(_orgId, "hosted-pkg", SemVer2: true) { PublicBase = "https://host.example.test" };
         var cache = new RenderedResponseCache<NuGetRegistrationKey>(
             new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
             MetadataCacheKeys.NuGetRegistration, epochStore);
@@ -95,6 +95,29 @@ public sealed class NuGetRegistrationHandlerReviewTests : IAsyncLifetime
 
         Assert.True(cache.TryGet(cacheKey, out byte[]? cached) && cached is not null,
             "with no intervening Invalidate the render must be cached");
+    }
+
+    [Fact]
+    public async Task LocalOnly_FilledFromOneHost_AnotherHostReceivesItsOwnRegistrationUrls()
+    {
+        // The registration document embeds absolute @id / packageContent URLs built from the
+        // request's scheme and Host. A fill from one authority must not answer another.
+        await SeedLocalPackageAsync();
+        var cache = new RenderedResponseCache<NuGetRegistrationKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.NuGetRegistration, new OrgCacheEpochStore());
+        var handler = BuildHandler(cache);
+
+        var fromA = Assert.IsType<FileContentResult>(await handler.RegistrationIndexAsync(
+            BuildContext("localhost:1"), _orgId, "hosted-pkg", semVer2: true, CancellationToken.None));
+        var fromB = Assert.IsType<FileContentResult>(await handler.RegistrationIndexAsync(
+            BuildContext("nuget.example.test"), _orgId, "hosted-pkg", semVer2: true, CancellationToken.None));
+
+        string bodyA = Encoding.UTF8.GetString(fromA.FileContents);
+        string bodyB = Encoding.UTF8.GetString(fromB.FileContents);
+        Assert.Contains("https://localhost:1/nuget/registration/hosted-pkg/", bodyA, StringComparison.Ordinal);
+        Assert.Contains("https://nuget.example.test/nuget/registration/hosted-pkg/", bodyB, StringComparison.Ordinal);
+        Assert.DoesNotContain("localhost:1", bodyB, StringComparison.Ordinal);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

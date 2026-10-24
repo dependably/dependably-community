@@ -92,6 +92,11 @@ public sealed class UpstreamRegistryRepository
     /// here via <see cref="EnvelopeProtector"/> (legacy plaintext passes through unchanged); the
     /// API-facing read path never selects the secret column. This is the resolver bridge — not the
     /// API read path.
+    ///
+    /// <para>A credential that does not decrypt fails the whole list with
+    /// <see cref="ProtectedSecretUnreadableException"/> naming the row, rather than dropping that
+    /// upstream: the list is a priority order, and leaving out a private upstream would let the
+    /// next one — often a public registry — answer for the names the private one serves.</para>
     /// </summary>
     public async Task<IReadOnlyList<UpstreamSource>> ListSourcesForEcosystemAsync(
         string orgId, string ecosystem, CancellationToken ct = default)
@@ -99,7 +104,7 @@ public sealed class UpstreamRegistryRepository
         await using var conn = await _db.OpenAsync(ct);
         var rows = await conn.QueryAsync<RawRegistryRow>(
             """
-            SELECT url AS Url, auth_type AS AuthType, username AS Username, secret AS Secret,
+            SELECT id AS Id, url AS Url, auth_type AS AuthType, username AS Username, secret AS Secret,
                    symbol_server_url AS SymbolServerUrl, upstream_protocol AS UpstreamProtocol,
                    public_key_pem AS PublicKeyPem
             FROM upstream_registry
@@ -111,7 +116,7 @@ public sealed class UpstreamRegistryRepository
         return rows.Select(r => new UpstreamSource(
             Url: r.Url ?? "",
             AuthorizationHeader: BuildUpstreamAuthHeader(
-                r.AuthType, r.Username, r.Secret is null ? null : _envelope.Unprotect(r.Secret)),
+                r.AuthType, r.Username, r.Secret is null ? null : UnprotectCredential(r, orgId)),
             SymbolServerUrl: r.SymbolServerUrl,
             Protocol: r.UpstreamProtocol,
             // A row with no stored key falls back to the well-known key of a public repository
@@ -523,7 +528,9 @@ public sealed class UpstreamRegistryRepository
     /// <summary>
     /// Builds the ordered OCI upstream list for one org, selecting the secret into Password
     /// for use by the resolver and auth service. Never called on the API-facing read path —
-    /// this is the internal resolver bridge only.
+    /// this is the internal resolver bridge only. A credential that does not decrypt fails the
+    /// whole list, as in <see cref="ListSourcesForEcosystemAsync"/>: routing picks an upstream by
+    /// repository prefix, and dropping one would hand its prefixes to another upstream.
     /// </summary>
     public async Task<IReadOnlyList<OciUpstreamRegistryOptions>> BuildOciUpstreamsForOrgAsync(
         string orgId, CancellationToken ct = default)
@@ -547,7 +554,7 @@ public sealed class UpstreamRegistryRepository
             AuthType = StringToOciAuthType(r.AuthType),
             Username = r.Username,
             // Decrypt the secret at rest; legacy plaintext rows pass through the enc:v1: discriminator.
-            Password = r.Secret is null ? null : _envelope.Unprotect(r.Secret),
+            Password = r.Secret is null ? null : UnprotectCredential(r, orgId),
             TokenEndpoint = r.TokenEndpoint,
             Prefixes = ParsePrefixes(r.PrefixesJson),
         }).ToList();
@@ -634,6 +641,11 @@ public sealed class UpstreamRegistryRepository
         "aws_ecr" => OciAuthType.AwsEcr,
         _ => OciAuthType.Anonymous,
     };
+
+    // Fails closed on a credential that does not decrypt; the exception names the row.
+    private string UnprotectCredential(RawRegistryRow r, string orgId) =>
+        _envelope.Unprotect(r.Secret!, new ProtectedSecretRow(
+            ProtectedSecretKinds.UpstreamCredential, "upstream_registry", r.Id ?? "", orgId));
 
     // Internal DTO for raw DB rows (Dapper-mapped before deserialization of JSON columns).
     [SuppressMessage("Minor Code Smell", "S3459:Unassigned members should be removed", Justification = "Dapper sets these props by reflection; not statically visible as assigned.")]

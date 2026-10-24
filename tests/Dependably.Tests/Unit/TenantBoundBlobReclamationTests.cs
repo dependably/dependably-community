@@ -254,11 +254,13 @@ public sealed class TenantBoundBlobReclamationTests : IAsyncLifetime
             new PackageRepository(_db, time: _clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(
                 _db, tiered, new Dependably.Protocol.OciBlobKeyLock()));
+        var config = new ConfigurationBuilder().AddInMemoryCollection(cfg).Build();
         return new CacheEvictionService(
             deps,
-            new ConfigurationBuilder().AddInMemoryCollection(cfg).Build(),
+            config,
             NullLogger<CacheEvictionService>.Instance,
             _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
+            new AirGapMode(config));
     }
 }

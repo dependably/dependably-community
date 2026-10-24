@@ -29,6 +29,7 @@
   import SettingsVulnTrackerHealth from '../lib/settings/SettingsVulnTrackerHealth.svelte'
   import SettingsRelayHealth from '../lib/settings/SettingsRelayHealth.svelte'
   import Toggle from '../lib/Toggle.svelte'
+  import { buildProxyPayload } from '../lib/proxyPayload.js'
 
   /** The route transition this page was mounted for, supplied by RouteView. @type {number | null} */
   export let pageToken = null
@@ -127,6 +128,7 @@
         min_release_age_value: ageValue,
         min_release_age_unit: ageUnit,
       }
+      storedOciScan = ps.oci_scan_enforcement ?? 'off'
     } catch (e) { error = extractErrorMessage(e) }
     finally { loading = false }
   })
@@ -298,43 +300,12 @@
     }
   }
 
-  // Build the full proxy settings payload from current proxySettings state.
-  // Converts the value+unit pair back to canonical hours (empty = null, policy off),
-  // and normalises the EPSS field (empty = null). All three proxy-touching save handlers
-  // call this so the whole-object PUT always carries the true current state.
-  function buildProxyPayload() {
-    const raw = String(proxySettings.min_release_age_value ?? '').trim()
-    const num = raw === '' ? null : Math.floor(Number(raw))
-    const minReleaseAgeHours = num === null || isNaN(num) || num <= 0
-      ? null
-      : (proxySettings.min_release_age_unit === 'days' ? num * 24 : num)
-    const epssRaw = String(proxySettings.max_epss_tolerance ?? '').trim()
-    const maxEpssTolerance = epssRaw === '' || isNaN(Number(epssRaw)) ? null : Number(epssRaw)
-    // The percentile ceiling normalises the same way and for the same reason: an empty field is
-    // an explicit "policy off", which the API carries as a present-and-null value rather than an
-    // omitted one, so clearing it is distinguishable from not touching it.
-    const pctRaw = String(proxySettings.max_epss_percentile_tolerance ?? '').trim()
-    const maxEpssPercentileTolerance = pctRaw === '' || isNaN(Number(pctRaw)) ? null : Number(pctRaw)
-    return {
-      proxyPassthroughEnabled: proxySettings.proxy_passthrough_enabled,
-      maxOsvScoreTolerance:    Number(proxySettings.max_osv_score_tolerance),
-      minReleaseAgeHours,
-      blockDeprecated:         proxySettings.block_deprecated,
-      blockRevoked:            proxySettings.block_revoked,
-      blockMalicious:          proxySettings.block_malicious,
-      blockMaliciousLive:      proxySettings.block_malicious_live,
-      blockKev:                proxySettings.block_kev,
-      maxEpssTolerance,
-      blockKevRansomware:      proxySettings.block_kev_ransomware,
-      blockSsvcExploitation:   proxySettings.block_ssvc_exploitation,
-      maxEpssPercentileTolerance,
-      blockInstallScripts:     proxySettings.block_install_scripts,
-      verifyNpmSignatures:     proxySettings.verify_npm_signatures,
-      verifyNuGetSignatures:   proxySettings.verify_nuget_signatures,
-      verifyPyPiAttestations:  proxySettings.verify_pypi_attestations,
-      verifyRpmSignatures:     proxySettings.verify_rpm_signatures,
-      verifyMavenSignatures:   proxySettings.verify_maven_signatures,
-    }
+  // The enforcement posture as last loaded or saved. The Gates tab owns oci_scan_enforcement
+  // and sends it only when the operator changed it; the other tabs never carry it.
+  let storedOciScan = 'off'
+
+  function proxyPayload({ gates = false } = {}) {
+    return buildProxyPayload(proxySettings, { includeOciScan: gates, storedOciScan })
   }
 
   // Gates save: dual-fires because versionOverwritePolicy and allowlistMode ride
@@ -342,19 +313,22 @@
   async function saveGatesSettings() {
     success = ''
     await submitForm(() => Promise.all([
-      api.updateProxySettings(buildProxyPayload()),
+      api.updateProxySettings(proxyPayload({ gates: true })),
       api.updateOrgSettings(settings),
     ]), {
       setSaving: v => saving = v,
       setError:  v => error  = v,
-      onSuccess: () => { success = $t('settings.saved') },
+      onSuccess: () => {
+        storedOciScan = proxySettings.oci_scan_enforcement
+        success = $t('settings.saved')
+      },
     })
   }
 
   // Signatures save: verify toggles are proxy-settings-only fields.
   async function saveSignaturesSettings() {
     success = ''
-    await submitForm(() => api.updateProxySettings(buildProxyPayload()), {
+    await submitForm(() => api.updateProxySettings(proxyPayload()), {
       setSaving: v => saving = v,
       setError:  v => error  = v,
       onSuccess: () => { success = $t('settings.saved') },
@@ -365,7 +339,7 @@
   // and rides /proxy-settings.
   async function saveProxyRoutingSettings() {
     success = ''
-    await submitForm(() => api.updateProxySettings(buildProxyPayload()), {
+    await submitForm(() => api.updateProxySettings(proxyPayload()), {
       setSaving: v => saving = v,
       setError:  v => error  = v,
       onSuccess: () => { success = $t('settings.saved') },

@@ -16,10 +16,15 @@ public static class ManagementStartupExtensions
 {
     public static void AddDependablyManagementAuthServices(this WebApplicationBuilder builder)
     {
-        // Auth services
-        builder.Services.AddSingleton<LoginService.Dependencies>();
-        builder.Services.AddSingleton<LoginService>();
-        builder.Services.AddSingleton<OrgAccessGuard>();
+        // Auth services. Scoped, not singleton: LoginService reaches UserManager and the
+        // Identity user stores through the MFA enrolment services, and OrgAccessGuard writes its
+        // 403 through ProblemResults — all scoped. A singleton consumer would resolve them once
+        // off the root scope and serve every request from those instances for the life of the
+        // process. Every consumer is a controller or a scoped aggregate, so request scope is the
+        // natural lifetime, and the composition tests build the host with ValidateScopes on.
+        builder.Services.AddScoped<LoginService.Dependencies>();
+        builder.Services.AddScoped<LoginService>();
+        builder.Services.AddScoped<OrgAccessGuard>();
 
         // Effective-MFA-mode resolver, read by MfaEnrollmentGuard and the auth/settings controllers.
         builder.Services.AddSingleton<IRequireMfaMode, RequireMfaMode>();
@@ -33,7 +38,7 @@ public static class ManagementStartupExtensions
     public static void AddDependablyManagementControllerAggregates(this WebApplicationBuilder builder)
     {
         // Management-controller dependency aggregates — let DI assemble these from already-registered
-        // singletons. Each is a single ctor param on its respective management controller. The
+        // services. Each is a single ctor param on its respective management controller. The
         // protocol-controller aggregates are registered by the Core wiring.
         builder.Services.AddScoped<VulnerabilityControllerDependencies>();
         builder.Services.AddScoped<OrgControllerServices>();
@@ -83,6 +88,14 @@ public static class ManagementStartupExtensions
                 Settings: sp.GetRequiredService<OrgSettingsRepository>());
         });
 
+        // OCI image scan API. The queue, options and coverage are registered with the protocol
+        // services, since the push and pull paths feed the queue; reading images for a scanner and
+        // storing its results are management-plane only.
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciScanImageReader>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciScanAdvisoryResolver>();
+        builder.Services.AddSingleton<Dependably.Infrastructure.OciScan.OciScanResultWriter>();
+        builder.Services.AddScoped<Dependably.Api.OciScanControllerServices>();
+
         // Claim REST surface. State machine + repository are registered by the Core wiring; the
         // controller services record bundles the deps.
         builder.Services.AddScoped<ClaimsControllerServices>();
@@ -98,6 +111,7 @@ public static class ManagementStartupExtensions
         builder.Services.AddHostedService<Dependably.Background.TenantHardDeleteService>();
         builder.Services.AddHostedService<DeprecationRefreshService>();
         builder.Services.AddHostedService<LicenseBackfillService>();
+        builder.Services.AddHostedService<NpmManifestRescanService>();
         builder.Services.AddSingleton<StatsRefreshService.Dependencies>();
         builder.Services.AddHostedService<StatsRefreshService>();
         builder.Services.AddHostedService<SamlCertExpiryCheckService>();

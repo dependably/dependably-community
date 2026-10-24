@@ -68,7 +68,7 @@ namespace Dependably.Protocol;
 /// also raises a <c>quarantine_new</c> alert via <see cref="AlertService"/>, so a repeat block on
 /// the same purl never re-alerts.
 /// </summary>
-public sealed class BlockGateService
+public sealed partial class BlockGateService
 {
     private readonly VulnerabilityRepository _vulns;
     private readonly AuditRepository _audit;
@@ -161,9 +161,14 @@ public sealed class BlockGateService
     {
         try
         {
+            // An OCI image refused by any other arm reopens a decided 'unscanned' row: that
+            // decision was about a different arm, and a refusal that cannot reach the queue would
+            // be invisible to the operator who approved the digest past its missing scan.
             var result = await _quarantine.UpsertPendingAsync(
                 request.OrgId, request.Ecosystem, request.Purl, gate, detail,
-                string.IsNullOrEmpty(request.VersionId) ? null : request.VersionId, ct);
+                string.IsNullOrEmpty(request.VersionId) ? null : request.VersionId,
+                reopenDecidedGate: request.OciFacts is not null && gate != UnscannedGate ? UnscannedGate : null,
+                ct: ct);
 
             if (result.Inserted)
             {
@@ -258,55 +263,106 @@ public sealed class BlockGateService
             await QueueDivergenceReviewAsync(request, ct);
         }
 
-        // Load vuln signals when the artifact has been scanned. Route to the global-plane arm
-        // when CacheArtifactId is set (proxy path, P3+), otherwise use the per-version arm.
-        VulnGateSignals? signals = null;
-        if (request.VulnCheckedAt is not null)
-        {
-            signals = request.CacheArtifactId is not null
-                ? await _vulns.GetGateSignalsAsync("cache_artifact", request.CacheArtifactId, ct)
-                : await _vulns.GetGateSignalsAsync("package_version", request.VersionId, ct);
-        }
-
-        // Resolve install-script allowlist only when the arm could fire: saves a cache lookup on
-        // the common path (no install script, or policy is off/warn). The PURL name and version
-        // segments are extracted via PurlParser; a parse failure returns false (fail-closed).
-        bool installScriptAllowlisted = false;
-        if (request.HasInstallScript && request.BlockInstallScriptsMode == "block")
-        {
-            var parsed = PurlParser.TryParse(request.Purl);
-            if (parsed is not null)
-            {
-                installScriptAllowlisted = await _installScriptAllowlist.IsAllowlistedAsync(
-                    request.OrgId, parsed.Ecosystem, parsed.Name, parsed.Version, ct);
-            }
-        }
-
-        // Under a 'block' policy with no configured trust anchor the stored status is NULL for
-        // every artifact (verification was never attempted), which would read as "not applicable"
-        // and pass. Synthesize the unverifiable marker so the arm denies and the audit trail
-        // names the reason.
-        string? provenanceStatus = request.ProvenanceStatus;
-        if (await IsProvenanceEnforcementUnbackedAsync(
-                request.OrgId, request.Ecosystem, request.VerifyProvenanceMode, ct))
-        {
-            provenanceStatus = ProvenanceStatuses.Unverifiable;
-        }
+        var signals = await LoadGateSignalsAsync(request, ct);
+        bool installScriptAllowlisted = await IsInstallScriptAllowlistedAsync(request, ct);
+        string? provenanceStatus = await EffectiveProvenanceStatusAsync(request, ct);
 
         var facts = new VersionFacts(
             ManualState: request.ManualState,
             Deprecated: request.Deprecated,
             PublishedAt: request.PublishedAt,
-            Scanned: request.VulnCheckedAt is not null,
+            Scanned: request.OciFacts?.HasEvidence ?? request.VulnCheckedAt is not null,
             // Download path: use the aggregate signals' own malicious flag, not a row flag.
             Vulnerability: ProjectVulnFacts(signals),
             Origin: request.Origin,
             HasInstallScript: request.HasInstallScript,
             ProvenanceStatus: provenanceStatus,
             InstallScriptAllowlisted: installScriptAllowlisted,
-            RevokedAt: request.RevokedAt);
+            RevokedAt: request.RevokedAt,
+            ScanRequired: request.OciFacts is not null && IsOciScanEnforced(request.OciScanEnforcementMode),
+            ScanComplete: request.OciFacts?.IsComplete ?? false);
 
-        var policy = new BlockPolicy(
+        var policy = PolicyOf(request);
+
+        NoteStaleEnrichment(signals, request.Ecosystem);
+
+        var verdict = Evaluate(facts, policy, _time.GetUtcNow());
+        if (request.OciFacts is not null)
+        {
+            verdict = await ApplyOciPostureAsync(request, verdict, facts, policy, ct);
+        }
+
+        if (!verdict.Servable)
+        {
+            // Side effects read the effective status so an unbacked-enforcement denial is audited
+            // as 'unverifiable' rather than as a null verdict.
+            await ApplySideEffectsAsync(
+                verdict.Arm,
+                provenanceStatus == request.ProvenanceStatus
+                    ? request
+                    : request with { ProvenanceStatus = provenanceStatus },
+                signals,
+                verdict.Arm == BlockArm.Unscanned ? WarnedArms(facts, policy) : [],
+                ct);
+            return new BlockOutcome(BlockDecision.Blocked, verdict.Arm);
+        }
+
+        if (await IsBlockedByLicenseAsync(request, ct))
+        {
+            return new BlockOutcome(BlockDecision.Blocked, BlockArm.License);
+        }
+
+        // Recorded here rather than beside the pure core, because only at this point is the
+        // artefact known to be SERVED: the licence arm above can still refuse it, and a refusal
+        // subsumes the warning. Recording earlier would report "would have blocked" for an
+        // artefact that was in fact blocked, by a different arm.
+        await RecordWarnAsync(request, verdict.WarnArm, WarnedArms(facts, policy), ct);
+        return BlockOutcome.Allow();
+    }
+
+    // Load vuln signals when the artifact has been scanned. Route to the global-plane arm
+    // when CacheArtifactId is set (proxy path), otherwise use the per-version arm. An OCI
+    // image request carries the org's own scan facts instead, so the shared rows are never read
+    // for it: a tenant's image scan is never written there.
+    private async Task<VulnGateSignals?> LoadGateSignalsAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        return request.OciFacts is { } ociFacts
+            ? ociFacts.HasEvidence ? ociFacts.Signals : null
+            : request.VulnCheckedAt is null
+            ? null
+            : request.CacheArtifactId is not null
+            ? await _vulns.GetGateSignalsAsync("cache_artifact", request.CacheArtifactId, ct)
+            : await _vulns.GetGateSignalsAsync("package_version", request.VersionId, ct);
+    }
+
+    // Resolve install-script allowlist only when the arm could fire: saves a cache lookup on
+    // the common path (no install script, or policy is off/warn). The PURL name and version
+    // segments are extracted via PurlParser; a parse failure returns false (fail-closed).
+    private async Task<bool> IsInstallScriptAllowlistedAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        if (!request.HasInstallScript || request.BlockInstallScriptsMode != "block")
+        {
+            return false;
+        }
+
+        var parsed = PurlParser.TryParse(request.Purl);
+        return parsed is not null
+            && await _installScriptAllowlist.IsAllowlistedAsync(
+                request.OrgId, parsed.Ecosystem, parsed.Name, parsed.Version, ct);
+    }
+
+    // Under a 'block' policy with no configured trust anchor the stored status is NULL for
+    // every artifact (verification was never attempted), which would read as "not applicable"
+    // and pass. Synthesize the unverifiable marker so the arm denies and the audit trail
+    // names the reason.
+    private async Task<string?> EffectiveProvenanceStatusAsync(BlockGateRequest request, CancellationToken ct) =>
+        await IsProvenanceEnforcementUnbackedAsync(
+            request.OrgId, request.Ecosystem, request.VerifyProvenanceMode, ct)
+            ? ProvenanceStatuses.Unverifiable
+            : request.ProvenanceStatus;
+
+    private static BlockPolicy PolicyOf(BlockGateRequest request) =>
+        new(
             MinReleaseAgeHours: request.MinReleaseAgeHours,
             BlockDeprecatedMode: request.BlockDeprecatedMode,
             BlockMaliciousMode: request.BlockMaliciousMode,
@@ -319,43 +375,27 @@ public sealed class BlockGateService
             MaxOsvScoreTolerance: request.MaxOsvScoreTolerance,
             BlockInstallScriptsMode: request.BlockInstallScriptsMode,
             VerifyProvenanceMode: request.VerifyProvenanceMode,
-            BlockRevokedMode: request.BlockRevokedMode);
+            BlockRevokedMode: request.BlockRevokedMode,
+            OciScanEnforcementMode: request.OciScanEnforcementMode);
 
-        NoteStaleEnrichment(signals, request.Ecosystem);
-
-        var verdict = Evaluate(facts, policy, _time.GetUtcNow());
-
-        if (!verdict.Servable)
+    // Lowest-priority arm: license enforcement. It runs after the pure core has already
+    // ruled the version servable, so every stronger arm wins first. The license policy read is
+    // strictly guarded: it fires ONLY when the tenant enforces licenses ('block') and the
+    // operator has not manually allowed the version (that override wins). Under 'off'/'warn' or
+    // a manual allow, no license row is ever read, so the hot path pays zero extra DB cost. An
+    // OCI image's licence is the SPDX expression stamped on its manifest row, handed in by the
+    // caller, rather than an owner-keyed package_version_licenses read.
+    private async Task<bool> IsBlockedByLicenseAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        if (request.LicenseEnforcementMode != "block" || request.ManualState == "allowed")
         {
-            // Side effects read the effective status so an unbacked-enforcement denial is audited
-            // as 'unverifiable' rather than as a null verdict.
-            await ApplySideEffectsAsync(
-                verdict.Arm,
-                provenanceStatus == request.ProvenanceStatus
-                    ? request
-                    : request with { ProvenanceStatus = provenanceStatus },
-                signals, ct);
-            return new BlockOutcome(BlockDecision.Blocked, verdict.Arm);
+            return false;
         }
 
-        // Lowest-priority arm: license enforcement. It runs after the pure core has already
-        // ruled the version servable, so every stronger arm above wins first. The license
-        // policy read is strictly guarded — it fires ONLY when the tenant enforces licenses
-        // ('block'), the operator has not manually allowed the version (that override wins),
-        // and nothing above blocked. Under 'off'/'warn', a manual allow, or an already-blocked
-        // verdict, no license row is ever read, so the hot path pays zero extra DB cost.
-        if (request.LicenseEnforcementMode == "block" && request.ManualState != "allowed" &&
-            await EvaluateLicenseArmAsync(request, ct) == BlockDecision.Blocked)
-        {
-            return new BlockOutcome(BlockDecision.Blocked, BlockArm.License);
-        }
-
-        // Recorded here rather than beside the pure core, because only at this point is the
-        // artefact known to be SERVED: the licence arm above can still refuse it, and a refusal
-        // subsumes the warning. Recording earlier would report "would have blocked" for an
-        // artefact that was in fact blocked, by a different arm.
-        await RecordWarnAsync(request, verdict.WarnArm, ct);
-        return BlockOutcome.Allow();
+        var decision = request.OciFacts is not null
+            ? await EvaluateLicenseExpressionAsync(request, request.OciLicenseExpressions ?? [], ct)
+            : await EvaluateLicenseArmAsync(request, ct);
+        return decision == BlockDecision.Blocked;
     }
 
     /// <summary>
@@ -376,7 +416,8 @@ public sealed class BlockGateService
     /// items that need none.
     /// </para>
     /// </summary>
-    private async Task RecordWarnAsync(BlockGateRequest request, BlockArm warnArm, CancellationToken ct)
+    private async Task RecordWarnAsync(
+        BlockGateRequest request, BlockArm warnArm, IReadOnlyList<string> warnedArms, CancellationToken ct)
     {
         if (warnArm == BlockArm.None)
         {
@@ -393,11 +434,85 @@ public sealed class BlockGateService
             request.OrgId, request.Ecosystem, request.Purl,
             "gate_warned", request.AuditActorId, actorKind: request.ActorKind,
             actorLabel: request.AuditActorLabel,
-            detail: System.Text.Json.JsonSerializer.Serialize(
-                new { arm = reason },
-                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: WarnDetail(request, warnArm, reason, warnedArms),
             sourceIp: request.SourceIp, ct: ct);
     }
+
+    // The gate_warned detail: the arm that would have refused, the other advisory arms that also
+    // only warned, and for an unscanned warning why the image has no complete answer.
+    private static string WarnDetail(
+        BlockGateRequest request, BlockArm warnArm, string? reason, IReadOnlyList<string> warnedArms)
+    {
+        var others = warnedArms.Where(a => !string.Equals(a, reason, StringComparison.Ordinal)).ToList();
+        object detail = warnArm == BlockArm.Unscanned
+            ? new { arm = reason, sub_reason = request.OciFacts?.UnscannedSubReason ?? "absent", warned_arms = others }
+            : new { arm = reason, warned_arms = others };
+        return System.Text.Json.JsonSerializer.Serialize(
+            detail, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+    }
+
+    private static bool IsOciScanEnforced(string? mode) => mode is "warn" or "block";
+
+    /// <summary>
+    /// Applies the OCI scan-enforcement posture to a pure verdict, for an OCI image request only.
+    ///
+    /// <list type="bullet">
+    ///   <item>An approved quarantine row with gate <c>unscanned</c> waives the
+    ///   <see cref="BlockArm.Unscanned"/> arm, and only that arm. It is consulted only when that arm
+    ///   is the one refusing, which by its place in the ladder means no advisory arm did: a later
+    ///   KEV or malicious finding on the same digest still refuses.</item>
+    ///   <item>Under <c>warn</c>, every arm the posture governs (the advisory arms and
+    ///   <see cref="BlockArm.Unscanned"/>) reports the refusal it would have made as a warning and
+    ///   the image is served. A manual block is an operator decision, not a scan verdict, and still
+    ///   refuses.</item>
+    /// </list>
+    /// </summary>
+    private async Task<BlockVerdict> ApplyOciPostureAsync(
+        BlockGateRequest request, BlockVerdict verdict, VersionFacts facts, BlockPolicy policy, CancellationToken ct)
+    {
+        if (verdict.Arm == BlockArm.Unscanned
+            && await HasUnscannedApprovalAsync(request, ct))
+        {
+            // The approval waives the unscanned arm only; an advisory arm in warn mode that fired
+            // on the partial result is still reported, exactly as on the warn path below.
+            return new BlockVerdict(
+                Servable: true, Arm: BlockArm.None,
+                WarnArm: FirstWarnArm(facts with { ScanComplete = true }, policy));
+        }
+
+        if (request.OciScanEnforcementMode == "warn" && !verdict.Servable && verdict.Arm != BlockArm.Manual)
+        {
+            return new BlockVerdict(Servable: true, Arm: BlockArm.None, WarnArm: verdict.Arm);
+        }
+
+        // A warning-only unscanned image that an operator has already approved is not reported
+        // as unscanned again: the approval is the decision that warning asks for. Any other
+        // advisory arm that only warned on the partial result is still reported.
+        return verdict.WarnArm == BlockArm.Unscanned
+            && await HasUnscannedApprovalAsync(request, ct)
+            ? verdict with { WarnArm = FirstWarnArm(facts with { ScanComplete = true }, policy) }
+            : verdict;
+    }
+
+    // The unscanned approval must cover every image whose facts produced the verdict: an
+    // approval of one of several parent indexes does not wave through a platform another
+    // parent leaves unscanned, the same all-owners rule the manual allow state follows.
+    private async Task<bool> HasUnscannedApprovalAsync(BlockGateRequest request, CancellationToken ct)
+    {
+        foreach (var owner in OwnersOf(request))
+        {
+            if (!await _quarantine.HasApprovedForGateAsync(request.OrgId, owner.Purl, UnscannedGate, ct))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // The quarantine gate name of the unscanned arm, and the one gate whose approval is scoped to
+    // its own arm rather than setting the manual allow override.
+    public const string UnscannedGate = "unscanned";
 
     /// <summary>
     /// Ecosystems whose package manifests carry a declared license field that ingest extracts into
@@ -569,7 +684,8 @@ public sealed class BlockGateService
     // row, no quarantine entry, no webhook — and nothing fails, because there is no default arm.
     // BlockArmSideEffectComplianceTests is what makes that a gate rather than a convention.
     private async Task ApplySideEffectsAsync(
-        BlockArm arm, BlockGateRequest request, VulnGateSignals? signals, CancellationToken ct)
+        BlockArm arm, BlockGateRequest request, VulnGateSignals? signals,
+        IReadOnlyList<string> warnedArms, CancellationToken ct)
     {
         switch (arm)
         {
@@ -633,8 +749,53 @@ public sealed class BlockGateService
             case BlockArm.InstallScript:
                 await RecordInstallScriptBlockAsync(request, ct);
                 break;
+
+            case BlockArm.Unscanned:
+                await RecordUnscannedBlockAsync(request, warnedArms, ct);
+                break;
         }
     }
+
+    // Side effects for the unscanned arm: an OCI image this org holds no complete scan result
+    // for, refused under oci_scan_enforcement = 'block'. The detail names why there is no
+    // complete answer (absent, partial, no_scanner) and the arms that only warned on what a
+    // partial result did find; the sub-reason stays out of the metric attributes.
+    private async Task RecordUnscannedBlockAsync(
+        BlockGateRequest request, IReadOnlyList<string> warnedArms, CancellationToken ct)
+    {
+        DependablyMeter.UnscannedBlocks.Add(1,
+            new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
+        string detail = System.Text.Json.JsonSerializer.Serialize(
+            new { sub_reason = request.OciFacts?.UnscannedSubReason ?? "absent", warned_arms = warnedArms },
+            Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
+        await _audit.LogActivityAsync(
+            request.OrgId, request.Ecosystem, request.Purl,
+            "blocked_unscanned", request.AuditActorId, actorKind: request.ActorKind, actorLabel: request.AuditActorLabel,
+            detail: detail,
+            sourceIp: request.SourceIp, ct: ct);
+
+        // The approval must cover every owning image (HasUnscannedApprovalAsync), so every owner
+        // still lacking one needs a queue row the operator can approve. Queuing only the request's
+        // own purl would leave an owner catalogued under a lenient posture with no row at all, and
+        // the refusal would have no way to clear.
+        foreach (var owner in OwnersOf(request))
+        {
+            if (await _quarantine.HasApprovedForGateAsync(request.OrgId, owner.Purl, UnscannedGate, ct))
+            {
+                continue;
+            }
+
+            var ownerRequest = string.Equals(owner.Purl, request.Purl, StringComparison.Ordinal)
+                ? request
+                : request with { Purl = owner.Purl, VersionId = owner.VersionId };
+            await QueueForReviewAsync(ownerRequest, UnscannedGate, detail, ct);
+        }
+
+        await EmitBlockWebhookEventAsync(request, UnscannedGate, severity: null, ct);
+    }
+
+    private static IReadOnlyList<OciGateOwner> OwnersOf(BlockGateRequest request) =>
+        request.OciOwners is { Count: > 0 } owners ? owners : [new OciGateOwner(request.Purl, request.VersionId)];
 
     // Side effects for the release-age arm: computes the age gap, formats the detail JSON,
     // logs the activity row, and queues a review entry.
@@ -666,7 +827,9 @@ public sealed class BlockGateService
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
         // Route to the cache_artifact arm when CacheArtifactId is set (proxy serve path),
         // otherwise use the per-version arm.
-        var malIds = request.CacheArtifactId is not null
+        var malIds = request.OciFacts is { } ociMalicious
+            ? ociMalicious.MaliciousOsvIds
+            : request.CacheArtifactId is not null
             ? await _vulns.GetMaliciousOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
             : await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
         string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
@@ -690,7 +853,9 @@ public sealed class BlockGateService
         DependablyMeter.EnrichmentGateBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem),
             new KeyValuePair<string, object?>("reason", "malicious_live"));
-        var malIds = request.CacheArtifactId is not null
+        var malIds = request.OciFacts is { } ociMalicious
+            ? ociMalicious.MaliciousOsvIds
+            : request.CacheArtifactId is not null
             ? await _vulns.GetMaliciousOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
             : await _vulns.GetMaliciousOsvIdsForVersionAsync(request.VersionId, ct);
         string malDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = malIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
@@ -710,7 +875,9 @@ public sealed class BlockGateService
         DependablyMeter.KevBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem));
         // Route to the cache_artifact arm when CacheArtifactId is set (proxy serve path).
-        var kevIds = request.CacheArtifactId is not null
+        var kevIds = request.OciFacts is { } ociKev
+            ? ociKev.KevOsvIds
+            : request.CacheArtifactId is not null
             ? await _vulns.GetKevOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
             : await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
         string kevDetail = System.Text.Json.JsonSerializer.Serialize(new { osv_ids = kevIds }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
@@ -750,7 +917,9 @@ public sealed class BlockGateService
         DependablyMeter.EnrichmentGateBlocks.Add(1,
             new KeyValuePair<string, object?>("ecosystem", request.Ecosystem),
             new KeyValuePair<string, object?>("reason", "kev_ransomware"));
-        var kevIds = request.CacheArtifactId is not null
+        var kevIds = request.OciFacts is { } ociKev
+            ? ociKev.KevOsvIds
+            : request.CacheArtifactId is not null
             ? await _vulns.GetKevOsvIdsForCacheArtifactAsync(request.CacheArtifactId, ct)
             : await _vulns.GetKevOsvIdsForVersionAsync(request.VersionId, ct);
         string detail = System.Text.Json.JsonSerializer.Serialize(
@@ -951,396 +1120,6 @@ public sealed class BlockGateService
     // release date, so the cooldown would self-block an org's own fresh publishes.
     // proxy, mixed, and null (legacy rows predating the origin column) remain eligible.
     private static bool IsCooldownEligible(string? origin) => origin is not ("hosted" or "local_only");
-
-    /// <summary>
-    /// Pure, synchronous predicate: returns <see langword="true"/> when a version is hard-blocked
-    /// by any policy arm that is evaluable from already-loaded per-version state, so the simple-index
-    /// renderers can filter an entire version list with a single call per version without per-version
-    /// I/O. Delegates to <see cref="Evaluate"/> after projecting the row and settings into
-    /// <see cref="VersionFacts"/> and <see cref="BlockPolicy"/> so the policy lives in one place.
-    ///
-    /// Arms covered (same priority order as <see cref="EvaluateAsync"/>):
-    ///   1. Manual block — <c>ManualBlockState == "blocked"</c>.
-    ///   2. Deprecated block_all — <c>Deprecated</c> set and policy is <c>block_all</c>/<c>block</c>.
-    ///      <c>block_new</c> is NOT included: already-cached deprecated versions still serve under
-    ///      that mode, so hiding them from the index would create the opposite inconsistency.
-    ///   3. Release-age hold — version is younger than <c>MinReleaseAgeHours</c>. Fail-open when
-    ///      <c>PublishedAt</c> is null (same behaviour as <see cref="EvaluateAsync"/>).
-    ///   4. Malicious advisory — <c>IsMalicious</c> and policy is <c>block</c>.
-    ///   5. KEV gate — <c>HasKev</c> in <paramref name="signals"/> and policy is <c>block</c>.
-    ///   6. EPSS ceiling — <c>MaxEpss</c> exceeds <c>MaxEpssTolerance</c>.
-    ///   7. CVSS score ceiling — <c>MaxCvss</c> exceeds <c>MaxOsvScoreTolerance</c>.
-    ///   Arms 4–7 are skipped when <c>VulnCheckedAt</c> is null (version not yet scanned),
-    ///   matching the fail-open behaviour of <see cref="EvaluateAsync"/>.
-    ///
-    /// Upstream-only (not-yet-cached) versions cannot be filtered here because stored state
-    /// does not exist for them — first-fetch dynamic blocks remain listed until first-fetch.
-    /// </summary>
-    public static bool IsHardBlockedByStoredState(
-        PackageVersion v, OrgSettings settings, VulnGateSignals? signals, DateTimeOffset now,
-        bool installScriptAllowlisted = false)
-    {
-        var facts = new VersionFacts(
-            ManualState: v.ManualBlockState,
-            Deprecated: v.Deprecated,
-            PublishedAt: v.PublishedAt,
-            Scanned: v.VulnCheckedAt is not null,
-            // Index path: use the pre-computed row flag (IsMalicious), not the aggregate signal.
-            Vulnerability: ProjectVulnFacts(signals, maliciousOverride: v.IsMalicious),
-            Origin: v.Origin,
-            HasInstallScript: v.HasInstallScript,
-            ProvenanceStatus: v.ProvenanceStatus,
-            InstallScriptAllowlisted: installScriptAllowlisted,
-            RevokedAt: v.RevokedAt);
-
-        var policy = new BlockPolicy(
-            MinReleaseAgeHours: settings.MinReleaseAgeHours,
-            BlockDeprecatedMode: settings.BlockDeprecated,
-            BlockMaliciousMode: settings.BlockMalicious,
-            BlockMaliciousLiveMode: settings.BlockMaliciousLive,
-            BlockKevMode: settings.BlockKev,
-            MaxEpssTolerance: settings.MaxEpssTolerance,
-            BlockKevRansomwareMode: settings.BlockKevRansomware,
-            BlockSsvcExploitationMode: settings.BlockSsvcExploitation,
-            MaxEpssPercentileTolerance: settings.MaxEpssPercentileTolerance,
-            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
-            BlockInstallScriptsMode: settings.BlockInstallScripts,
-            // The provenance policy is per-ecosystem (npm vs nuget have independent toggles), so
-            // pick the right one from the version's PURL — the stored provenance_status column is
-            // ecosystem-agnostic but the gate that interprets it is not.
-            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(v.Purl)),
-            BlockRevokedMode: settings.BlockRevoked);
-
-        return !Evaluate(facts, policy, now).Servable;
-    }
-
-    /// <summary>
-    /// Block-gate filter for a proxy artifact entry sourced from the global plane
-    /// (<c>cache_artifact</c> + <c>tenant_artifact_access</c>) rather than
-    /// <c>package_versions</c>. Used by the list/index/metadata renderers when proxy
-    /// versions no longer have <c>package_versions</c> rows. The policy evaluation is
-    /// identical to <see cref="IsHardBlockedByStoredState"/> — both delegate to
-    /// <see cref="Evaluate"/> with the same <see cref="VersionFacts"/> shape.
-    /// </summary>
-    public static bool IsHardBlockedByCacheEntry(
-        Infrastructure.CacheArtifactIndexFacts entry, OrgSettings settings,
-        VulnGateSignals? signals, DateTimeOffset now,
-        bool installScriptAllowlisted = false)
-    {
-        var facts = new VersionFacts(
-            ManualState: entry.ManualBlockState,
-            Deprecated: entry.Deprecated,
-            PublishedAt: entry.PublishedAt,
-            // OSV findings are coordinate-keyed (ecosystem/name/version), not byte-keyed — see
-            // CacheArtifactIndexFacts.ToPackageVersionSynthetic — so vuln_checked_at and the
-            // malicious/KEV/EPSS/CVSS signals are read unmasked here regardless of divergence.
-            Scanned: entry.VulnCheckedAt is not null,
-            Vulnerability: ProjectVulnFacts(signals),
-            Origin: "proxy",
-            HasInstallScript: entry.EffectiveHasInstallScript,
-            ProvenanceStatus: entry.EffectiveProvenanceStatus,
-            InstallScriptAllowlisted: installScriptAllowlisted,
-            RevokedAt: entry.RevokedAt);
-
-        var policy = new BlockPolicy(
-            MinReleaseAgeHours: settings.MinReleaseAgeHours,
-            BlockDeprecatedMode: settings.BlockDeprecated,
-            BlockMaliciousMode: settings.BlockMalicious,
-            BlockMaliciousLiveMode: settings.BlockMaliciousLive,
-            BlockKevMode: settings.BlockKev,
-            MaxEpssTolerance: settings.MaxEpssTolerance,
-            BlockKevRansomwareMode: settings.BlockKevRansomware,
-            BlockSsvcExploitationMode: settings.BlockSsvcExploitation,
-            MaxEpssPercentileTolerance: settings.MaxEpssPercentileTolerance,
-            MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance,
-            BlockInstallScriptsMode: settings.BlockInstallScripts,
-            VerifyProvenanceMode: settings.VerifyProvenanceMode(EcosystemFromPurl(entry.Purl ?? string.Empty)),
-            BlockRevokedMode: settings.BlockRevoked);
-
-        return !Evaluate(facts, policy, now).Servable;
-    }
-
-    // Extracts the ecosystem segment from a canonical PURL ("pkg:nuget/name@version" → "nuget").
-    // Returns an empty string when the value is not PURL-shaped, which maps to an 'off' provenance
-    // policy (never blocks) — a safe default for a malformed or legacy row.
-    private static string EcosystemFromPurl(string purl) => PurlParser.TryGetEcosystem(purl) ?? string.Empty;
-
-    /// <summary>
-    /// Pure policy core: maps <see cref="VersionFacts"/> + <see cref="BlockPolicy"/> to a
-    /// <see cref="BlockVerdict"/> with no I/O or side effects. Applies the arms in priority
-    /// order (Manual > Deprecated > Revoked > ReleaseAge > Malicious > Provenance > Kev > Epss >
-    /// VulnScore > InstallScript).
-    /// Both <see cref="EvaluateAsync"/> and <see cref="IsHardBlockedByStoredState"/> project
-    /// their inputs into these types and delegate here so the policy logic has one home.
-    /// </summary>
-    public static BlockVerdict Evaluate(VersionFacts facts, BlockPolicy policy, DateTimeOffset now)
-    {
-        var verdict = EvaluateBlocking(facts, policy, now);
-
-        // A refusal subsumes any warning: the artefact was not served, so "what would have
-        // refused it" is already answered by the arm that did. Only a servable verdict carries a
-        // warn, which is also what keeps `Arm != None` meaning exactly "blocked" for every
-        // existing consumer.
-        return verdict.Servable
-            ? verdict with { WarnArm = FirstWarnArm(facts, policy) }
-            : verdict;
-    }
-
-    private static BlockVerdict EvaluateBlocking(VersionFacts facts, BlockPolicy policy, DateTimeOffset now)
-    {
-        // Arm 1: manual block — always wins.
-        if (facts.ManualState == "blocked")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.Manual);
-        }
-
-        // Manual allow is an operator override that short-circuits all automatic gates.
-        if (facts.ManualState == "allowed")
-        {
-            return new BlockVerdict(Servable: true, Arm: BlockArm.None);
-        }
-
-        // Arm 2: deprecated block_all / legacy block — only modes that deny the serve path.
-        // block_new is intentionally excluded: it only fires on the first-fetch path and
-        // lets already-cached deprecated versions keep serving (and stay listed).
-        if (DeprecatedTriggers(facts) && IsBlockAll(policy.BlockDeprecatedMode))
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.Deprecated);
-        }
-
-        // Arm 2b: revoked — the version was removed from the upstream registry (a takedown can
-        // signal a compromised release). Only 'block' denies; 'warn'/'off'/null surface the badge
-        // but keep serving. A revoked version cannot be first-fetched (it is gone upstream), so
-        // this is a serve-path / listing gate only.
-        if (RevokedTriggers(facts) && policy.BlockRevokedMode == "block")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.Revoked);
-        }
-
-        // Arm 3: release-age hold. Applies only to upstream-derived origins so locally-hosted
-        // packages are not self-blocked by a cooldown measured against their own push timestamp.
-        // Fail-open when PublishedAt is absent.
-        if (IsReleaseAgeBlocked(facts, policy, now))
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.ReleaseAge);
-        }
-
-        // Arms 4–7 require vuln data. Scanned false means not yet scanned — fail-open.
-        // Extracted into a separate helper so this method stays below the S3776 threshold.
-        var vulnVerdict = EvaluateVulnArms(facts, policy);
-        if (!vulnVerdict.Servable)
-        {
-            return vulnVerdict;
-        }
-
-        // Arm 8: provenance/signature gate. Sits just below the malicious arm in priority (a
-        // known-malicious advisory is a stronger reason to deny than a missing signature) and
-        // above the install-script arm. Independent of scan state — provenance is captured at
-        // ingest, not from the OSV scan. Only the require mode ('block') denies; under 'block' a
-        // Failed, an Unsigned, and an Unverifiable outcome all refuse the version (fail closed).
-        // Unverifiable is the caller-synthesized "enforcement on, no trust anchor configured"
-        // marker, never a stored value. 'warn'/'off'/null and a NULL status (verification not
-        // applicable) all pass.
-        if (ProvenanceTriggers(facts) && policy.VerifyProvenanceMode == "block")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.Provenance);
-        }
-
-        // Arm 9 (lowest priority): install-script gate. Independent of scan state — a shipped
-        // install hook is a static artefact property, not a vuln signal — so it runs whether or
-        // not the version has been scanned, but only when no stronger arm above already blocked.
-        // The allowlist exemption takes effect here: a package on the per-org install-script
-        // allowlist is treated as if it has no install script for this arm only.
-        return InstallScriptTriggers(facts) && policy.BlockInstallScriptsMode == "block"
-            ? new BlockVerdict(Servable: false, Arm: BlockArm.InstallScript)
-            : vulnVerdict;
-    }
-
-    // ── Arm trigger predicates ────────────────────────────────────────────────
-    //
-    // One predicate per warn-capable arm, used by BOTH the blocking pass and the warning pass.
-    // That sharing is the point: a warn pass with its own copy of each condition is a second
-    // copy of the policy, which drifts silently — the same hazard the pre-filter rule guards
-    // against, where the safe direction is "may only drop rows Evaluate would also reject".
-    // Here the invariant is tighter: warn and block must trigger on exactly the same facts, and
-    // differ only in what the tenant's mode says to do about them.
-
-    private static bool DeprecatedTriggers(VersionFacts f) => f.Deprecated is not null;
-
-    private static bool RevokedTriggers(VersionFacts f) => f.RevokedAt is not null;
-
-    // The vuln arms additionally require a scanned row: unscanned is fail-open, so an unscanned
-    // version must not warn either — a warning implies a judgement that was never made.
-    private static bool MaliciousTriggers(VersionFacts f) => f.Scanned && f.Vulnerability.IsMalicious;
-
-    // Deliberately NO staleness gating, unlike SsvcExploitationTriggers' dual staleness handling
-    // below: a positive still-live result does not go stale into "safe" the way an exploitation
-    // ASSESSMENT can. The malware does not un-flag itself with the passage of time — only a fresh
-    // probe finding the version actually removed changes the answer, and that arrives as a new
-    // `false` on VulnFacts.MalStillLive, not a stale `true` that needs a horizon to discount. This
-    // is a divergence from the SSVC precedent by design, not an omission.
-    private static bool MalStillLiveTriggers(VersionFacts f) => f.Scanned && f.Vulnerability.MalStillLive;
-
-    private static bool KevRansomwareTriggers(VersionFacts f) =>
-        f.Scanned && f.Vulnerability.IsKevRansomware == true;
-
-    private static bool KevTriggers(VersionFacts f) => f.Scanned && f.Vulnerability.IsKev;
-
-    private static bool SsvcExploitationTriggers(VersionFacts f) =>
-        f.Scanned && (f.Vulnerability.SsvcExploitation == "active" || f.Vulnerability.HasStaleEnrichment);
-
-    private static bool ProvenanceTriggers(VersionFacts f) =>
-        f.ProvenanceStatus is ProvenanceStatuses.Failed or ProvenanceStatuses.Unsigned
-            or ProvenanceStatuses.Unverifiable;
-
-    private static bool InstallScriptTriggers(VersionFacts f) =>
-        f.HasInstallScript && !f.InstallScriptAllowlisted;
-
-    private static bool IsWarn(string? mode) => mode == "warn";
-
-    /// <summary>
-    /// The highest-priority arm whose fact is present and whose tenant mode is <c>warn</c>, or
-    /// <see cref="BlockArm.None"/>. Walks the same order as the blocking pass, using the same
-    /// trigger predicates, so an arm cannot be enforced-but-not-warned or the reverse.
-    ///
-    /// <para>
-    /// A manual allow silences warnings as well as blocks. The override means "an operator has
-    /// judged this version acceptable"; continuing to report what would have refused it would
-    /// generate a permanent stream of records for a decision already made.
-    /// </para>
-    /// </summary>
-    private static BlockArm FirstWarnArm(VersionFacts facts, BlockPolicy policy) =>
-        facts.ManualState == "allowed"
-            ? BlockArm.None
-            // Priority order, mirroring the blocking pass exactly. Written as a null-coalescing
-            // chain rather than a sequence of ifs so the order is one readable list, and rather
-            // than an array so the serve path allocates nothing per evaluation.
-            : Warned(DeprecatedTriggers(facts), policy.BlockDeprecatedMode, BlockArm.Deprecated)
-              ?? Warned(RevokedTriggers(facts), policy.BlockRevokedMode, BlockArm.Revoked)
-              ?? Warned(MalStillLiveTriggers(facts), policy.BlockMaliciousLiveMode, BlockArm.MaliciousLive)
-              ?? Warned(MaliciousTriggers(facts), policy.BlockMaliciousMode, BlockArm.Malicious)
-              ?? Warned(KevRansomwareTriggers(facts), policy.BlockKevRansomwareMode, BlockArm.KevRansomware)
-              ?? Warned(KevTriggers(facts), policy.BlockKevMode, BlockArm.Kev)
-              ?? Warned(SsvcExploitationTriggers(facts), policy.BlockSsvcExploitationMode, BlockArm.SsvcExploitation)
-              ?? Warned(ProvenanceTriggers(facts), policy.VerifyProvenanceMode, BlockArm.Provenance)
-              ?? Warned(InstallScriptTriggers(facts), policy.BlockInstallScriptsMode, BlockArm.InstallScript)
-              ?? BlockArm.None;
-
-    private static BlockArm? Warned(bool triggered, string? mode, BlockArm arm) =>
-        triggered && IsWarn(mode) ? arm : null;
-
-    // Arm 3 predicate: true when the version is upstream-derived, a positive cooldown is
-    // configured, PublishedAt is known, and that timestamp is still within the cooldown window.
-    private static bool IsReleaseAgeBlocked(VersionFacts facts, BlockPolicy policy, DateTimeOffset now)
-    {
-        if (!IsCooldownEligible(facts.Origin) ||
-            policy.MinReleaseAgeHours is not { } minHours || minHours <= 0 ||
-            facts.PublishedAt is not { } publishedAt)
-        {
-            return false;
-        }
-
-        double ageHours = (now - publishedAt).TotalHours;
-        return ageHours < minHours;
-    }
-
-    // Arms 4–7: malicious, KEV, EPSS, and CVSS score gates. All require a scanned version row;
-    // the caller guards with !facts.Scanned before delegating here.
-    [SuppressMessage("Major Code Smell", "S125:Sections of code should not be commented out", Justification = "Descriptive documentation comment, not commented-out code.")]
-    [SuppressMessage("Critical Code Smell", "S3776:Cognitive Complexity of methods should not be too high",
-        Justification = "A flat, ordered sequence of independent policy arms, every branch at nesting "
-                        + "depth zero — the complexity is the arm COUNT, not nested logic. The order is "
-                        + "load-bearing and each arm's comment states why it must sit where it does "
-                        + "(a narrow arm before its broad twin, so a 'warn' on the broad one cannot "
-                        + "swallow the narrow one's attribution). Splitting the arms across helpers "
-                        + "moves that ordering out of the one place a reviewer reads it, which is how "
-                        + "arm 4a became unreachable-but-plausible once already.")]
-    private static BlockVerdict EvaluateVulnArms(VersionFacts facts, BlockPolicy policy)
-    {
-        if (!facts.Scanned)
-        {
-            return new BlockVerdict(Servable: true, Arm: BlockArm.None);
-        }
-
-        // Arm 4a: the narrow still-live-malicious gate, evaluated BEFORE the broad malicious arm
-        // (arm 4) — same reasoning as the KEV-ransomware/KEV pair below: the two settings are
-        // independent, and the useful combination is block_malicious='warn' with this at 'block',
-        // which only produces a block if the narrow arm is reached first. Ordering it after arm 4
-        // would let the broad arm's 'warn' fall through and lose the still-live attribution
-        // entirely. See MalStillLiveTriggers for why this arm carries no staleness gating.
-        if (MalStillLiveTriggers(facts) && policy.BlockMaliciousLiveMode == "block")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.MaliciousLive);
-        }
-
-        // Arm 4: malicious advisory. Runs before score comparison; MAL- advisories usually
-        // carry no CVSS score so the score gate alone would let known malware through.
-        if (MaliciousTriggers(facts) && policy.BlockMaliciousMode == "block")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.Malicious);
-        }
-
-        // The exploitation/score arms need aggregate signals; null signals means no linked
-        // advisories — all pass. Every fact those arms read must appear here: a signal missing
-        // from this guard makes its arm unreachable rather than merely unused, and the arm still
-        // looks correct at its own call site. IsKevRansomware implies IsKev and so is covered
-        // by it, but is named anyway so the guard stays honest if that ever stops holding.
-        // MalStillLive is included for the same defensive reason even though arm 4a's own check
-        // above already runs unconditionally before this guard is reached: a signal this guard
-        // does not name is exactly the failure mode that made arm 4a unreachable look correct at
-        // its own call site while doing nothing, and this guard must never be the thing that
-        // silently reintroduces that bug if the arms above it are ever reordered.
-        if (!facts.Vulnerability.IsKev && facts.Vulnerability.IsKevRansomware != true
-            && facts.Vulnerability.SsvcExploitation != "active" && !facts.Vulnerability.HasStaleEnrichment
-            && facts.Vulnerability.Epss is null && facts.Vulnerability.EpssPercentile is null
-            && facts.Vulnerability.Cvss is null && !facts.Vulnerability.MalStillLive)
-        {
-            return new BlockVerdict(Servable: true, Arm: BlockArm.None);
-        }
-
-        // Arm 5a: the narrow KEV gate, evaluated BEFORE the broad one. The two are independent
-        // settings and the useful combination is block_kev='warn' with this at 'block' — which
-        // only produces a block if the narrow arm is reached first. Ordering it second would let
-        // the broad arm's 'warn' fall through and lose the ransomware attribution entirely.
-        if (KevRansomwareTriggers(facts) && policy.BlockKevRansomwareMode == "block")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.KevRansomware);
-        }
-
-        // Arm 5: KEV gate — exploited-in-the-wild beats score-based reasoning.
-        if (KevTriggers(facts) && policy.BlockKevMode == "block")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.Kev);
-        }
-
-        // Arm 5b: SSVC exploitation. Sits below both KEV arms because KEV is CISA's curated,
-        // higher-confidence list, and above the score arms for the same reason KEV is: evidence
-        // that something is being exploited outranks an estimate that it might be.
-        if (SsvcExploitationTriggers(facts) && policy.BlockSsvcExploitationMode == "block")
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.SsvcExploitation);
-        }
-
-        // Arm 6: EPSS probability ceiling, pass-on-equal.
-        if (policy.MaxEpssTolerance is { } epssTol && facts.Vulnerability.Epss is { } maxEpss && maxEpss > epssTol)
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.Epss);
-        }
-
-        // Arm 6a: EPSS percentile ceiling, pass-on-equal. Independent of the probability ceiling
-        // above rather than an alternative spelling of it: absolute risk and relative rank are
-        // different policies, both may be set, and either tripping is enough.
-        if (policy.MaxEpssPercentileTolerance is { } pctTol
-            && facts.Vulnerability.EpssPercentile is { } maxPct && maxPct > pctTol)
-        {
-            return new BlockVerdict(Servable: false, Arm: BlockArm.EpssPercentile);
-        }
-
-        // Arm 7: CVSS score ceiling, pass-on-equal.
-        return facts.Vulnerability.Cvss is { } maxCvss && maxCvss > policy.MaxOsvScoreTolerance
-            ? new BlockVerdict(Servable: false, Arm: BlockArm.VulnScore)
-            : new BlockVerdict(Servable: true, Arm: BlockArm.None);
-    }
 }
 
 public readonly record struct VersionFacts(
@@ -1378,7 +1157,18 @@ public readonly record struct VersionFacts(
     /// Upstream-removal timestamp from <c>revoked_at</c>. Non-null = the version was removed from
     /// the upstream registry. Drives the revoked arm under a 'block' policy.
     /// </summary>
-    DateTimeOffset? RevokedAt = null)
+    DateTimeOffset? RevokedAt = null,
+    /// <summary>
+    /// True only for an OCI image evaluated under <c>oci_scan_enforcement</c> 'warn' or 'block':
+    /// the one fact set for which an absent or incomplete scan is a refusal reason rather than the
+    /// fail-open "not yet scanned" every other ecosystem keeps. False at every other site.
+    /// </summary>
+    bool ScanRequired = false,
+    /// <summary>
+    /// True when the org holds a stored scan result for the image with no coverage gaps. Read only
+    /// when <see cref="ScanRequired"/> is true.
+    /// </summary>
+    bool ScanComplete = false)
 {
     /// <summary>
     /// Projects a coordinate that exists only in an upstream's metadata — advertised by an index
@@ -1403,6 +1193,9 @@ public readonly record struct VersionFacts(
             Scanned: false,
             Vulnerability: VulnFacts.None);
 }
+
+/// <summary>An OCI image that owns a pulled digest: its quarantine identity and hosted version link.</summary>
+public sealed record OciGateOwner(string Purl, string VersionId);
 
 public sealed record BlockGateRequest(
     string OrgId,
@@ -1546,7 +1339,27 @@ public sealed record BlockGateRequest(
     /// it, so no call site can put a user's email in that column. NULL means "resolve through
     /// the existing join", which is what rows predating the column already do.
     /// </summary>
-    string? AuditActorLabel = null)
+    string? AuditActorLabel = null,
+    /// <summary>
+    /// The requesting org's own scan facts for an OCI image, read from its scan tables. Non-null
+    /// marks an OCI image request: the shared cache-plane and package-version signal reads are
+    /// skipped for it, and the unscanned arm can apply. Set only by <see cref="ForOciImage"/>.
+    /// </summary>
+    Infrastructure.OciScan.OciGateFacts? OciFacts = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.oci_scan_enforcement</c>: 'off' | 'warn' | 'block'.
+    /// </summary>
+    string? OciScanEnforcementMode = null,
+    /// <summary>
+    /// The SPDX expression(s) stamped on an OCI manifest's row, which the licence arm reads for an
+    /// OCI image request in place of the owner-keyed licence lookup. Empty passes through.
+    /// </summary>
+    IReadOnlyList<string>? OciLicenseExpressions = null,
+    /// <summary>
+    /// The quarantine identity and version link of every image that owns the requested digest, when
+    /// more than one index references it. Empty or null means <see cref="Purl"/> alone.
+    /// </summary>
+    IReadOnlyList<OciGateOwner>? OciOwners = null)
 {
     /// <summary>
     /// Constructs a <see cref="BlockGateRequest"/> from the standard download-path inputs shared
@@ -1736,6 +1549,61 @@ public sealed record BlockGateRequest(
             LicenseEnforcementMode: licenseEnforcementMode,
             CacheArtifactId: caFacts.Id,
             ContentDiverges: caFacts.ContentDivergesFromSharedFacts);
+
+    /// <summary>
+    /// Constructs the request for an OCI image pull under the org's scan-enforcement posture: every
+    /// manifest-returning OCI path builds its request here. Facts come only from the requesting
+    /// org's own scan tables (<paramref name="facts"/>) and from the manual override on its own
+    /// catalogue row; the shared cache-plane signal read is skipped for an OCI request. Every mode
+    /// and tolerance the proxy factories set is threaded from <paramref name="settings"/>, so a
+    /// policy set for the other ecosystems applies to images unchanged: there is no second copy
+    /// of per-arm policy for OCI.
+    /// </summary>
+    /// <param name="purl">The owning image's digest identity (no tag qualifier), which is also the
+    /// quarantine identity, so one approval covers every platform of an index.</param>
+    /// <param name="licenseExpressions">The SPDX expression stamped on the manifest row, if any.</param>
+    /// <param name="owners">Every owning image when several indexes reference the digest, each with its
+    /// hosted <c>package_versions.id</c> (empty for a proxied image). The version link lets a decision on
+    /// that owner's quarantine row set its manual override; an <c>unscanned</c> approval must cover each.
+    /// The request's own version id is the entry matching <paramref name="purl"/>.</param>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "A BlockGateRequest factory: BlockGateRequestConstructionComplianceTests requires the request " +
+            "be built here rather than field-by-field at a call site, precisely because a dropped field defaults to " +
+            "null and reads as \"policy off\".")]
+    public static BlockGateRequest ForOciImage(
+        string orgId,
+        string purl,
+        Infrastructure.OciScan.OciGateFacts facts,
+        string? manualState,
+        TokenRecord? token,
+        OrgSettings settings,
+        string? sourceIp,
+        IReadOnlyList<string> licenseExpressions,
+        IReadOnlyList<OciGateOwner>? owners = null) =>
+        new(orgId, "oci", purl,
+            owners?.FirstOrDefault(o => string.Equals(o.Purl, purl, StringComparison.Ordinal))?.VersionId ?? string.Empty,
+            manualState, null,
+            token?.AuditActorId, MaxOsvScoreTolerance: settings.MaxOsvScoreTolerance, sourceIp,
+            AuditActorLabel: token?.AuditActorLabel,
+            MinReleaseAgeHours: settings.MinReleaseAgeHours,
+            ActorKind: token?.ActorKind,
+            BlockDeprecatedMode: settings.BlockDeprecated,
+            BlockMaliciousMode: settings.BlockMalicious,
+            BlockMaliciousLiveMode: settings.BlockMaliciousLive,
+            BlockKevMode: settings.BlockKev,
+            MaxEpssTolerance: settings.MaxEpssTolerance,
+            BlockKevRansomwareMode: settings.BlockKevRansomware,
+            BlockSsvcExploitationMode: settings.BlockSsvcExploitation,
+            MaxEpssPercentileTolerance: settings.MaxEpssPercentileTolerance,
+            Origin: "proxy",
+            BlockInstallScriptsMode: settings.BlockInstallScripts,
+            VerifyProvenanceMode: settings.VerifyProvenanceMode("oci"),
+            BlockRevokedMode: settings.BlockRevoked,
+            LicenseEnforcementMode: settings.LicenseEnforcementMode,
+            OciFacts: facts,
+            OciScanEnforcementMode: settings.OciScanEnforcement,
+            OciLicenseExpressions: licenseExpressions,
+            OciOwners: owners);
 
     /// <summary>
     /// Constructs the request for the pre-record first-fetch DEPRECATION gate. This one runs before

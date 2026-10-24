@@ -57,6 +57,24 @@ namespace Dependably.Infrastructure;
 /// </para>
 ///
 /// <para>
+/// It is also where a protocol request that resolved <em>no</em> tenant is refused. In multi mode
+/// the apex host resolves to <see cref="TenantContext.Apex"/>, and an unknown, reserved, or
+/// multi-label subdomain (or a deployment with no org yet) to
+/// <see cref="TenantContext.Uninitialized"/>; both carry a null <see cref="TenantContext.TenantId"/>.
+/// Every protocol controller is tenant-bound, so such a request is answered here with
+/// <see cref="TenantNotReadyReason.NotFound"/> (404 problem+json, or the OCI <c>NAME_UNKNOWN</c>
+/// envelope on <c>/v2/</c>) rather than reaching a controller that would run with a null org id.
+/// It is never served from some other org: the host, not the credential, names the tenant, so a
+/// valid token presented on the apex is refused like an anonymous request. 404 matches how the
+/// management plane already answers the same contexts (<c>OrgAccessGuard</c>, and login on an
+/// unknown subdomain), and the response is identical for the apex and for every unresolved
+/// subdomain, so it discloses nothing beyond what those surfaces already do. The protocol plane
+/// is classified by the routed endpoint (<see cref="RateLimitPartitions.IsProtocolControllerRequest"/>),
+/// so the apex's own surfaces — system administration, login, bootstrap, the SPA, probes — are
+/// untouched.
+/// </para>
+///
+/// <para>
 /// <see cref="ExemptPaths"/> is a tight, exact-match allowlist — never a prefix — for the
 /// operator/observability surfaces a suspended tenant must not take down: liveness/readiness
 /// probes, version/metrics scraping, and the edge status surface are not tenant-bound, and in
@@ -91,6 +109,20 @@ public sealed class TenantStatusEnforcementMiddleware
 
     public async Task InvokeAsync(HttpContext context, ILogger<TenantStatusEnforcementMiddleware> logger)
     {
+        if (IsProtocolRequestWithoutTenant(context))
+        {
+            // Debug, not Warning: anything that hits the apex or a mistyped subdomain lands here,
+            // anonymous scanners included, and the request log already records the 404.
+            logger.LogDebug(
+                "Refused protocol request with no resolved tenant: {RequestMethod} {RequestPath} from {SourceIp}",
+                context.Request.Method,
+                context.Request.Path.Value,
+                context.GetNormalizedRemoteIp());
+
+            await TenantNotReadyResponseWriter.WriteAsync(context, TenantNotReadyReason.NotFound);
+            return;
+        }
+
         if (context.Items[TenantContext.HttpItemsKey] is TenantContext { IsTenant: true } ctx
             && ctx.Status != "active"
             && !IsExemptPath(context.Request.Path))
@@ -155,6 +187,13 @@ public sealed class TenantStatusEnforcementMiddleware
 
         await _next(context);
     }
+
+    // A request routed to a protocol controller whose host resolved no tenant (apex, unknown
+    // slug, no org yet). A missing context is treated the same way: it fails closed rather than
+    // letting a controller read a tenant that was never resolved.
+    internal static bool IsProtocolRequestWithoutTenant(HttpContext context) =>
+        RateLimitPartitions.IsProtocolControllerRequest(context)
+        && context.Items[TenantContext.HttpItemsKey] is not TenantContext { IsTenant: true, TenantId.Length: > 0 };
 
     // The writes a usage cap refuses: a POST/PUT/PATCH routed to a protocol controller (classified
     // by endpoint, so SAML's /saml/acs sign-in POST is management plane), other than a

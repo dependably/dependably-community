@@ -67,6 +67,13 @@ public static class Capabilities
     // upload names its document kind in the route, and all three kinds describe the same build.
     public const string SbomUpload = "sbom:upload";
 
+    // ── OCI image scanning ──────────────────────────────────────────────────────
+    // Held by the out-of-process image scanner. It claims the org's queued images, reads their
+    // manifests and blobs through the scan API (not as a tenant download), and writes the image's
+    // package inventory and vulnerability results. Writing results that set an image's status is
+    // configuration-level trust, so it sits in AdminCaps like sbom:upload. It has no leaves.
+    public const string ScanOci = "scan:oci";
+
     // ── Yank (per-ecosystem and wildcard) ───────────────────────────────────────
     public const string YankNpm = "yank:npm";
     public const string YankPypi = "yank:pypi";
@@ -121,7 +128,7 @@ public static class Capabilities
         ReadAudit, ManageOwnTokens
     };
 
-    // admin = publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload.
+    // admin = publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload + scan:oci.
     // The owner-only privilege is tenant:admin (added below) — the only capability that
     // distinguishes owner from admin within the tenant. read:* is added alongside the
     // enumerated read leaves (rather than replacing them) so admin/owner can mint a single
@@ -130,7 +137,7 @@ public static class Capabilities
     private static readonly IReadOnlySet<string> AdminCaps =
         new HashSet<string>(PublisherCaps.Concat(ClaimManagerCaps))
         {
-            ReadTenant, ReadAudit, TenantConfigure, SbomUpload, ReadAll
+            ReadTenant, ReadAudit, TenantConfigure, SbomUpload, ScanOci, ReadAll
         };
 
     private static readonly IReadOnlySet<string> TenantAdminCaps = new HashSet<string>(AdminCaps)
@@ -147,7 +154,7 @@ public static class Capabilities
     /// <summary>
     /// Returns the capability set granted by the user's tenant role. Existing roles map as:
     /// <c>member</c> → reader caps,
-    /// <c>admin</c> → publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload,
+    /// <c>admin</c> → publisher + claim-manager + read:tenant + read:audit + tenant:configure + sbom:upload + scan:oci,
     /// <c>owner</c> → admin caps + tenant:admin (everything within the tenant),
     /// <c>auditor</c> → audit-read + manage-own-tokens.
     /// Unknown roles get the empty set.
@@ -207,6 +214,7 @@ public static class Capabilities
         PublishNpm, PublishPypi, PublishNuget, PublishMaven, PublishRpm, PublishOci, PublishCargo, PublishHex, PublishAll,
         ImportAll,
         SbomUpload,
+        ScanOci,
         YankNpm, YankPypi, YankNuget, YankMaven, YankRpm, YankOci, YankCargo, YankHex, YankAll,
         PullOci,
         ClaimManage, TenantConfigure, TenantAdmin, ManageOwnTokens,

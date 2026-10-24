@@ -442,10 +442,47 @@ public sealed class LocalOsvSourceTests : IDisposable
     }
 
     [Fact]
-    public async Task HasCoverageFor_NonRpmEcosystemWithFeed_AlwaysTrue()
+    public async Task HasCoverageFor_NonRpmEcosystem_FeedLoaded_ReturnsTrue()
+    {
+        WriteAdvisory("GHSA-Npm", "npm", "left-pad", ["1.0.0"]);
+        WriteAdvisory("PYSEC-1", "PyPI", "requests", ["2.0.0"]);
+        WriteAdvisory("GO-1", "Go", "golang.org/x/net", ["0.1.0"]);
+        WriteAdvisory("ALPINE-1", "Alpine:v3.20", "openssl", ["3.0.0-r0"]);
+        WriteAdvisory("RUSTSEC-1", "crates.io", "openssl", ["0.10.0"]);
+        WriteAdvisory("MAVEN-1", "Maven", "org.example:lib", ["1.0.0"]);
+        WriteAdvisory("NUGET-1", "NuGet", "Newtonsoft.Json", ["12.0.0"]);
+        WriteAdvisory("HEX-1", "Hex", "plug", ["1.0.0"]);
+        var src = Build();
+
+        Assert.True(await src.HasCoverageFor("npm"));
+        Assert.True(await src.HasCoverageFor("pypi"));
+        Assert.True(await src.HasCoverageFor("golang"));
+        Assert.True(await src.HasCoverageFor("go"));
+        Assert.True(await src.HasCoverageFor("apk"));
+        Assert.True(await src.HasCoverageFor("cargo"));
+        Assert.True(await src.HasCoverageFor("maven"));
+        Assert.True(await src.HasCoverageFor("nuget"));
+        Assert.True(await src.HasCoverageFor("hex"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_NonRpmEcosystem_FeedMissingFromDump_ReturnsFalse()
+    {
+        // A dump holding only the npm feed has nothing a PyPI or Cargo query could match: an empty
+        // answer for one of those is silence, not a clean result.
+        WriteAdvisory("GHSA-Npm", "npm", "left-pad", ["1.0.0"]);
+        var src = Build();
+
+        Assert.False(await src.HasCoverageFor("pypi"));
+        Assert.False(await src.HasCoverageFor("cargo"));
+        Assert.False(await src.HasCoverageFor("apk"));
+    }
+
+    [Fact]
+    public async Task HasCoverageFor_NonRpmEcosystem_EmptyDump_ReturnsFalse()
     {
         var src = Build();
-        Assert.True(await src.HasCoverageFor("npm"));
+        Assert.False(await src.HasCoverageFor("npm"));
     }
 
     [Fact]

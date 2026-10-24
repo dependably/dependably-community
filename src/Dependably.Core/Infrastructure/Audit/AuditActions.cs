@@ -56,6 +56,9 @@ public static class AuditActions
         "login.success",
         "login.failure",
         "lockout.triggered",
+        // The LoginFailure audit_event type, not an audit_log writer: every login failure is the
+        // single login.failure row above. Kept declared because the pushed SIEM stream carries
+        // the event type through CefFormat, and because older audit_log rows carry the name.
         "auth.login.failure",
         "auth.saml.login.success",
         "auth.saml.login.failure",
@@ -172,6 +175,13 @@ public static class AuditActions
         // logged without refusing the upload. The 'block' refusal itself is
         // sbom_signature_blocked, in the security set above.
         "sbom_signature_warn",
+        // An OCI image scanner's result for an image, a scan attempt it ended without one, a
+        // rematch job's new findings for the stored inventory, and a rematch it handed back for
+        // re-extraction.
+        "oci_scan_result",
+        "oci_scan_failed",
+        "oci_scan_rematch_result",
+        "oci_scan_reextract",
         "claim.create",
         "claim.transition",
         "claim.release",
@@ -222,12 +232,14 @@ public static class AuditActions
         // rows from the operator dashboard.
         "instance_email_config_updated",
         "instance_metrics_access_updated",
+        "instance_protected_secrets_verified",
         "instance_settings_updated",
         "instance_vuln_tracker_config_tested",
         "instance_vuln_tracker_config_updated",
         "system_admin.email_config_updated",
         "system_admin.instance_settings_updated",
         "system_admin.metrics_access_updated",
+        "system_admin.protected_secrets_verified",
         "system_admin.slack_config_updated",
         "system_admin.vuln_tracker_config_tested",
         "system_admin.vuln_tracker_config_updated",

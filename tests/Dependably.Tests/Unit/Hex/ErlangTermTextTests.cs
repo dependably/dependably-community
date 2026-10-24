@@ -535,6 +535,272 @@ public sealed class ErlangTermTextTests
         Assert.Contains("line ", thrown.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Print_NullAndBooleans_RenderAsTheirAtoms()
+    {
+        Assert.Equal("nil", ErlangTermText.Print(null));
+        Assert.Equal("true", ErlangTermText.Print(true));
+        Assert.Equal("false", ErlangTermText.Print(false));
+    }
+
+    [Fact]
+    public void Print_Floats_ForceADecimalPointAndNormalizeTheExponent()
+    {
+        Assert.Equal("1.5", ErlangTermText.Print(1.5f));
+        Assert.Equal("100.0", ErlangTermText.Print(100.0));
+        Assert.Equal("1.0e21", ErlangTermText.Print(1e21));
+        Assert.Equal("1.5e-7", ErlangTermText.Print(1.5e-7));
+        Assert.Equal("-2.5e22", ErlangTermText.Print(-2.5e22));
+    }
+
+    [Fact]
+    public void Print_NonFiniteSingle_Throws()
+    {
+        var ex = Assert.Throws<ErlangTermException>(() => ErlangTermText.Print(float.NaN));
+
+        Assert.Contains("no float literal", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Print_IntegerWidths_RenderAsDecimal()
+    {
+        Assert.Equal("7", ErlangTermText.Print(7));
+        Assert.Equal("-9", ErlangTermText.Print((short)-9));
+        Assert.Equal("18446744073709551615", ErlangTermText.Print(ulong.MaxValue));
+        Assert.Equal("123456789012345678901234567890", ErlangTermText.Print(BigInteger.Parse("123456789012345678901234567890")));
+    }
+
+    [Fact]
+    public void Print_CharlistEscapes_EveryControlAndQuoteCharacter()
+    {
+        string printed = ErlangTermText.Print(new ErlangCharlist("a\"b'c\\d\ne\rf\tg\vh\fi\bj\u001bk\u0001l\u007fm"));
+
+        Assert.Equal("\"a\\\"b'c\\\\d\\ne\\rf\\tg\\vh\\fi\\bj\\ek\\x01l\\x7Fm\"", printed);
+    }
+
+    [Fact]
+    public void Print_Atoms_AreQuotedUnlessTheyAreBare()
+    {
+        Assert.Equal("ok", ErlangTermText.Print(new ErlangAtom("ok")));
+        Assert.Equal("node_1@host", ErlangTermText.Print(new ErlangAtom("node_1@host")));
+        Assert.Equal("'Upper'", ErlangTermText.Print(new ErlangAtom("Upper")));
+        Assert.Equal("''", ErlangTermText.Print(new ErlangAtom(string.Empty)));
+        Assert.Equal("'1abc'", ErlangTermText.Print(new ErlangAtom("1abc")));
+        Assert.Equal("'has-dash'", ErlangTermText.Print(new ErlangAtom("has-dash")));
+        Assert.Equal("'it\\'s'", ErlangTermText.Print(new ErlangAtom("it's")));
+    }
+
+    [Fact]
+    public void Print_Binaries_UseTheUtf8SpecifierOnlyForNonAscii()
+    {
+        Assert.Equal("<<>>", ErlangTermText.Print(string.Empty));
+        Assert.Equal("<<\"plain\">>", ErlangTermText.Print("plain"));
+        Assert.Equal("<<\"caf\u00e9\"/utf8>>", ErlangTermText.Print("caf\u00e9"));
+        Assert.Equal("<<>>", ErlangTermText.Print(Array.Empty<byte>()));
+        Assert.Equal("<<1,2,255>>", ErlangTermText.Print(new byte[] { 1, 2, 255 }));
+    }
+
+    [Fact]
+    public void Print_EnumerablesThatAreNotLists_RenderAsLists()
+    {
+        Assert.Equal("[1,2]", ErlangTermText.Print(new[] { 1, 2 }.Select(x => (object?)x)));
+        Assert.Equal("[1,2]", ErlangTermText.Print(new[] { 1, 2 }));
+        Assert.Equal("[<<\"a\">>,3]", ErlangTermText.Print(new System.Collections.ArrayList { "a", 3 }));
+    }
+
+    [Fact]
+    public void Print_NestingBeyondTheDepthLimit_Throws()
+    {
+        object? term = "leaf";
+        for (int i = 0; i < ErlangTermText.MaxDepth + 2; i++)
+        {
+            term = ErlangTermModel.List(term);
+        }
+
+        var ex = Assert.Throws<ErlangTermException>(() => ErlangTermText.Print(term));
+
+        Assert.Contains("maximum depth of 64", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Print_NestingAtTheDepthLimit_Succeeds()
+    {
+        object? term = "leaf";
+        for (int i = 0; i < ErlangTermText.MaxDepth; i++)
+        {
+            term = ErlangTermModel.List(term);
+        }
+
+        string printed = ErlangTermText.Print(term);
+
+        Assert.Equal(ErlangTermText.MaxDepth, printed.Count(ch => ch == '['));
+        Assert.Contains("<<\"leaf\">>", printed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConsultText_NullTermSequence_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => ErlangTermText.ConsultText(null!));
+        Assert.Throws<ArgumentNullException>(() => ErlangTermText.Consult(null!));
+        Assert.Throws<ArgumentNullException>(() => ErlangTermText.ParseTerm(null!));
+    }
+
+    [Theory]
+    [InlineData("", "Expected a term but found the end of the input")]
+    [InlineData("  % only a comment", "Expected a term but found the end of the input")]
+    [InlineData("{a,", "Expected a term but found the end of the input")]
+    [InlineData("[a", "Expected ']' but found the end of the input")]
+    [InlineData("{a", "Expected '}' but found the end of the input")]
+    [InlineData("[a b]", "Expected ',' or ']' but found 'b'")]
+    [InlineData("{a b}", "Expected ',' or '}' but found 'b'")]
+    [InlineData("#", "Expected '{' after '#' to open a map")]
+    [InlineData("#[a]", "Expected '{' after '#' to open a map")]
+    [InlineData("#{a b}", "Expected '=>' between a map key and its value")]
+    [InlineData("#{a = 1}", "Expected '=>' between a map key and its value")]
+    [InlineData("#{a", "Expected '=>' between a map key and its value")]
+    [InlineData("#{a := 1}", "Map update syntax ':=' is not supported")]
+    [InlineData("#{a => 1", "Expected '}' but found the end of the input")]
+    [InlineData("#{a => 1 b}", "Expected ',' or '}' but found 'b'")]
+    [InlineData("#{a => 1, a => 2}", "Duplicate map key")]
+    [InlineData("<<", "Expected a binary segment but found the end of the input")]
+    [InlineData("<a", "Expected '<'")]
+    [InlineData("<<foo>>", "A binary segment is a quoted string or a non-negative integer code point")]
+    [InlineData("<<-1>>", "A binary segment is a quoted string or a non-negative integer code point")]
+    [InlineData("<<1114112>>", "A binary segment is a quoted string or a non-negative integer code point")]
+    [InlineData("<<1.5>>", "A binary segment is a quoted string or a non-negative integer code point")]
+    [InlineData("<<55296/utf8>>", "Code point 55296 cannot be encoded as UTF-8")]
+    [InlineData("<<256>>", "Code point 256 does not fit a byte")]
+    [InlineData("<<\"a\"/>>", "Expected a binary segment type specifier after '/'")]
+    [InlineData("<<\"a\"/integer>>", "Binary segment type specifier 'integer' is not supported")]
+    [InlineData("<<\"a\":8>>", "Binary size specifiers are not supported")]
+    [InlineData("<<\"a\" \"b\">>", "Expected ',' or '>>' but found '\"'")]
+    public void ParseTerm_MalformedStructure_IsRefusedWithAPositionedReason(string text, string expectedFragment)
+    {
+        var ex = Assert.Throws<ErlangTermException>(() => ErlangTermText.ParseTerm(text));
+
+        Assert.Contains(expectedFragment, ex.Message, StringComparison.Ordinal);
+        Assert.Matches(@"at line \d+, column \d+\.$", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("\"abc\\", "Unterminated escape sequence")]
+    [InlineData("\"\\^", "Unterminated control escape sequence")]
+    [InlineData("\"\\x", "Unterminated '\\x' escape sequence")]
+    [InlineData("\"\\x{41", "Unterminated '\\x{' escape sequence")]
+    [InlineData("\"\\x4", "An '\\x' escape sequence needs two hexadecimal digits")]
+    [InlineData("\"\\xZZ\"", "Invalid '\\xZZ' escape sequence")]
+    [InlineData("\"\\x{}\"", "Invalid '\\x{}' escape sequence")]
+    [InlineData("\"\\x{1234567}\"", "Invalid '\\x{1234567}' escape sequence")]
+    [InlineData("\"\\x{110000}\"", "Invalid '\\x{110000}' escape sequence")]
+    [InlineData("\"\\x{GG}\"", "Invalid '\\x{GG}' escape sequence")]
+    [InlineData("\"\\x{D800}\"", "Code point 55296 is not a character")]
+    [InlineData("$", "Expected a character after '$'")]
+    [InlineData("$\\", "Unterminated escape sequence")]
+    public void ParseTerm_MalformedEscapes_AreRefused(string text, string expectedFragment)
+    {
+        var ex = Assert.Throws<ErlangTermException>(() => ErlangTermText.ParseTerm(text));
+
+        Assert.Contains(expectedFragment, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("1#0", "Integer base '1' is outside the supported range of 2 to 36")]
+    [InlineData("37#a", "Integer base '37' is outside the supported range of 2 to 36")]
+    [InlineData("99999999999#1", "Integer base '99999999999' is outside the supported range of 2 to 36")]
+    [InlineData("2#102", "Digit '2' is not valid in base 2")]
+    [InlineData("16#", "Expected at least one base 16 digit after '#'")]
+    [InlineData("-x", "Expected a digit after the sign")]
+    [InlineData("+", "Expected a digit after the sign")]
+    [InlineData("1e5", "needs a decimal point before its exponent")]
+    [InlineData("1.5e", "Expected at least one digit in the float exponent")]
+    [InlineData("1.5e+", "Expected at least one digit in the float exponent")]
+    [InlineData("1.0e999", "is not a finite double")]
+    public void ParseTerm_MalformedNumbers_AreRefusedWithAReason(string text, string expectedFragment)
+    {
+        var ex = Assert.Throws<ErlangTermException>(() => ErlangTermText.ParseTerm(text));
+
+        Assert.Contains(expectedFragment, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseTerm_SurrogatePairs_DecodeToOneCodePoint()
+    {
+        Assert.Equal("\U0001F600", ErlangTermText.ParseTerm("<<\"\U0001F600\"/utf8>>"));
+        Assert.Equal(0x1F600L, ErlangTermText.ParseTerm("$\U0001F600"));
+    }
+
+    [Fact]
+    public void ParseTerm_AstralCharacterInABinaryWithoutUtf8_DoesNotFitAByte()
+    {
+        var ex = Assert.Throws<ErlangTermException>(() => ErlangTermText.ParseTerm("<<\"\U0001F600\">>"));
+
+        Assert.Contains("Code point 128512 does not fit a byte", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseTerm_EscapeOffsetsAndCharacterLiterals_DecodeToTheirValues()
+    {
+        Assert.Equal(10L, ErlangTermText.ParseTerm("$\\n"));
+        Assert.Equal(65L, ErlangTermText.ParseTerm("$A"));
+        Assert.Equal(0x1F600L, ErlangTermText.ParseTerm("$\\x{1F600}"));
+        Assert.Equal(new ErlangCharlist("\u0001"), ErlangTermText.ParseTerm("\"\\^A\""));
+        Assert.Equal(new ErlangCharlist("A"), ErlangTermText.ParseTerm("\"\\101\""));
+        Assert.Equal(new ErlangCharlist("\u0007 \u007f"), ErlangTermText.ParseTerm("\"\\^G\\s\\d\""));
+    }
+
+    [Fact]
+    public void ParseTerm_FloatWithSignedExponent_ParsesToTheDouble()
+    {
+        Assert.Equal(1.5e-7, ErlangTermText.ParseTerm("1.5e-7"));
+        Assert.Equal(2.5e+10, ErlangTermText.ParseTerm("2.5E+10"));
+        Assert.Equal(-0.25, ErlangTermText.ParseTerm("-0.25"));
+    }
+
+    [Fact]
+    public void ParseTerm_BigIntegersBeyondLong_StayBigIntegers()
+    {
+        Assert.Equal(BigInteger.Parse("92233720368547758080"), Assert.IsType<BigInteger>(ErlangTermText.ParseTerm("92233720368547758080")));
+        Assert.Equal(-255L, ErlangTermText.ParseTerm("-16#ff"));
+    }
+
+    [Fact]
+    public void Consult_TerminatorFollowedByACommentOrNothing_IsAccepted()
+    {
+        var terms = ErlangTermText.Consult("a.%first\nb.");
+
+        Assert.Equal(new[] { "a", "b" }, terms.Select(t => ((ErlangAtom)t!).Name));
+    }
+
+    [Theory]
+    [InlineData("a.b", "A term terminator is a '.' followed by whitespace")]
+    [InlineData("a", "Expected '.' to terminate the term but found the end of the input")]
+    [InlineData("a b.", "Expected '.' to terminate the term but found 'b'")]
+    public void Consult_BadTerminator_IsRefused(string text, string expectedFragment)
+    {
+        var ex = Assert.Throws<ErlangTermException>(() => ErlangTermText.Consult(text));
+
+        Assert.Contains(expectedFragment, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseTerm_CompoundTermAsBinarySegment_IsRefused()
+    {
+        var empty = Assert.Throws<ErlangTermException>(() => ErlangTermText.ParseTerm("<<{}>>"));
+        var nonEmpty = Assert.Throws<ErlangTermException>(() => ErlangTermText.ParseTerm("<<{1}>>"));
+
+        Assert.Contains("A binary segment is a quoted string or a non-negative integer code point", empty.Message, StringComparison.Ordinal);
+        Assert.Contains("Term nesting exceeds the maximum depth of 64", nonEmpty.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseTerm_InputExactlyAtTheSizeCap_IsParsed()
+    {
+        string atFloor = "a" + new string(' ', ErlangTermText.MaxInputChars - 1);
+
+        Assert.Equal(new ErlangAtom("a"), ErlangTermText.ParseTerm(atFloor));
+        Assert.Throws<ErlangTermException>(() => ErlangTermText.ParseTerm(atFloor + " "));
+    }
+
     private static void AssertTerm(object? expected, object? actual)
     {
         if (!ErlangTermModel.DeepEquals(expected, actual))

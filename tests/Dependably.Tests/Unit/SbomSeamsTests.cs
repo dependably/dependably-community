@@ -116,12 +116,11 @@ public sealed class SbomSeamsTests
     }
 
     /// <summary>
-    /// An unregistered job name is accepted by <c>DISABLE_BACKGROUND_JOBS</c> but warned about, so
-    /// a name missing from the registry reads as a working disable while the operator's intent is
-    /// only ever visible in a log line.
+    /// An unregistered job name in <c>DISABLE_BACKGROUND_JOBS</c> fails startup, so <c>sbom-scan</c>
+    /// must be in the registry for an operator to be able to name it at all.
     /// </summary>
     [Fact]
-    public void SbomScan_IsDisableableWithoutAnUnknownJobWarning()
+    public void SbomScan_IsDisableableByName()
     {
         var cfg = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>

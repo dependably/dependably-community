@@ -201,7 +201,14 @@
       "versionLabel": "Dernière : {version}"
     },
     "vulns": {
-      "none": "Aucune vulnérabilité connue"
+      "none": "Aucune vulnérabilité connue",
+      "ociFindings": "{count, plural, one {# vulnérabilité trouvée} other {# vulnérabilités trouvées}} par l'analyse de l'image",
+      "ociPartial": "Analyse partielle",
+      "ociPartialHelp": "Analysée, mais une partie d'une image n'a pas été vérifiée. Elle n'est pas réputée saine.",
+      "ociUnscanned": "Non analysée",
+      "ociUnscannedHelp": "Une image n'a pas encore été analysée. Elle n'est pas réputée saine.",
+      "ociNoFeed": "Aucun analyseur",
+      "ociNoFeedHelp": "Aucun analyseur d'images n'est actif pour cette organisation; ses images n'ont donc pas été vérifiées quant aux vulnérabilités. Elles ne sont pas réputées saines."
     },
     "malicious": {
       "label": "Malveillant",
@@ -498,6 +505,9 @@
       "signed": "signée",
       "installScript": "exécute des scripts d'installation",
       "installScriptHelp": "Cette version embarque un script d'installation/cycle de vie exécuté automatiquement à l'installation ({kind}).",
+      "manifestIssue": "manifeste à vérifier",
+      "manifestAmbiguousHelp": "Cette archive npm contient plus d'un package.json de premier niveau; Dependably ne peut pas déterminer lequel le client installe. Il ne s'agit pas d'un script d'installation déclaré.",
+      "manifestUnscannableHelp": "Cette archive npm n'a pas pu être lue jusqu'à la fin; Dependably ne peut pas déterminer ce que le client installe. Il ne s'agit pas d'un script d'installation déclaré.",
       "provenanceVerified": "signature vérifiée",
       "provenanceVerifiedHelp": "La signature du registre npm sur cette version a été vérifiée par rapport à une ancre de confiance épinglée (signataire : {signer}).",
       "provenanceFailed": "signature invalide",
@@ -522,6 +532,8 @@
       "unscanned": "Non analysé",
       "no_feed": "Aucun flux d'avis",
       "noFeedHelp": "OSV ne publie aucun flux d'avis pour cet écosystème; cet artefact n'a donc jamais été confronté à un tel flux. Il n'est pas réputé sain.",
+      "partial": "Analyse partielle",
+      "partialHelp": "L'analyseur d'images n'a pas pu inventorier ou rapprocher une partie de cette image; l'absence d'avis ne couvre donc que ce qu'il a lu. Elle n'est pas réputée saine.",
       "malicious": "Malveillant",
       "maliciousHelp": "Lié à un avis de paquet malveillant connu (OSV MAL-)."
     },
@@ -548,6 +560,7 @@
       "license": "Licence",
       "operational": "Opérationnel",
       "noAdvisories": "Aucun avis",
+      "noScanner": "Aucun analyseur",
       "licenseClean": "Aucun risque",
       "licenseBlocked": "Licence bloquée",
       "licenseUndeclared": "Non déclarée",
@@ -587,6 +600,11 @@
       "vulnScan": "Dernière analyse",
       "vulns": "Vulnérabilités",
       "noVulns": "Aucune vulnérabilité connue",
+      "ociFindings": "{count, plural, one {# vulnérabilité trouvée} other {# vulnérabilités trouvées}} par l'analyse de l'image.",
+      "ociGapsNote": "La couverture comportait {count, plural, one {# lacune} other {# lacunes}}; une partie de l'image n'a donc pas été vérifiée.",
+      "ociPartial": "Analysée, mais la couverture comportait {count, plural, one {# lacune} other {# lacunes}}; une partie de cette image n'a donc pas été vérifiée. Elle n'est pas réputée saine.",
+      "ociUnscanned": "Cette image n'a pas encore été analysée. Elle n'est pas réputée saine.",
+      "ociNoFeed": "Aucun analyseur d'images n'est actif pour cette organisation; cette image n'a donc pas été vérifiée quant aux vulnérabilités. Elle n'est pas réputée saine.",
       "copy": "Copier",
       "upstreamIntegrity": {
         "sha256": "SHA-256 amont",
@@ -609,6 +627,56 @@
       "summary": "{count, plural, one {# application livre ce paquet} other {# applications livrent ce paquet}}",
       "ships": "livre {version}",
       "more": "et {count} de plus"
+    },
+    "ociScan": {
+      "pendingHold": "L'étiquette {tag} pointe vers cette image en amont, mais sert encore {serving} : cette image n'a pas encore franchi la porte de promotion (en attente depuis {time}). Une longue attente indique généralement que l'analyseur d'images ne fonctionne pas.",
+      "title": "Analyse de l'image",
+      "loading": "Chargement du détail de l'analyse de l'image…",
+      "loadError": "Le détail de l'analyse n'a pas pu être chargé.",
+      "retry": "Réessayer",
+      "gapsTitle": "{count, plural, one {# lacune de couverture} other {# lacunes de couverture}} sur {platform}",
+      "gapsHelp": "Une partie de cette plateforme n'a pas été inventoriée ou rapprochée; les constats ci-dessous ne couvrent que ce que l'analyseur a lu.",
+      "platformsScanned": "Plateformes analysées : {platforms}",
+      "scannedAt": "Analysée le {time}",
+      "platformTab": "{platform} ({count, plural, one {# touché} other {# touchés}})",
+      "viewFindings": "Constats",
+      "viewAll": "Tous les composants",
+      "zeroFindings": "0 constat parmi {count, plural, one {# composant} other {# composants}}",
+      "clean": "L'analyse n'a trouvé aucun avis sur les plateformes analysées ({platforms}), au dernier rapprochement du {time}.",
+      "unscannedNone": "Pas encore en file d'attente pour l'analyseur d'images de cette organisation. Il n'y a aucun résultat d'analyse; l'image n'est donc pas réputée saine.",
+      "unscannedPending": "En file d'attente pour analyse, sans résultat pour l'instant. L'image n'est pas réputée saine.",
+      "unscannedPendingAttempts": "En file d'attente pour analyse, sans résultat après {count, plural, one {# tentative} other {# tentatives}}. L'image n'est pas réputée saine.",
+      "unscannedFailed": "L'analyseur a abandonné après {count, plural, one {# tentative} other {# tentatives}}, et l'image n'a aucun résultat d'analyse. Elle n'est pas réputée saine.",
+      "noFeed": "Aucun analyseur d'images ne rend compte pour cette organisation; cette image n'a donc aucun résultat d'analyse. Elle n'est pas réputée saine.",
+      "columns": {
+        "component": "Composant",
+        "layer": "Couche",
+        "findings": "Constats"
+      },
+      "layer": "Couche {index}",
+      "layerUnknown": "Couche non enregistrée",
+      "source": "Paquet source : {name}",
+      "ownedBy": "Installé par {purl}",
+      "moreFindings": "{count, plural, one {# autre constat non listé} other {# autres constats non listés}}",
+      "unscored": "NON COTÉ",
+      "unscoredHelp": "L'avis ne porte aucune note de gravité, ce qui ne signifie pas une absence de risque.",
+      "reachability": {
+        "reachable": "Atteignable",
+        "not_observed": "Non observé",
+        "unknown": "Atteignabilité inconnue"
+      },
+      "notObservedHelp": "L'analyseur n'a observé aucun chemin vers ce code, ce qui ne signifie pas qu'il n'en existe aucun.",
+      "notObservedBasis": "Fondement : {basis}",
+      "confidence": "Confiance : {confidence}",
+      "closure": {
+        "inside": "Dans la fermeture du point d'entrée",
+        "outside": "Hors de la fermeture du point d'entrée",
+        "undetermined": "Fermeture du point d'entrée non déterminée"
+      },
+      "range": "{from}–{to} sur {total}",
+      "previous": "Précédent",
+      "next": "Suivant",
+      "matchedAt": "constats rapprochés pour la dernière fois le {time}"
     }
   },
   "activity": {
@@ -760,6 +828,7 @@
     "push": "écriture seule",
     "both": "lecture & écriture",
     "sbom": "Téléversement SBOM",
+    "scanner": "Analyseur d'images OCI",
     "admin": "admin",
     "audit": "audit",
     "custom": "personnalisé"
@@ -1492,6 +1561,13 @@
       "blockSsvcExploitationOff": "Désactivé",
       "blockSsvcExploitationWarn": "Avertir",
       "blockSsvcExploitationBlock": "Bloquer",
+      "ociScanEnforcement": "Application de l'analyse des images OCI",
+      "ociScanEnforcementHint": "Applique les portes de vulnérabilité ci-dessus aux extractions d'images OCI, à partir de l'analyse de chaque image propre à cette organisation. Une image sans analyse complète est refusée comme non analysée : une première extraction est donc refusée jusqu'à ce que l'analyse soit terminée. L'activer applique aussi votre réglage d'avis malveillants, qui bloque par défaut.",
+      "ociScanEnforcementOff": "Désactivé",
+      "ociScanEnforcementWarn": "Avertir",
+      "ociScanEnforcementBlock": "Bloquer",
+      "ociScanEnforcementDisabled": "L'analyse des images n'est pas activée sur cette instance (OCI_SCAN_ENABLED) : ce réglage ne peut être que Désactivé.",
+      "ociScanEnforcementNoScanner": "Aucun analyseur d'images ne s'est encore connecté pour cette organisation : ce réglage ne peut être que « Désactivé ». Démarrez d'abord un analyseur avec un jeton de service « Analyseur d'images OCI ».",
       "maxEpssPercentile": "Plafond de centile EPSS",
       "maxEpssPercentileHint": "Bloque lorsqu'un avis se classe au-dessus de ce centile (0,00–1,00). Un rang conserve sa signification lorsque FIRST recalibre le modèle, alors que le plafond de probabilité ci-dessus suit le risque absolu. Réglez l'un, l'autre ou les deux : le premier dépassement bloque. Laissez vide pour désactiver.",
       "maxEpssPercentilePlaceholder": "p. ex. 0,95"
@@ -1511,7 +1587,7 @@
         },
         "block": {
           "label": "Bloquer",
-          "hint": "Les versions dont la licence enfreint cette politique sont bloquées au téléchargement."
+          "hint": "Les versions dont la licence figure sur la liste de blocage ou ne figure pas sur la liste d'autorisation sont bloquées au téléchargement."
         }
       },
       "review": {
@@ -1534,7 +1610,7 @@
       "allow": {
         "title": "Licences autorisées",
         "addEntry": "Ajouter une licence",
-        "empty": "Aucune licence autorisée configurée. Lorsque la liste d'autorisation est vide, seule la liste de blocage s'applique."
+        "empty": "Aucune licence autorisée configurée. En mode Bloquer, une liste d'autorisation vide refuse toutes les licences; les modes Désactivé et Avertir l'ignorent."
       },
       "block": {
         "title": "Licences bloquées",
@@ -1848,6 +1924,7 @@
       "emptyNoTraffic": "Aucune récupération n'a été servie durant cette période; il n'y avait donc rien à évaluer."
     },
     "gates": {
+      "unscanned": "non analysée",
       "deprecated": "obsolète",
       "release_age": "âge de publication",
       "malicious": "malveillant",
@@ -1903,6 +1980,7 @@
       "denied": "Refusée"
     },
     "gates": {
+      "unscanned": "non analysée",
       "deprecated": "obsolète",
       "release_age": "âge de publication",
       "malicious": "malveillant",
@@ -2071,6 +2149,7 @@
       "vulnerabilities": "Analyse de vulnérabilités"
     },
     "airGapped": "Isolé du réseau — les métadonnées en amont n'ont pas été vérifiées; les avis et la licence proviennent uniquement du miroir local.",
+    "reserved": "Nom réservé — votre organisation garde ce nom pour ses propres paquets : les métadonnées en amont n'ont donc pas été vérifiées; le verdict repose uniquement sur les avis et la politique de licences.",
     "notFound": {
       "title": "Aucun paquet de ce nom",
       "hint": "{registry} n'a aucun paquet nommé {name}. Vérifiez l'orthographe.",
@@ -2173,6 +2252,10 @@
         "name": "Script d'installation",
         "what": "Refuse les composants qui exécutent du code pendant l'installation, une voie courante de compromission des environnements de build et de développement."
       },
+      "unscanned": {
+        "name": "Images OCI non analysées",
+        "what": "Refuse une image OCI pour laquelle cette organisation ne détient aucun résultat d'analyse complet, et applique aux images les contrôles de vulnérabilité ci-dessus à partir de l'analyse propre à l'organisation. Nécessite l'analyse des images sur cette instance."
+      },
       "ssvc_exploitation": {
         "name": "Exploitation active (SSVC)",
         "what": "Refuse les composants dont la vulnérabilité est évaluée comme activement exploitée. Couvre davantage que la liste des vulnérabilités exploitées connues. Nécessite le suivi des vulnérabilités."
@@ -2199,7 +2282,7 @@
       },
       "license": {
         "name": "Licence",
-        "what": "Applique votre politique de licences approuvées : refuse les composants dont la licence déclarée est bloquée, ou absente pour un écosystème qui en déclare toujours une."
+        "what": "Applique votre politique de licences. En mode Bloquer, refuse les composants dont la licence déclarée figure sur la liste de blocage, ne figure pas sur la liste d'autorisation, ou est absente pour un écosystème qui en déclare toujours une."
       }
     },
     "thresholds": {
@@ -2377,7 +2460,13 @@
         "overallSummary": {
           "healthy": "Tous les systèmes sont opérationnels",
           "degraded": "Dégradé — {detail}",
-          "down": "Hors service — base de données inaccessible"
+          "down": "Hors service — base de données inaccessible",
+          "detailJobStale": "{count, plural, one {# tâche d'arrière-plan est périmée} other {# tâches d'arrière-plan sont périmées}}",
+          "detailJobFailing": "{count, plural, one {# tâche d'arrière-plan est en échec} other {# tâches d'arrière-plan sont en échec}}",
+          "detailJobDegraded": "{count, plural, one {# tâche d'arrière-plan est dégradée} other {# tâches d'arrière-plan sont dégradées}}",
+          "detailJobsMixed": "{count} tâches d'arrière-plan sont en échec, périmées ou dégradées",
+          "detailStagingLow": "disque de transit presque plein",
+          "detailStaleSnapshots": "instantanés périmés"
         },
         "depsLabel": "Dépendances",
         "depDatabase": "Base de données",
@@ -2502,13 +2591,13 @@
       "delete": "Supprimer",
       "restore": "Restaurer",
       "deleteModalTitle": "Suppression douce du locataire",
-      "deleteConfirm": "Supprimer (suppression douce) le locataire {slug}? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).",
+      "deleteConfirm": "Supprimer (suppression douce) le locataire {slug}? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut). Toutes les sessions prennent fin, et tous ses jetons d'API, invitations en attente et liens de réinitialisation inutilisés sont révoqués définitivement, même si le locataire est restauré.",
       "disableModalTitle": "Désactiver le locataire",
-      "disableConfirm": "Désactiver {slug}? Le locataire sera entièrement verrouillé — accès aux protocoles, téléchargements, API de gestion et connexion — jusqu'à la réactivation. Les données existantes sont préservées.",
+      "disableConfirm": "Désactiver {slug}? Le locataire sera entièrement verrouillé — accès aux protocoles, téléchargements, API de gestion et connexion — jusqu'à la réactivation. Toutes les sessions prennent fin, et tous ses jetons d'API, invitations en attente et liens de réinitialisation inutilisés sont révoqués définitivement : après la réactivation, le locataire doit émettre de nouveaux jetons, y compris pour tout nœud en périphérie (edge). Les données existantes sont préservées.",
       "readOnlyModalTitle": "Passer le locataire en lecture seule",
       "readOnlyConfirm": "Passer {slug} en lecture seule? Les téléchargements continuent de fonctionner; les téléversements et les publications sont refusés. L'API de gestion et la connexion restent accessibles. Les données existantes sont préservées.",
       "enableModalTitle": "Réactiver le locataire",
-      "enableConfirm": "Réactiver {slug}? L'accès aux protocoles, les téléchargements, l'API de gestion et la connexion reprendront immédiatement.",
+      "enableConfirm": "Réactiver {slug}? L'accès aux protocoles, les téléchargements, l'API de gestion et la connexion reprendront immédiatement. Les membres se reconnectent, et les jetons d'API révoqués par la suspension le restent.",
       "statusUpdating": "Mise à jour…",
       "modal": {
         "title": "Créer un locataire",
@@ -2776,6 +2865,7 @@
       },
       "outcome": {
         "success": "Succès",
+        "degraded": "Dégradé",
         "server_error": "Erreur",
         "cancelled": "Annulée"
       },

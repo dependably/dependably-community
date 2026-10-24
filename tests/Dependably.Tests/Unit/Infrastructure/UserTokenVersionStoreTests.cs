@@ -94,6 +94,45 @@ public sealed class UserTokenVersionStoreTests : IClassFixture<InMemoryDbFixture
         Assert.Equal(0, store.FillGuardCount);
     }
 
+    [Theory]
+    [InlineData("locked")]
+    [InlineData("disabled")]
+    public async Task GetCurrentVersionAsync_NonActiveUser_ReturnsNull_AndRetiresItsFillGuard(string status)
+    {
+        // Defence in depth behind the version bump on a status change: a locked or disabled user
+        // has no current version, so even a status write that forgot to bump token_version fails
+        // the user's sessions on the next uncached read. The answer is never cached, so its guard
+        // is retired on the not-cached path like a missing row's.
+        using var memCache = new MemoryCache(new MemoryCacheOptions());
+        var store = new UserTokenVersionStore(_fixture.Store, memCache);
+        string userId = await SeedUserAsync();
+        await using (var conn = await _fixture.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE users SET account_status = @status WHERE id = @id", new { status, id = userId });
+        }
+
+        Assert.Null(await store.GetCurrentVersionAsync(userId));
+        Assert.Equal(0, store.FillGuardCount);
+    }
+
+    [Fact]
+    public async Task GetCurrentVersionAsync_ReactivatedUser_IsReadAgainWithoutWaitingForATtl()
+    {
+        // The non-active answer is not cached, so the first request after re-activation sees the
+        // user's version rather than a remembered null.
+        using var memCache = new MemoryCache(new MemoryCacheOptions());
+        var store = new UserTokenVersionStore(_fixture.Store, memCache);
+        string userId = await SeedUserAsync();
+        await using var conn = await _fixture.Store.OpenAsync();
+        await conn.ExecuteAsync("UPDATE users SET account_status = 'disabled' WHERE id = @id", new { id = userId });
+        Assert.Null(await store.GetCurrentVersionAsync(userId));
+
+        await conn.ExecuteAsync("UPDATE users SET account_status = 'active' WHERE id = @id", new { id = userId });
+
+        Assert.Equal(await ReadTokenVersionAsync(userId), await store.GetCurrentVersionAsync(userId));
+    }
+
     [Fact]
     public async Task InvalidateThatRacesAnInFlightFill_DoesNotCacheThePreBumpVersion()
     {

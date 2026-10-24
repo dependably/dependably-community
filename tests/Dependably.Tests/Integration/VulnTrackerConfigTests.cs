@@ -407,6 +407,84 @@ public sealed class InstanceVulnTrackerConfigEndpointTests : IClassFixture<Depen
 
     private const string HealthRoute = "/api/v1/instance/vuln-tracker-health";
 
+    // ── Test route ───────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Test_NothingConfigured_Is422NamingBaseUrl_AndRecordsNoProbe()
+    {
+        await using var factory = new DependablyFactory();
+        using var c = await AdminClient(factory);
+
+        var resp = await c.PostAsync(Route + "/test", content: null);
+
+        await ProblemBody.AssertValidationAsync(resp, "baseUrl");
+        await using var conn = await factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM vuln_tracker_fetch_log WHERE kind = 'probe'"));
+    }
+
+    [Fact]
+    public async Task Test_ReachedTracker_ReturnsReached_SendsTheHandshake_AndAuditsWithoutTheCredential()
+    {
+        await using var factory = new DependablyFactory { MasterKey = NewMasterKey() };
+        using var tracker = WireMock.Server.WireMockServer.Start();
+        tracker.Given(WireMock.RequestBuilders.Request.Create().WithPath("/lookup/batch").UsingPost())
+            .RespondWith(WireMock.ResponseBuilders.Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody("""{ "results": [ { "purl": "pkg:npm/%40dependably/connection-probe@0.0.0", "advisories": [] } ] }"""));
+        tracker.Given(WireMock.RequestBuilders.Request.Create().WithPath("/client/handshake").UsingPost())
+            .RespondWith(WireMock.ResponseBuilders.Response.Create().WithStatusCode(200));
+        using var c = await AdminClient(factory);
+        var put = await c.PutAsJsonAsync(Route, new
+        {
+            enabled = true,
+            baseUrl = tracker.Url,
+            token = "osvst_single_mode_credential",
+            maxStalenessHours = 168,
+            batchSize = 100,
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var resp = await c.PostAsync(Route + "/test", content: null);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var root = await ReadJson(resp);
+        Assert.True(root.GetProperty("reached").GetBoolean());
+        Assert.Contains(tracker.LogEntries, e => e.RequestMessage?.Path == "/client/handshake");
+        await using var conn = await factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string>(
+            "SELECT detail FROM audit_log WHERE action = 'instance_vuln_tracker_config_tested' ORDER BY created_at DESC LIMIT 1");
+        Assert.NotNull(detail);
+        Assert.DoesNotContain("osvst_single_mode_credential", detail);
+        Assert.True(JsonDocument.Parse(detail!).RootElement.GetProperty("handshakeSent").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Test_TrackerThatRefusesTheCredential_Is200WithReachedFalse()
+    {
+        await using var factory = new DependablyFactory { MasterKey = NewMasterKey() };
+        using var tracker = WireMock.Server.WireMockServer.Start();
+        tracker.Given(WireMock.RequestBuilders.Request.Create().WithPath("/lookup/batch").UsingPost())
+            .RespondWith(WireMock.ResponseBuilders.Response.Create().WithStatusCode(401));
+        using var c = await AdminClient(factory);
+        await c.PutAsJsonAsync(Route, new
+        {
+            enabled = true,
+            baseUrl = tracker.Url,
+            token = "osvst_revoked",
+            maxStalenessHours = 168,
+            batchSize = 100,
+        });
+
+        var resp = await c.PostAsync(Route + "/test", content: null);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var root = await ReadJson(resp);
+        Assert.False(root.GetProperty("reached").GetBoolean());
+        Assert.NotEqual("none", root.GetProperty("reason").GetString());
+    }
+
+
     [Fact]
     public async Task Member_GetHealth_Returns403()
     {
@@ -676,5 +754,152 @@ public sealed class VulnTrackerConfigMultiModeTests : IClassFixture<DependablyMu
             batchSize = 100,
         });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task SystemAdmin_Put_TokenWithoutMasterKey_Returns422AndStoresNothing()
+    {
+        using var client = await _factory.CreateSystemAdminClient();
+        await client.PutAsJsonAsync(SystemRoute, new { enabled = false, baseUrl = "" });
+
+        var resp = await client.PutAsJsonAsync(SystemRoute, new
+        {
+            enabled = true,
+            baseUrl = "https://tracker.example.com",
+            token = "osvst_would_be_plaintext",
+            maxStalenessHours = 168,
+            batchSize = 100,
+        });
+
+        await ProblemBody.AssertValidationAsync(resp, "token");
+        var root = JsonDocument.Parse(await (await client.GetAsync(SystemRoute)).Content.ReadAsStringAsync()).RootElement;
+        Assert.False(root.GetProperty("hasToken").GetBoolean());
+        Assert.False(root.GetProperty("configured").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("http://169.254.169.254/latest")]
+    [InlineData("http://169.254.170.2/v2/credentials")]
+    public async Task SystemAdmin_Put_InstanceMetadataHost_Returns422AndStoresNothing(string baseUrl)
+    {
+        using var client = await _factory.CreateSystemAdminClient();
+        await client.PutAsJsonAsync(SystemRoute, new { enabled = false, baseUrl = "" });
+
+        var resp = await client.PutAsJsonAsync(SystemRoute, new
+        {
+            enabled = true,
+            baseUrl,
+            maxStalenessHours = 168,
+            batchSize = 100,
+        });
+
+        await ProblemBody.AssertValidationAsync(resp, "baseUrl");
+        var root = JsonDocument.Parse(await (await client.GetAsync(SystemRoute)).Content.ReadAsStringAsync()).RootElement;
+        Assert.False(root.GetProperty("configured").GetBoolean());
+    }
+
+    [Fact]
+    public async Task SystemAdmin_Test_ReachedTracker_ReturnsReachedAndAuditsWithoutTheCredential()
+    {
+        await using var factory = new DependablyMultiFactory
+        {
+            MasterKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)),
+        };
+        await factory.InitializeAsync();
+        using var tracker = WireMock.Server.WireMockServer.Start();
+        tracker.Given(WireMock.RequestBuilders.Request.Create().WithPath("/lookup/batch").UsingPost())
+            .RespondWith(WireMock.ResponseBuilders.Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBody("""{ "results": [ { "purl": "pkg:npm/%40dependably/connection-probe@0.0.0", "advisories": [] } ] }"""));
+        tracker.Given(WireMock.RequestBuilders.Request.Create().WithPath("/client/handshake").UsingPost())
+            .RespondWith(WireMock.ResponseBuilders.Response.Create().WithStatusCode(200));
+        using var client = await factory.CreateSystemAdminClient();
+        var put = await client.PutAsJsonAsync(SystemRoute, new
+        {
+            enabled = true,
+            baseUrl = tracker.Url,
+            token = "osvst_probe_credential",
+            maxStalenessHours = 168,
+            batchSize = 100,
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var resp = await client.PostAsync(SystemRoute + "/test", content: null);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var root = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(root.GetProperty("reached").GetBoolean());
+        Assert.Equal("none", root.GetProperty("reason").GetString());
+        Assert.True(root.GetProperty("latencyMs").GetInt64() >= 0);
+        Assert.Contains(tracker.LogEntries, e => e.RequestMessage?.Path == "/lookup/batch"
+            && e.RequestMessage.Headers!["Authorization"].Single() == "Bearer osvst_probe_credential");
+        Assert.Contains(tracker.LogEntries, e => e.RequestMessage?.Path == "/client/handshake");
+
+        await using var conn = await factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        string? detail = await conn.ExecuteScalarAsync<string>(
+            "SELECT detail FROM audit_log WHERE action = 'system_admin.vuln_tracker_config_tested' "
+            + "ORDER BY created_at DESC LIMIT 1");
+        Assert.NotNull(detail);
+        Assert.DoesNotContain("osvst_probe_credential", detail);
+        var audited = JsonDocument.Parse(detail!).RootElement;
+        Assert.True(audited.GetProperty("reached").GetBoolean());
+        Assert.True(audited.GetProperty("handshakeSent").GetBoolean());
+        Assert.Equal(1, await conn.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM vuln_tracker_fetch_log WHERE kind = 'probe'"));
+    }
+
+    [Fact]
+    public async Task SystemAdmin_Test_UnreachableTracker_Is200WithReachedFalse_NotAnErrorStatus()
+    {
+        using var client = await _factory.CreateSystemAdminClient();
+        var put = await client.PutAsJsonAsync(SystemRoute, new
+        {
+            enabled = true,
+            baseUrl = "http://127.0.0.1:1",
+            maxStalenessHours = 168,
+            batchSize = 100,
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        try
+        {
+            var resp = await client.PostAsync(SystemRoute + "/test", content: null);
+
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var root = JsonDocument.Parse(await resp.Content.ReadAsStringAsync()).RootElement;
+            Assert.False(root.GetProperty("reached").GetBoolean());
+            Assert.NotEqual("none", root.GetProperty("reason").GetString());
+        }
+        finally
+        {
+            await client.PutAsJsonAsync(SystemRoute, new { enabled = false, baseUrl = "" });
+        }
+    }
+
+    [Fact]
+    public async Task SystemAdmin_Test_PausedConnection_IsNotDialled()
+    {
+        using var tracker = WireMock.Server.WireMockServer.Start();
+        using var client = await _factory.CreateSystemAdminClient();
+        var put = await client.PutAsJsonAsync(SystemRoute, new
+        {
+            enabled = false,
+            baseUrl = tracker.Url,
+            maxStalenessHours = 168,
+            batchSize = 100,
+        });
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        try
+        {
+            var resp = await client.PostAsync(SystemRoute + "/test", content: null);
+
+            await ProblemBody.AssertValidationAsync(resp, "baseUrl");
+            Assert.Empty(tracker.LogEntries);
+        }
+        finally
+        {
+            await client.PutAsJsonAsync(SystemRoute, new { enabled = false, baseUrl = "" });
+        }
     }
 }

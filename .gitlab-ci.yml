@@ -100,14 +100,31 @@ variables:
     - if: $CI_PIPELINE_SOURCE == "schedule"
     - *release-tag-rule
 
-# Post-merge-only jobs: side effects on real systems (SBOM publish) and scans
-# scoped to main to avoid per-MR noise (sonarqube-check). Release-tag inclusion
-# stays — removing it silently weakens the release gate by skipping required
-# jobs on tag pipelines.
+# Post-merge-only jobs with side effects on real systems (SBOM publish, image
+# publish, staging deploy). Release-tag inclusion stays — these produce the
+# release's own artefacts, so the tag pipeline must run them itself.
 .runs-on-ci-main:
   rules:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
     - *release-tag-rule
+
+# The heavy suites (tests, e2e, DAST, Sonar) are a pure function of the commit,
+# and a release tag always points at a commit whose main push pipeline already
+# ran them. Running them again on the tag doubles the load on the shared
+# runners, and two concurrent full pipelines run about 3x slower and fail on
+# timeouts. So these two providers leave out release-tag pipelines, and
+# main-pipeline-verified instead requires main's pipeline for the tagged SHA to
+# have run each .release-verified-on-main job to success. Sonar (signal-only,
+# never gating) uses .runs-on-main-not-tag without the marker.
+# release-contract-lint pins which jobs may use these providers.
+.runs-on-ci-not-tag:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+.runs-on-main-not-tag:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
 
 # Release-tag-only jobs (validate-release-tag, release-gate). Lets required
 # jobs that only ever run on release tags inherit their rule from an anchor
@@ -126,6 +143,15 @@ variables:
   variables:
     RELEASE_REQUIRED: "true"
 
+# Marker for jobs a release requires but the tag pipeline does not re-run.
+# main-pipeline-verified reads this set from the tagged commit's own
+# .gitlab-ci.yml, so the list has no second copy to drift. A job carries this
+# marker or .release-required, never both, and extends a *-not-tag provider;
+# release-contract-lint enforces both.
+.release-verified-on-main:
+  variables:
+    RELEASE_VERIFIED_ON_MAIN: "true"
+
 # Single list of required jobs, in canonical needs-object form so the alias
 # expands into exactly the shape GitLab expects. `artifacts: false` because
 # release-gate only cares about pass/fail. Edit here when adding/removing a
@@ -133,31 +159,19 @@ variables:
 # that extend .release-required.
 .release-required-jobs: &release-required-jobs
   - { job: validate-release-tag,   artifacts: false }
+  - { job: main-pipeline-verified, artifacts: false }
   - { job: lockfile-registry-guard, artifacts: false }
   - { job: image-registry-guard,   artifacts: false }
   - { job: build,                  artifacts: false }
   - { job: lint,                   artifacts: false }
-  - { job: dotnet-format,          artifacts: false }
   - { job: csp-inline-style-guard, artifacts: false }
   - { job: sql-interp-guard,       artifacts: false }
   - { job: ai-review-script-test,  artifacts: false }
   - { job: i18n-validate,          artifacts: false }
   - { job: secret-scan,            artifacts: false }
-  - { job: unit-tests,             artifacts: false }
-  - { job: api-contract,           artifacts: false }
-  - { job: integration-tests,      artifacts: false }
-  - { job: integration-tests-postgres-rls, artifacts: false }
-  - { job: schema-integrity,       artifacts: false }
-  - { job: frontend-tests,         artifacts: false }
-  - { job: e2e,                    artifacts: false }
-  - { job: e2e-api,                artifacts: false }
   - { job: sbom-backend,           artifacts: false }
   - { job: sbom-frontend,          artifacts: false }
   - { job: sbom-publish,           artifacts: false }
-  - { job: zap-baseline,           artifacts: false }
-  - { job: zap-full,               artifacts: false }
-  - { job: zap-api-management,     artifacts: false }
-  - { job: zap-api-protocol,       artifacts: false }
   - { job: sca-backend,            artifacts: false }
   - { job: sca-frontend,           artifacts: false }
 
@@ -371,6 +385,139 @@ validate-release-tag:
         || { echo "ERROR: tag $TAG implies version $VERSION but Directory.Build.props has $FILE_VERSION" >&2; exit 1; }
       echo "Tag identity verified: $TAG → $TAG_COMMIT (version $VERSION, ancestor of main)"
 
+# Stands in for the heavy suites on a release tag (see .runs-on-ci-not-tag):
+# requires main's push pipeline for the tagged SHA to have succeeded, and every
+# job extending .release-verified-on-main in that pipeline to have succeeded.
+# The set is read from this commit's .gitlab-ci.yml, the same file main's
+# pipeline ran. While main's pipeline is still running the job waits for it,
+# and because it sits in `validate`, the whole tag pipeline (build, SBOM,
+# publish) holds until main finishes, so pushing a tag straight after the merge
+# is safe. A red or cancelled main pipeline fails this job: retry main's failed
+# jobs, then retry this one — no retag needed.
+#
+# CI_JOB_TOKEN cannot list pipelines or their jobs, so this job reads them with
+# RELEASE_VERIFY_GITLAB_TOKEN: a project access token with `read_api` scope and
+# the Reporter role, stored as a protected + masked variable so only protected
+# refs (`main`, `v*` tags) see it. Without it the job fails closed.
+main-pipeline-verified:
+  stage: validate
+  extends: [.runs-on-release-tag, .release-required]
+  image: ${DEP_IMAGE_REGISTRY}/library/alpine:3@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+  needs: []
+  # A main pipeline on loaded runners takes up to ~50 minutes; the script's own
+  # deadline (80 minutes) fires first so the failure explains itself.
+  timeout: 90 minutes
+  # The default retry list includes stuck_or_timeout_failure, which would re-run
+  # an 80-minute wait twice more after main has already failed to go green.
+  retry:
+    max: 2
+    when: [runner_system_failure]
+  script:
+    - !reference [.apk-mirror-setup, script]
+    - apk add --no-cache python3 py3-yaml
+    - !reference [.gitlab-api-base, script]
+    - export API_BASE
+    - |
+      python3 <<'PY'
+      import json, os, sys, time, urllib.error, urllib.parse, urllib.request, yaml
+
+      def fail(msg):
+          print(f"main-pipeline-verified: {msg}", file=sys.stderr)
+          sys.exit(1)
+
+      TOKEN = os.environ.get('RELEASE_VERIFY_GITLAB_TOKEN', '')
+      if not TOKEN:
+          fail("RELEASE_VERIFY_GITLAB_TOKEN is not set. Create a project access token "
+               "(read_api, Reporter) and store it as a protected + masked CI/CD variable; "
+               "see CONTRIBUTING.md > Release pipeline.")
+      API = f"{os.environ['API_BASE']}/projects/{os.environ['CI_PROJECT_ID']}"
+      SHA = os.environ['CI_COMMIT_SHA']
+
+      # A redirect would carry PRIVATE-TOKEN to wherever it points; refuse it.
+      class NoRedirect(urllib.request.HTTPRedirectHandler):
+          def redirect_request(self, *args, **kwargs):
+              return None
+      opener = urllib.request.build_opener(NoRedirect)
+
+      def get(path, params):
+          req = urllib.request.Request(f"{API}/{path}?{urllib.parse.urlencode(params)}",
+                                       headers={'PRIVATE-TOKEN': TOKEN})
+          with opener.open(req, timeout=30) as r:
+              return json.load(r)
+
+      # Same parsing as release-contract-lint.
+      class Loader(yaml.SafeLoader):
+          pass
+      Loader.add_constructor('!reference', lambda loader, node: loader.construct_sequence(node))
+      with open('.gitlab-ci.yml') as f:
+          doc = yaml.load(f, Loader=Loader)
+      def extends_of(job):
+          e = job.get('extends')
+          return [e] if isinstance(e, str) else (e or [])
+      required = sorted(k for k, v in doc.items()
+                        if isinstance(v, dict) and not k.startswith('.')
+                        and {'script', 'trigger', 'run'} & v.keys()
+                        and '.release-verified-on-main' in extends_of(v))
+      if not required:
+          fail("no job extends .release-verified-on-main; refusing to pass vacuously")
+      print(f"Jobs required green in main's pipeline for {SHA[:8]}: {', '.join(required)}")
+
+      IN_PROGRESS = {'created', 'waiting_for_resource', 'preparing', 'pending', 'running', 'scheduled'}
+      start = time.monotonic()
+      api_errors = 0
+      while True:
+          elapsed = time.monotonic() - start
+          try:
+              pipes = get('pipelines', {'ref': 'main', 'sha': SHA, 'source': 'push',
+                                        'order_by': 'id', 'sort': 'desc', 'per_page': 1})
+              api_errors = 0
+          except urllib.error.HTTPError as e:
+              if e.code in (301, 302, 303, 307, 308, 401, 403, 404):
+                  fail(f"GitLab API refused the pipeline query (HTTP {e.code}); check the "
+                       f"token's scope, role and expiry")
+              pipes = None
+              api_errors += 1
+          except (urllib.error.URLError, TimeoutError, ValueError) as e:
+              pipes = None
+              api_errors += 1
+              print(f"GitLab API error: {e}", file=sys.stderr)
+          if api_errors >= 5:
+              fail("GitLab API failed 5 times in a row")
+          if pipes == []:
+              if elapsed > 10 * 60:
+                  fail(f"no main push pipeline exists for {SHA}. Was the merge pushed with "
+                       f"ci.skip? Tag a commit whose main pipeline ran.")
+              print("No main push pipeline for this SHA yet; waiting.")
+          elif pipes:
+              pipe = pipes[0]
+              if pipe['status'] == 'success':
+                  break
+              if pipe['status'] not in IN_PROGRESS:
+                  fail(f"main pipeline {pipe['id']} for this SHA is '{pipe['status']}' "
+                       f"({pipe['web_url']}). Retry its failed or cancelled jobs until it is "
+                       f"green, then retry this job.")
+              print(f"main pipeline {pipe['id']} is {pipe['status']} "
+                    f"({int(elapsed // 60)}m waited); checking again in 30s.")
+          if elapsed > 80 * 60:
+              fail("main's pipeline did not finish within 80 minutes; retry this job once it has")
+          time.sleep(30)
+
+      jobs, page = [], 1
+      while True:
+          batch = get(f"pipelines/{pipe['id']}/jobs", {'per_page': 100, 'page': page})
+          jobs += batch
+          if len(batch) < 100:
+              break
+          page += 1
+      status = {j['name']: j['status'] for j in jobs}
+      bad = [f"{n} ({status.get(n, 'absent')})" for n in required if status.get(n) != 'success']
+      if bad:
+          fail(f"main pipeline {pipe['id']} is green but these required jobs did not "
+               f"succeed in it: {', '.join(bad)}")
+      print(f"Verified: main pipeline {pipe['id']} ({pipe['web_url']}) ran all "
+            f"{len(required)} required jobs green on {SHA[:8]}.")
+      PY
+
 # Reconciles the release contract on every push: the set of jobs extending
 # .release-required must equal release-gate.needs, and every required job
 # must inherit its release-tag rule from .runs-on-ci{,-main} (no inline
@@ -448,11 +595,43 @@ release-contract-lint:
                               f"extends merging. Remove rules from that template or "
                               f"refactor into a new anchor that re-includes "
                               f"*release-tag-rule.")
+      # Verified-on-main jobs: skipped on the tag, so their proof is main's push
+      # pipeline for the same SHA. Each must therefore run on main pushes (a
+      # *-not-tag provider, which is also what keeps it off the tag), carry no
+      # rules of its own, and not also sit in the gate, whose needs: would
+      # reference a job the tag pipeline never creates.
+      NOT_TAG_PROVIDERS = {'.runs-on-ci-not-tag', '.runs-on-main-not-tag'}
+      verified = sorted(name for name, job in jobs.items()
+                        if '.release-verified-on-main' in extends_of(job))
+      if not verified:
+          errs.append("no job extends .release-verified-on-main; main-pipeline-verified would pass vacuously")
+      for name in verified:
+          job = jobs[name]
+          ext = extends_of(job)
+          if '.release-required' in ext:
+              errs.append(f"{name}: extends both .release-verified-on-main and .release-required")
+          if 'rules' in job:
+              errs.append(f"{name}: verified-on-main jobs must not define inline `rules:`")
+          providers = set(ext) & (RULE_PROVIDERS | NOT_TAG_PROVIDERS)
+          if providers != (providers & NOT_TAG_PROVIDERS) or not providers:
+              errs.append(f"{name}: verified-on-main jobs must extend exactly one of "
+                          f"{sorted(NOT_TAG_PROVIDERS)} and no other rule provider")
+          if 'parallel' in job:
+              errs.append(f"{name}: verified-on-main jobs must not use `parallel:`; "
+                          f"main-pipeline-verified matches jobs by exact name")
+      # A *-not-tag provider on a job that is neither marked nor Sonar would
+      # silently drop it from release coverage — make that a deliberate choice.
+      NOT_TAG_UNMARKED_OK = {'sonarqube-check'}
+      for name, job in jobs.items():
+          if (set(extends_of(job)) & NOT_TAG_PROVIDERS and name not in verified
+                  and name not in NOT_TAG_UNMARKED_OK):
+              errs.append(f"{name}: extends a *-not-tag provider without .release-verified-on-main")
       if errs:
           for e in errs:
               print("release-contract-lint:", e, file=sys.stderr)
           sys.exit(1)
-      print(f"release-contract-lint: {len(required)} required jobs, gate aligned.")
+      print(f"release-contract-lint: {len(required)} required jobs, gate aligned; "
+            f"{len(verified)} verified on main.")
       PY
 
 # Scans .gitlab-ci.yml for supply-chain and security misconfigurations using glsec
@@ -605,7 +784,11 @@ mirror-glsec:
 spec-code-alignment:
   stage: validate
   extends: [.runs-on-ci, .private-registry-setup]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  # The alpine variant rather than node:*-slim: the slim image's only package
+  # route is apt against deb.debian.org, which no private feed serves, whereas apk
+  # goes through .apk-mirror-setup like every other alpine job here. Same digest
+  # as the NODE_IMAGE the Dockerfiles build the frontend with.
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797
   variables:
     SDD_VERSION: "0.7.0"
     SPEC_REPO: "dependably-community.spec"
@@ -613,11 +796,10 @@ spec-code-alignment:
     # which the default shallow fetch does not reliably carry.
     GIT_DEPTH: 0
   script:
-    - |
-      set -eu
-      # ca-certificates is not in node:*-slim, and without it both the clone and
-      # the `npm i -g` below fail TLS verification against the private host.
-      apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates >/dev/null
+    # git is not in node:*-alpine; ca-certificates is what lets the clone and the
+    # `npm i -g` below verify TLS against the private host.
+    - !reference [.apk-mirror-setup, script]
+    - apk add --no-cache git ca-certificates
     # Same shape as the integration-tests clone below: CI_JOB_TOKEN as an
     # Authorization header rather than embedded in the remote URL, so it never
     # lands in .git/config, and handed to git via GIT_CONFIG_COUNT/KEY/VALUE
@@ -762,7 +944,7 @@ build-web:
   stage: build
   # Not in .release-required: gated transitively via `build`'s `needs:`.
   extends: [.private-registry-setup, .runs-on-ci]
-  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
   script:
     - npm install -g npm@12.0.1
     - cd web && npm ci && npm run build
@@ -906,7 +1088,7 @@ lint:
   # Reads only the source tree. Without this GitLab hands the job every prior stage's
   # artifacts — build's 66 MB publish directory and build-web's wwwroot — which it never opens.
   dependencies: []
-  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
   script:
     - npm install -g npm@12.0.1
     - cd web && npm ci && npm run lint && npm run lint:css && npm run check
@@ -917,7 +1099,7 @@ lint:
 # whitespace is syntactic; style runs the IDExxxx code-style analyzers against the .editorconfig.
 dotnet-format:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   # Compiles the solution from source and reads nothing the build stage produces, so waiting
   # for that stage only delays it. An empty list, not one naming the validate-stage guards:
   # a hard `needs:` edge to a job absent from the pipeline fails pipeline creation, and the
@@ -991,7 +1173,7 @@ i18n-validate:
   extends: [.runs-on-ci, .release-required]
   # Reads only the source tree; takes no prior-stage artifact.
   dependencies: []
-  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
   script:
     - node i18n/scripts/i18n-validate.js
 
@@ -1017,11 +1199,12 @@ secret-scan:
 
 unit-tests:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   # Compiles from source and reads no build-stage artifact — released from stage ordering.
   needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
+  resource_group: heavy-unit-tests
   script:
     # No --collect:"XPlat Code Coverage" here on purpose. The coverage it would produce is
     # unused: sonarqube-check re-runs the suite with its own collector. Keeping this job to
@@ -1042,7 +1225,7 @@ unit-tests:
     # mini, not full: a full dump of this test host is ~6 GB, a mini one ~480 MB (~50 MB once
     # GitLab zips the artifact), and both carry the thread stacks the diagnosis needs. Nothing
     # is written on a clean run, so the artifact costs nothing until the host actually dies.
-    - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=Schema&Category!=SchemaPostgres" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml" --blame-crash --blame-crash-dump-type mini --results-directory "$CI_PROJECT_DIR/test-results"
+    - dotnet test --filter "Category!=Integration&Category!=ApiContract&Category!=Schema&Category!=SchemaPostgres&Category!=RedisLive" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml" --blame-crash --blame-crash-dump-type mini --results-directory "$CI_PROJECT_DIR/test-results"
   after_script:
     # An OOM-killed test host and a host that died of native memory corruption are
     # INDISTINGUISHABLE above: both print "Test host process crashed", both report
@@ -1087,7 +1270,7 @@ unit-tests:
 
 api-contract:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   # Compiles from source and reads no build-stage artifact — released from stage ordering.
   needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
@@ -1102,11 +1285,12 @@ api-contract:
 
 integration-tests:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   # Compiles from source and reads no build-stage artifact — released from stage ordering.
   needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
+  resource_group: heavy-integration-tests
   script:
     - dotnet test --filter "Category=Integration&Category!=Benchmark" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration.xml"
   artifacts:
@@ -1129,11 +1313,12 @@ integration-tests:
 # pass missing its DbScope fails here as it would in production.
 integration-tests-postgres-rls:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   # Compiles from source and reads no build-stage artifact — released from stage ordering.
   needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
+  resource_group: heavy-integration-tests-postgres-rls
   services:
     - name: ${DEP_IMAGE_REGISTRY}/library/postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
       alias: postgres
@@ -1144,10 +1329,17 @@ integration-tests-postgres-rls:
     TEST_POSTGRES_CONNECTION: "Host=postgres;Port=5432;Database=dependably_test;Username=dependably;Password=dependably_test_pw"
     TEST_INTEGRATION_DB: postgres-rls
   script:
-    - dotnet test --filter "Category=Integration&Category!=Benchmark" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration-postgres-rls.xml"
+    # Coverage is collected here as well as in sonarqube-check: the Postgres-only code paths
+    # (the SQLite-to-Postgres migrator, the row-level security installer, the Postgres arms of the
+    # schema retrofits) run only against a live Postgres, and sonarqube-check merges this report
+    # with its own SQLite one.
+    - dotnet test --filter "Category=Integration&Category!=Benchmark" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --results-directory ./coverage-raw --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration-postgres-rls.xml"
+    - find coverage-raw -name 'coverage.opencover.xml' -exec mv -f {} test-results/opencover-postgres-rls.xml \;
   artifacts:
     when: always
     expire_in: 7 days
+    paths:
+      - test-results/opencover-postgres-rls.xml
     reports:
       junit: test-results/integration-postgres-rls.xml
 
@@ -1166,11 +1358,12 @@ integration-tests-postgres-rls:
 # points at the service (alias `postgres`); the database is disposable (each test resets `public`).
 schema-integrity:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   # Compiles from source and reads no build-stage artifact — released from stage ordering.
   needs: []
   image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
   tags: [amd64]
+  resource_group: heavy-schema-integrity
   services:
     - name: ${DEP_IMAGE_REGISTRY}/library/postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
       alias: postgres
@@ -1183,19 +1376,54 @@ schema-integrity:
     # pass: fail the job instead of letting the blue-green gate quietly stop comparing anything.
     SCHEMA_BACKCOMPAT_REQUIRE_BASELINE: "true"
   script:
-    - dotnet test --filter "Category=Schema|Category=SchemaPostgres" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/schema.xml"
+    # Coverage feeds sonarqube-check, which merges it with its own SQLite report: the Postgres
+    # schema-apply path runs only here.
+    - dotnet test --filter "Category=Schema|Category=SchemaPostgres" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --results-directory ./coverage-raw --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/schema.xml"
+    - find coverage-raw -name 'coverage.opencover.xml' -exec mv -f {} test-results/opencover-schema.xml \;
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - test-results/opencover-schema.xml
+    reports:
+      junit: test-results/schema.xml
+
+# HA smoke against a real Redis. Every other host-booting job runs the standalone graph, so a
+# fault that exists only when REDIS_CONNECTION_STRING is set ships unseen. Category=RedisLive:
+#   - two invalidation buses over the broker: a publish on one evicts on the other (package and
+#     org-wide messages), a message carrying a bus's own origin is dropped by that bus, and a
+#     bus's own echo does not evict a document it re-rendered after publishing;
+#   - the full host booted with REDIS_CONNECTION_STRING, polled until /health answers 200, and
+#     checked to be subscribed on the broker.
+# The tests fail rather than skip when TEST_REDIS_CONNECTION is unset, and the category is
+# excluded from every other test job, so this job is the single Redis signal.
+redis-smoke:
+  stage: test
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
+  # Compiles from source and reads no build-stage artifact — released from stage ordering.
+  needs: []
+  image: ${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3
+  tags: [amd64]
+  resource_group: heavy-redis-smoke
+  services:
+    - name: ${DEP_IMAGE_REGISTRY}/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+      alias: redis
+  variables:
+    TEST_REDIS_CONNECTION: "redis:6379"
+  script:
+    - dotnet test --filter "Category=RedisLive" --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/redis-smoke.xml"
   artifacts:
     when: always
     expire_in: 7 days
     reports:
-      junit: test-results/schema.xml
+      junit: test-results/redis-smoke.xml
 
 frontend-tests:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   # Reads only the source tree; takes no prior-stage artifact.
   dependencies: []
-  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
   script:
     - cd web
     - npm install -g npm@12.0.1
@@ -1259,7 +1487,7 @@ sca-frontend:
   extends: [.private-registry-setup, .runs-on-ci-or-schedule, .release-required]
   # Reads only the source tree; takes no prior-stage artifact.
   dependencies: []
-  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
   script:
     - cd web
     - npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
@@ -1313,12 +1541,13 @@ edge-closure-guard:
 
 e2e:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   image: ${DEP_IMAGE_REGISTRY}/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
   needs: [build]
   # Playwright image is amd64-only; on Pi runners it ran under qemu and the slow
   # emulation caused intermittent timing flakes. Pin to native amd64.
   tags: [amd64]
+  resource_group: heavy-e2e
   script:
     - cd web
     - npm install -g npm@12.0.1
@@ -1345,7 +1574,7 @@ e2e:
 # actually unverified.
 e2e-api:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci, .release-required]
+  extends: [.private-registry-setup, .runs-on-ci-not-tag, .release-verified-on-main]
   image: ${DEP_IMAGE_REGISTRY}/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
   needs: [build]
   tags: [amd64]
@@ -1374,13 +1603,20 @@ e2e-api:
 # of reach; rather than ship noise, scope sonar to post-merge.
 sonarqube-check:
   stage: test
-  extends: [.private-registry-setup, .runs-on-ci-main]
+  extends: [.private-registry-setup, .runs-on-main-not-tag]
   image: ${DEP_IMAGE_REGISTRY}/ci/ci-tools:latest   # glsec:ignore GL001 -- project-owned image: build-ci-tools publishes this tag only from a `main` push, so it always tracks the checked-in ci/docker/ci-tools.Dockerfile (whose base IS digest-pinned) and no unmerged branch can overwrite it; a digest pin here would go stale on every rebuild
   # needs bypasses stage ordering, so the ci-tools image build (present only in
   # pipelines where ci/docker/** changed) must be an explicit optional edge —
   # otherwise this job can start before the image it pulls has been pushed.
-  needs: [frontend-tests, { job: build-ci-tools, optional: true }]
+  # The two Postgres jobs supply the coverage of the Postgres-only code paths (see the
+  # reportsPaths note below).
+  needs:
+    - frontend-tests
+    - { job: build-ci-tools, optional: true }
+    - { job: integration-tests-postgres-rls, artifacts: true }
+    - { job: schema-integrity, artifacts: true }
   tags: [amd64]
+  resource_group: heavy-sonarqube-check
   variables:
     SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
     GIT_DEPTH: "0"
@@ -1407,6 +1643,9 @@ sonarqube-check:
     # never ran and "Zero Coverage Sensor" stamped every file at 0/N. OpenCover is the
     # historically-preferred C# format for SonarQube and the sensor for it (sonar.cs.
     # opencover.reportsPaths) is rock-solid. ReportGenerator converts cobertura → OpenCover.
+    # reportsPaths lists three OpenCover reports, which Sonar merges per line: this job's SQLite
+    # run, plus the integration-tests-postgres-rls and schema-integrity runs. Code that only a
+    # live Postgres executes is covered by those two reports and by no test in this job.
     # Vendored third-party source under Infrastructure/Canonicalization/Webpki/ is held
     # byte-faithful to upstream so a re-sync stays a clean diff (its own .editorconfig makes
     # the same carve-out for dotnet format and the IDE style analyzers, which Sonar does not
@@ -1421,10 +1660,10 @@ sonarqube-check:
       /k:"$SONAR_PROJECT_KEY"
       /d:sonar.token="$SONAR_TOKEN"
       /d:sonar.host.url="$SONAR_HOST_URL"
-      /d:sonar.cs.opencover.reportsPaths="test-results/opencover.xml"
+      /d:sonar.cs.opencover.reportsPaths="test-results/opencover.xml,test-results/opencover-postgres-rls.xml,test-results/opencover-schema.xml"
       /d:sonar.cs.vstest.reportsPaths="test-results/tests.trx"
       /d:sonar.javascript.lcov.reportPaths="web/coverage/lcov.info"
-      /d:sonar.coverage.exclusions="src/**/Program.cs,src/**/schema/Schema*.sql,src/**/Infrastructure/Redis/**/*.cs,src/**/Infrastructure/RedisLockoutStore.cs,src/**/Infrastructure/NpgsqlMetadataStore.cs,src/**/Storage/AzureBlobContainerAdapter.cs,src/**/Infrastructure/SpdxLicenseRepository.cs,web/src/main.js,web/src/App.svelte,web/src/locales/**,web/.stylelintrc.cjs,web/svelte.config.js,web/vite.config.js,web/vitest.config.js,web/eslint.config.js,build/extract-notices.mjs,i18n/scripts/i18n-validate.js"
+      /d:sonar.coverage.exclusions="src/**/Program.cs,src/**/schema/Schema*.sql,src/**/Infrastructure/Redis/**/*.cs,src/**/Infrastructure/RedisLockoutStore.cs,src/**/Infrastructure/NpgsqlMetadataStore.cs,src/**/Storage/AzureBlobContainerAdapter.cs,src/**/Infrastructure/SpdxLicenseRepository.cs,web/src/main.js,web/src/App.svelte,web/src/locales/**,web/.stylelintrc.cjs,web/svelte.config.js,web/vite.config.js,web/vitest.config.js,web/eslint.config.js,web/vitest.setup.js,build/**,ci/**,src/**/wwwroot/swagger/**,i18n/scripts/i18n-validate.js"
       /d:sonar.exclusions="web/e2e/**,src/**/Canonicalization/Webpki/Es6NumberSerialization/**"
       /d:sonar.test.inclusions="**/*Tests.cs,**/*.test.js,**/*.spec.js,**/*.spec.ts"
       /d:sonar.issue.ignore.multicriteria="e1,e2,e3,e4,e5,e6"
@@ -1445,15 +1684,16 @@ sonarqube-check:
     # self-contained (in-memory blob + SQLite, no external services) and are the only
     # tests that exercise several controller surfaces (webhooks, MFA, trust anchors,
     # quarantine), which otherwise report 0% and drag new-code coverage below the gate.
-    # ApiContract (boots the app to diff the live OpenAPI) and SchemaPostgres (needs a
-    # live Postgres) stay excluded — neither runs in this job's environment.
-    - dotnet test --filter "Category!=ApiContract&Category!=SchemaPostgres&Category!=Benchmark" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
+    # ApiContract (boots the app to diff the live OpenAPI), SchemaPostgres (needs a live
+    # Postgres) and RedisLive (needs a live Redis) stay excluded — none runs in this job's
+    # environment.
+    - dotnet test --filter "Category!=ApiContract&Category!=SchemaPostgres&Category!=RedisLive&Category!=Benchmark" --settings coverlet.runsettings --collect:"XPlat Code Coverage" --logger "trx;LogFileName=tests.trx" --results-directory ./test-results
     # coverlet.collector now emits opencover (per coverlet.runsettings <Format>opencover</Format>)
     # at test-results/<guid>/coverage.opencover.xml. Move to a deterministic path so the
     # scanner config can point at a literal filename.
     - find test-results -name 'coverage.opencover.xml' -exec mv -f {} test-results/opencover.xml \;
     - echo "=== artifacts SonarScanner is about to ingest ==="
-    - ls -la test-results/opencover.xml test-results/tests.trx web/coverage/lcov.info
+    - ls -la test-results/opencover.xml test-results/opencover-postgres-rls.xml test-results/opencover-schema.xml test-results/tests.trx web/coverage/lcov.info
     - echo "--- opencover header ---"
     - head -10 test-results/opencover.xml
     - dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
@@ -1616,7 +1856,7 @@ sbom-frontend:
   extends: [.private-registry-setup, .runs-on-ci, .release-required]
   # Reads only the source tree; takes no prior-stage artifact.
   dependencies: []
-  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:ffc78385a788964bb3cbab5e434ff79a10bdc25b8ae6db03fe5fe6cb14053c09
+  image: ${DEP_IMAGE_REGISTRY}/library/node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec
   script:
     - npm install -g npm@12.0.1
     - cd web && npm ci && npm run sbom
@@ -1837,12 +2077,9 @@ sbom-publish:
   interruptible: true
   timeout: 20 minutes
   variables:
+    # AI_REVIEW_URL (Ollama base URL) and AI_REVIEW_MODEL come from CI/CD variables,
+    # not this file, so the review host can move without an MR to every project.
     # Defaults; override via project CI/CD variables without editing YAML.
-    OLLAMA_URL: "http://192.168.2.25:11434" # glsec:ignore GL016 -- Ollama runs on a private LAN address; TLS is not available there
-    # 26B MoE (a4b => ~4B active params): same per-call latency as the 12B dense
-    # model on this host but stronger review quality. The earlier no-content failure
-    # at this size was the reasoning-budget bug now fixed by AI_REVIEW_THINK=false.
-    OLLAMA_MODEL: "gemma4-unsloth-novision:26b-a4b-it-qat"
     GIT_DEPTH: "20"
     # Sized by measured recall, not by the context ceiling. NUM_CTX below would allow
     # ~719000 (ci/ai-review.sh keeps NUM_CTX >= MAX_DIFF_BYTES/3 + 6000), but a
@@ -1963,10 +2200,10 @@ ai-review-architecture:
 # unscored"). OSV stays in default remote mode but is never invoked, so no OSV_LOCAL_PATH is
 # required.
 #
-# THIS LIST AND `SBOM_UPLOAD_RATE_LIMIT_PERMITS` BELOW MUST MATCH web/e2e/playwright.config.ts.
-# Playwright manages its own server locally and this block boots the one CI tests against, so a
-# knob added to only one of them makes local and CI disagree about what the product does — and
-# the local half is the one an author checks before pushing.
+# THIS LIST, THE `*__Upstream` SEEDS, AND `SBOM_UPLOAD_RATE_LIMIT_PERMITS` BELOW MUST MATCH
+# web/e2e/playwright.config.ts. Playwright manages its own server locally and this block boots
+# the one CI tests against, so a knob added to only one of them makes local and CI disagree
+# about what the product does — and the local half is the one an author checks before pushing.
 .app_boot: &app_boot |
   mkdir -p /tmp/dast/blobs
   export DB_PATH=/tmp/dast/dependably.db
@@ -2000,6 +2237,27 @@ ai-review-architecture:
   # a real DoS on any non-DAST run.
   export PROTOCOL_DEFAULT_RATE_LIMIT_PERMITS=100000
   export DISABLE_BACKGROUND_JOBS=vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,license-backfill,sbom-scan
+  # Request-time egress: DISABLE_BACKGROUND_JOBS covers only the boot-time jobs. The
+  # throwaway DB seeds the public registries as the org's upstreams, so every proxy route the
+  # scan probes with a placeholder name (a cache miss by construction) fans out to
+  # registry.npmjs.org, api.nuget.org and the rest — real egress from a job whose only
+  # legitimate network is loopback. Seed every configurable upstream with a reserved-TLD
+  # host instead (the same sentinel ProxyFetchSoakTests boots with): the request-time DNS
+  # check in UpstreamUrlValidator fails closed on it, so a miss is refused before any
+  # connection is attempted, and the scan sees the same error shape it would get from a
+  # blocked upstream. These keys only seed the row for a new org, which is exactly what this
+  # fresh database is. RPM has no default seed and the OCI upstream pair is hard-coded in
+  # UpstreamRegistrySeeder with no config key, so neither is reachable from here.
+  export PyPI__Upstream=http://upstream.invalid
+  export Npm__Upstream=http://upstream.invalid
+  export NuGet__Upstream=http://upstream.invalid
+  export Maven__Upstream=http://upstream.invalid
+  export Go__Upstream=http://upstream.invalid
+  export Go__SumDb=http://upstream.invalid
+  export Cargo__Upstream=http://upstream.invalid
+  export Apk__Upstream=http://upstream.invalid
+  export Terraform__Upstream=http://upstream.invalid
+  export Hex__Upstream=http://upstream.invalid
   # The SBOM upload surface carries its own limiter (30/min sliding, QueueLimit = 0) rather than
   # the `import` one raised above, so the knobs above do not reach it. A suite that seeds three
   # documents per project version crosses 30 in well under a minute, and QueueLimit = 0 means the
@@ -2013,6 +2271,11 @@ ai-review-architecture:
   # boolean-SQL [40018] false positive described above.
   export USAGE_REPORT_RATE_LIMIT_PERMITS=100000
   export RESCAN_RATE_LIMIT_PERMITS=100000
+  # The OCI scan API (240/min per credential) and stored-secret verification (6/min per caller,
+  # QueueLimit = 0) are management-plane routes the scan fuzzes as a system admin. A 429 landing
+  # between a probe pair reads as boolean SQL injection [40018], so both are raised with the rest.
+  export OCI_SCAN_RATE_LIMIT_PERMITS=100000
+  export SECRETS_VERIFY_RATE_LIMIT_PERMITS=100000
   # DAST log volume: a full active scan drives tens of thousands of probes, each of which
   # UseSerilogRequestLogging records as one request-completion event. At the default
   # Information level that is one ECS-JSON line per probe — the after_script's app-log dump
@@ -2061,7 +2324,7 @@ ai-review-architecture:
 # dropped one surfaces as a NEW, unaccepted finding and reds the pipeline.
 zap-baseline:
   stage: dast
-  extends: [.runs-on-ci, .release-required]
+  extends: [.runs-on-ci-not-tag, .release-verified-on-main]
   image:
     name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
@@ -2094,7 +2357,7 @@ zap-baseline:
 
 zap-full:
   stage: dast
-  extends: [.runs-on-ci-main, .release-required]
+  extends: [.runs-on-main-not-tag, .release-verified-on-main]
   image:
     name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
@@ -2103,6 +2366,7 @@ zap-full:
   # and the x64 Dependably binary fails with "Exec format error". Pin to amd64
   # runners so the published binary executes natively.
   tags: [amd64]
+  resource_group: heavy-zap-full
   interruptible: true
   variables:
     # Firefox's release/ESR channels (this image ships firefox-esr) silently
@@ -2276,12 +2540,13 @@ zap-full:
 # here, dpd_ Bearer for protocol), so the two cannot collapse into a single scan.
 zap-api-management:
   stage: dast
-  extends: [.runs-on-ci-main, .release-required]
+  extends: [.runs-on-main-not-tag, .release-verified-on-main]
   image:
     name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   tags: [amd64]
+  resource_group: heavy-zap-api-management
   interruptible: true
   script:
     - *app_boot
@@ -2331,12 +2596,13 @@ zap-api-management:
 # rationale as zap-api-management.
 zap-api-protocol:
   stage: dast
-  extends: [.runs-on-ci-main, .release-required]
+  extends: [.runs-on-main-not-tag, .release-verified-on-main]
   image:
     name: ${DEP_IMAGE_REGISTRY}/zaproxy/zap-stable:2.17.0@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
     entrypoint: [""]
   needs: [build]
   tags: [amd64]
+  resource_group: heavy-zap-api-protocol
   interruptible: true
   script:
     - *app_boot
@@ -2614,9 +2880,9 @@ publish-image:
     # the Dockerfile defaults, so this multi-arch build pulls its base layers from the
     # pull-through mirror instead of the public registries directly.
     - |
-      NODE_IMAGE="${DEP_IMAGE_REGISTRY}/library/node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66"
-      SDK_IMAGE="${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74"
-      RUNTIME_IMAGE="${DEP_IMAGE_REGISTRY}/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac"
+      NODE_IMAGE="${DEP_IMAGE_REGISTRY}/library/node:26-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797"
+      SDK_IMAGE="${DEP_IMAGE_REGISTRY}/dotnet/sdk:10.0-alpine@sha256:230c3fbae0ceedc70bca04eed2bfb5694e8b248cadbb81010f41b7a993601f55"
+      RUNTIME_IMAGE="${DEP_IMAGE_REGISTRY}/dotnet/runtime-deps:10.0-alpine@sha256:1a5dbee0a1d2bb1d038e212e8ccdbc12783b5cfbed866fe75d126ee80178a52a"
     # Fail fast, with a readable message, if the mirror is missing a linux/arm64 manifest for
     # either multi-arch base image, rather than surfacing as a bare "no match for platform" deep
     # inside the multi-stage buildx log below. NODE_IMAGE is skipped: both Dockerfiles pin it to

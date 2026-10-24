@@ -103,16 +103,44 @@ export default defineConfig({
       // not unlimited: a runaway loop in a spec should still be bounded.
       MANAGEMENT_RATE_LIMIT_PERMITS: '100000',
       ANON_RATE_LIMIT_PERMITS: '100000',
+      // Specs seed fixtures through POST /api/v1/admin/upload, which runs under the import
+      // limiter (5/min per token, QueueLimit = 0), not the push limiter. Several specs upload
+      // two or more artefacts each, so a fast runner crosses 5 within one window and the
+      // surplus uploads are refused outright. No spec pins the limiter itself.
+      IMPORT_RATE_LIMIT_PERMITS: '100000',
+      // inviteFreshAdmin mints an account per spec from one IP; the invite limiter is 20 per hour
+      // per IP and the on-demand rescan limiter is 20 per minute per caller.
+      INVITE_RATE_LIMIT_PERMITS: '100000',
+      RESCAN_RATE_LIMIT_PERMITS: '100000',
       // The SBOM specs upload a document trio per test against one admin principal, which is
       // most of the 30/min default in a single burst. Lifted for the same bounded-internal-client
       // reason as the management budget above; the limiter itself is not what those specs pin.
       SBOM_UPLOAD_RATE_LIMIT_PERMITS: '100000',
+      // license-backfill is disabled too, matching .gitlab-ci.yml: it stamps
+      // cache_artifact.license_checked_at at boot, a state change the specs must not depend on.
       // sbom-scan is disabled alongside the package scanners: it queries the OSV advisory feed
       // over the network, and every severity, CVSS and priority the project-version detail page
       // renders is derived from what it finds. Left enabled, an upload's derived state depends on
       // whether the runner has egress and on when the drain loop lands — the specs assert exact
       // rows and buckets, so the fixture documents have to be the only input.
-      DISABLE_BACKGROUND_JOBS: 'vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,sbom-scan',
+      DISABLE_BACKGROUND_JOBS: 'vuln-scan,vuln-rescan,deprecation-refresh,threat-feed,license-backfill,sbom-scan',
+      // Request-time egress, same posture as .gitlab-ci.yml's .app_boot: the throwaway DB
+      // would otherwise seed the public registries as the org's upstreams, and any proxy
+      // route a spec reaches for a name it has not pushed fans out to them. Every spec
+      // reads back what it pushed, so nothing here needs a real pull-through; seed the
+      // upstreams with a reserved-TLD host the request-time DNS check fails closed on
+      // instead. OCI's upstream pair is hard-coded in UpstreamRegistrySeeder and has no
+      // key to override.
+      PyPI__Upstream: 'http://upstream.invalid',
+      Npm__Upstream: 'http://upstream.invalid',
+      NuGet__Upstream: 'http://upstream.invalid',
+      Maven__Upstream: 'http://upstream.invalid',
+      Go__Upstream: 'http://upstream.invalid',
+      Go__SumDb: 'http://upstream.invalid',
+      Cargo__Upstream: 'http://upstream.invalid',
+      Apk__Upstream: 'http://upstream.invalid',
+      Terraform__Upstream: 'http://upstream.invalid',
+      Hex__Upstream: 'http://upstream.invalid',
     },
   } : undefined,
   globalSetup: './global-setup.ts',

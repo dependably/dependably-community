@@ -82,6 +82,16 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         _db?.HarnessStore ?? throw new InvalidOperationException("The host has not been created.");
 
     /// <summary>
+    /// What is holding the in-memory SQLite database's locks right now, and the longest holds seen
+    /// so far, for a test to print when it waits on a writer. Empty on Postgres, where there is no
+    /// shared-cache lock to hold.
+    /// </summary>
+    public string LockReport(TimeSpan minAge) =>
+        _db?.HarnessStore is TestMetadataStore sqlite
+            ? sqlite.LockDiagnostics.Report(minAge)
+            : "no sqlite lock diagnostics (not running on the in-memory sqlite store)";
+
+    /// <summary>
     /// The host's services. Reaching in marks the caller's flow as test-harness access, so seeding
     /// and assertions made outside a request are not mistaken for the host's own background work
     /// under row-level security (<see cref="TestHarnessDbScope"/>).
@@ -499,6 +509,8 @@ public sealed class DependablyFactory : WebApplicationFactory<Program>, IAsyncLi
         // publish-scoped client behaves.
         "publish-only" => """["publish:*"]""",
         "siem:read" => """["read:audit"]""",
+        // The OCI image scanner's credential: scan:oci and nothing else.
+        "scanner" => """["scan:oci"]""",
         _ => throw new ArgumentException($"Unknown test token kind '{kind}'.", nameof(kind))
     };
 

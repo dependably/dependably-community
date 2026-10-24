@@ -75,6 +75,79 @@ public sealed class SbomComponentScanUnreachableTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ScanBatchAsync_MixedHydrationFailure_DefersOnlyTheComponentWithAnUnresolvedAdvisory()
+    {
+        // A reached batch where one component's advisory never hydrated: that component stays
+        // unstamped (its hydrated sibling advisory is still linked), the rest of the batch
+        // (including one whose unhydrated id is already stored) is recorded.
+        string orgId = await OrgSeeder.InsertAsync(_db, $"mixed-hydration-{Guid.NewGuid():N}");
+        var unresolved = await SeedComponentAsync(orgId, "npm", "unresolved-pkg", "1.0.0");
+        var clean = await SeedComponentAsync(orgId, "npm", "clean-pkg", "1.0.0");
+        var stored = await SeedComponentAsync(orgId, "npm", "stored-pkg", "1.0.0");
+        await new VulnerabilityRepository(_db, _clock).UpsertVulnerabilityAsync(
+            MalAdvisory() with { Id = "GHSA-stor-ed00-0002" }, "npm", "stored-pkg");
+        var unhydratedFields = MalAdvisory() with { Summary = null, Severity = null, RawJson = null, IsHydrated = false };
+        var osv = TestOsvSource.Create(purl => purl switch
+        {
+            "pkg:npm/unresolved-pkg@1.0.0" =>
+            [
+                MalAdvisory() with { Id = "MAL-2026-0002" },
+                unhydratedFields with { Id = "GHSA-fail-edhy-0002" },
+            ],
+            "pkg:npm/stored-pkg@1.0.0" => [unhydratedFields with { Id = "GHSA-stor-ed00-0002" }],
+            _ => [],
+        });
+
+        var result = await BuildScanner(osv).ScanBatchAsync([unresolved, clean, stored], CancellationToken.None);
+
+        Assert.False(result.Deferred);
+        Assert.DoesNotContain(unresolved.Id, result.ScannedComponentIds);
+        Assert.Null(await VulnCheckedAtAsync(unresolved.Id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await VulnCheckedAtAsync(clean.Id));
+        Assert.Equal(TestTime.KnownNow.ToUtcIso(), await VulnCheckedAtAsync(stored.Id));
+        Assert.Equal(1, result.AdvisoryCountByComponentId[stored.Id]);
+
+        await using var conn = await _db.OpenAsync();
+        Assert.Equal(1, await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM sbom_component_vulns scv
+            JOIN vulnerabilities v ON v.id = scv.vuln_id
+            WHERE scv.component_id = @id AND v.osv_id = 'MAL-2026-0002'
+            """,
+            new { id = unresolved.Id }));
+    }
+
+    [Theory]
+    [InlineData("PyPI", false)]
+    [InlineData("npm", true)]
+    public async Task ScanBatchAsync_LocalDumpWithoutTheComponentsFeed_LeavesItUnscanned(
+        string dumpEcosystem, bool expectStamped)
+    {
+        // OSV_MODE=local with a dump that holds no npm feed answers every npm component empty,
+        // which is silence, not a clean result. The twin (the dump holds the npm feed) stamps.
+        string dir = Path.Combine(Path.GetTempPath(), $"sbom-osv-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(dir, "ADV-1.json"), $$"""
+                {"id":"ADV-1","summary":"other package","affected":[{"package":{"ecosystem":"{{dumpEcosystem}}","name":"unrelated-pkg"},"versions":["9.9.9"]}]}
+                """);
+            string orgId = await OrgSeeder.InsertAsync(_db, $"local-dump-{Guid.NewGuid():N}");
+            var component = await SeedComponentAsync(orgId, "npm", "left-pad", "1.3.0");
+            var osv = new LocalOsvSource(dir, NullLogger<LocalOsvSource>.Instance);
+
+            var result = await BuildScanner(osv).ScanBatchAsync([component], CancellationToken.None);
+
+            Assert.Equal(expectStamped, result.ScannedComponentIds.Contains(component.Id));
+            Assert.Equal(expectStamped, await VulnCheckedAtAsync(component.Id) is not null);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ScanBatchAsync_SourceUnreachable_WritesNoVulnLink()
     {
         string orgId = await OrgSeeder.InsertAsync(_db, $"unreachable-nolink-{Guid.NewGuid():N}");

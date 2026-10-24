@@ -135,7 +135,7 @@ public sealed class ImportController : ControllerBase
             return Error;
         }
 
-        var (orgId, actorId) = (OrgId!, ActorId);
+        var (orgId, actorId) = (OrgId, ActorId);
 
         if (!Request.HasFormContentType)
         {
@@ -340,7 +340,7 @@ public sealed class ImportController : ControllerBase
             return Error;
         }
 
-        var (orgId, actorId) = (OrgId!, ActorId);
+        var (orgId, actorId) = (OrgId, ActorId);
 
         var (form, formError) = await ReadManifestFormAsync(ct);
         if (formError is not null)
@@ -1007,7 +1007,7 @@ public sealed class ImportController : ControllerBase
 
     // ── shared helpers ────────────────────────────────────────────────────────
 
-    private async Task<(IActionResult? Error, string? OrgId, string? ActorId)> AuthorizeAdminAsync(CancellationToken ct)
+    private async Task<(IActionResult? Error, string OrgId, string? ActorId)> AuthorizeAdminAsync(CancellationToken ct)
     {
         // The endpoint already carries [RequireCapability(Capabilities.ImportAll)] for the
         // protocol-level cap check; this guard call now provides the 404-on-cross-tenant
@@ -1017,13 +1017,12 @@ public sealed class ImportController : ControllerBase
         var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         if (deny is not null)
         {
-            return (deny, null, null);
+            return (deny, null!, null);
         }
 
-        var ctx = (TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!;
         string? actorId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                    ?? User.FindFirst("sub")?.Value;
-        return (null, ctx.TenantId, actorId);
+        return (null, HttpContext.RequireTenantId(), actorId);
     }
 
     private static RejectedOutcome Reject(string filename, string code, string message,

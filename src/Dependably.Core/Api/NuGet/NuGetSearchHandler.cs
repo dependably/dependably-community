@@ -185,7 +185,7 @@ public sealed class NuGetSearchHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string normalizedId, CancellationToken ct)
     {
-        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct);
+        var versions = await inventory.ListServeableVersionsAsync(orgId, packageId, "nuget", normalizedId, ct: ct);
         return ArtifactInventoryRepository.DedupeProxyVersionsByVersion(versions);
     }
 }

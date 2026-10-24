@@ -27,17 +27,31 @@ namespace Dependably.Infrastructure.Usage;
 /// Both recompute paths write only a posture that changed, so a pass over a fleet whose postures
 /// all hold writes nothing.
 /// </para>
+///
+/// <para>
+/// The posture gates requests (uploads refused, downloads throttled), and the subdomain resolver
+/// caches it with the rest of the tenant's context. The fleet sweep evicts the resolver's entry
+/// for every org it wrote, after the write, so a tripped or cleared cap takes effect on this
+/// replica's next request. The single-org path leaves eviction to its caller, which knows the
+/// slug.
+/// </para>
 /// </summary>
 public sealed class UsagePostureRepository
 {
     private readonly IMetadataStore _db;
     private readonly TimeProvider _time;
+    private readonly ITenantSlugCacheInvalidator? _tenantCache;
 
-    public UsagePostureRepository(IMetadataStore db, TimeProvider time, DefaultUsageCaps? defaults = null)
+    public UsagePostureRepository(
+        IMetadataStore db,
+        TimeProvider time,
+        DefaultUsageCaps? defaults = null,
+        ITenantSlugCacheInvalidator? tenantCache = null)
     {
         _db = db;
         _time = time;
         Defaults = defaults ?? DefaultUsageCaps.None;
+        _tenantCache = tenantCache;
     }
 
     /// <summary>The instance-wide default caps the effective caps fall back to.</summary>
@@ -165,14 +179,23 @@ public sealed class UsagePostureRepository
         // xtenant: the posture sweep evaluates every org with caps in one pass.
         await using var conn = await _db.OpenCrossTenantAsync("usage posture sweep", ct);
         var changes = await EvaluateFleetAsync(conn);
-        return await ApplyFleetAsync(conn, changes);
+        var written = await ApplyFleetAsync(conn, changes);
+
+        // Each write above is its own committed statement, so every eviction lands after the row
+        // it reflects is visible to the resolver's next read.
+        foreach (var change in written)
+        {
+            _tenantCache?.InvalidateSlug(change.Slug);
+        }
+
+        return written.Count;
     }
 
     /// <summary>
     /// A posture the sweep computed for an org, beside the posture it read for that org at the
-    /// start of the pass.
+    /// start of the pass. <see cref="Slug"/> is the key the subdomain resolver caches the org under.
     /// </summary>
-    internal sealed record PostureChange(string OrgId, string ReadPosture, string NewPosture);
+    internal sealed record PostureChange(string OrgId, string Slug, string ReadPosture, string NewPosture);
 
     /// <summary>
     /// The sweep's read phase: every candidate org whose computed posture differs from the one
@@ -187,7 +210,7 @@ public sealed class UsagePostureRepository
         // subquery is correlated on orgs.id, so each org is judged only by its own rows.
         var candidates = (await conn.QueryAsync<PostureRow>(
                 """
-                SELECT o.id AS OrgId, o.usage_posture AS Posture
+                SELECT o.id AS OrgId, o.slug AS Slug, o.usage_posture AS Posture
                 FROM orgs o
                 WHERE @allOrgs = 1
                    OR o.usage_posture <> 'normal'
@@ -252,7 +275,7 @@ public sealed class UsagePostureRepository
             string posture = UsagePostureEvaluator.Evaluate(caps, usage);
             if (!string.Equals(posture, candidate.Posture, StringComparison.Ordinal))
             {
-                changes.Add(new PostureChange(candidate.OrgId, candidate.Posture, posture));
+                changes.Add(new PostureChange(candidate.OrgId, candidate.Slug, candidate.Posture, posture));
             }
         }
 
@@ -263,17 +286,22 @@ public sealed class UsagePostureRepository
     /// The sweep's write phase. Each write is a compare-and-set on the posture the read phase saw:
     /// an org whose posture moved in between — an operator's usage-limits PATCH recomputed it from
     /// newer caps — is left as the PATCH set it, rather than overwritten with a posture computed
-    /// from caps that no longer exist. The next pass evaluates it afresh. Returns the number of
-    /// orgs written.
+    /// from caps that no longer exist. The next pass evaluates it afresh. Returns the changes that
+    /// were written.
     /// </summary>
-    internal static async Task<int> ApplyFleetAsync(DbConnection conn, IReadOnlyList<PostureChange> changes)
+    internal static async Task<IReadOnlyList<PostureChange>> ApplyFleetAsync(
+        DbConnection conn, IReadOnlyList<PostureChange> changes)
     {
-        int written = 0;
+        var written = new List<PostureChange>();
         foreach (var change in changes)
         {
-            written += await conn.ExecuteAsync(
+            int rows = await conn.ExecuteAsync(
                 "UPDATE orgs SET usage_posture = @newPosture WHERE id = @orgId AND usage_posture = @readPosture",
                 new { orgId = change.OrgId, newPosture = change.NewPosture, readPosture = change.ReadPosture });
+            if (rows > 0)
+            {
+                written.Add(change);
+            }
         }
 
         return written;
@@ -346,6 +374,7 @@ public sealed class UsagePostureRepository
     private sealed class PostureRow
     {
         public string OrgId { get; init; } = "";
+        public string Slug { get; init; } = "";
         public string Posture { get; init; } = "";
     }
 }

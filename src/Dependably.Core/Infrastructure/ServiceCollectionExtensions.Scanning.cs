@@ -72,6 +72,7 @@ public static partial class ServiceCollectionExtensions
         {
             // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
             UseProxy = false,
+            UseCookies = false,
             AllowAutoRedirect = false,
             ConnectCallback = sp.GetRequiredService<Dependably.Security.OperatorEndpointConnectGate>()
                 .Callback.ConnectAsync,
@@ -127,6 +128,7 @@ public static partial class ServiceCollectionExtensions
             {
                 // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
                 UseProxy = false,
+                UseCookies = false,
                 AllowAutoRedirect = false,
                 ConnectCallback = sp.GetRequiredService<Dependably.Security.SsrfConnectCallback>().ConnectAsync,
             });
@@ -162,6 +164,7 @@ public static partial class ServiceCollectionExtensions
         {
             // UseProxy=false: an ambient HTTP(S)_PROXY would make ConnectCallback vet the proxy, not the target.
             UseProxy = false,
+            UseCookies = false,
             AllowAutoRedirect = false,
             ConnectCallback = sp.GetRequiredService<Dependably.Security.SsrfConnectCallback>().ConnectAsync,
         });

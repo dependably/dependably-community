@@ -284,6 +284,391 @@ public sealed class HexRegistryCodecTests
     }
 
     [Fact]
+    public void Signed_RoundTripsWithAndWithoutASignature()
+    {
+        var signed = HexRegistryCodec.DecodeSigned(HexRegistryCodec.EncodeSigned(new HexSigned(new byte[] { 1, 2, 3 }, new byte[] { 9, 8 })));
+        var unsigned = HexRegistryCodec.DecodeSigned(HexRegistryCodec.EncodeSigned(new HexSigned(new byte[] { 4 }, null)));
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, signed.Payload);
+        Assert.Equal(new byte[] { 9, 8 }, signed.Signature);
+        Assert.Equal(new byte[] { 4 }, unsigned.Payload);
+        Assert.Null(unsigned.Signature);
+    }
+
+    [Fact]
+    public void Signed_PayloadIsRequired_AndFieldsOfTheWrongWireTypeAreSkipped()
+    {
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeSigned(Pb.Cat(Pb.Vint(1, 5), Pb.Vint(2, 6), Pb.Vint(9, 1))));
+
+        Assert.Contains("Signed.payload", ex.Message);
+        var ok = HexRegistryCodec.DecodeSigned(Pb.Cat(Pb.Vint(2, 6), Pb.Bytes(1, new byte[] { 7 }), Pb.Fixed32(9, 1.5f)));
+        Assert.Equal(new byte[] { 7 }, ok.Payload);
+        Assert.Null(ok.Signature);
+    }
+
+    [Fact]
+    public void Names_RoundTripWithUpdatedAtTimestamps()
+    {
+        var names = new HexNames("acme", new[]
+        {
+            new HexNameEntry("jason", new HexTimestamp(1_700_000_000, 5)),
+            new HexNameEntry("plug"),
+        });
+
+        var decoded = HexRegistryCodec.DecodeNames(HexRegistryCodec.EncodeNames(names));
+
+        Assert.Equal("acme", decoded.Repository);
+        Assert.Equal(new HexTimestamp(1_700_000_000, 5), decoded.Packages[0].UpdatedAt);
+        Assert.Null(decoded.Packages[1].UpdatedAt);
+        Assert.Equal(new[] { "jason", "plug" }, decoded.Packages.Select(p => p.Name));
+    }
+
+    [Theory]
+    [InlineData("name", "Names.Package.name")]
+    [InlineData("seconds", "Timestamp.seconds")]
+    [InlineData("nanos", "Timestamp.nanos")]
+    public void NameEntry_MissingRequiredPieces_AreRefusedByName(string missing, string expectedField)
+    {
+        byte[] entry = missing switch
+        {
+            "name" => Pb.Cat(Pb.Vint(1, 3), Pb.Msg(3, Pb.Vint(1, 1), Pb.Vint(2, 2))),
+            "seconds" => Pb.Cat(Pb.Str(1, "jason"), Pb.Msg(3, Pb.Vint(2, 2))),
+            _ => Pb.Cat(Pb.Str(1, "jason"), Pb.Msg(3, Pb.Vint(1, 1))),
+        };
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeNames(Pb.Cat(Pb.Msg(1, entry), Pb.Str(2, "hexpm"))));
+
+        Assert.Contains(expectedField, ex.Message);
+    }
+
+    [Fact]
+    public void Names_RepositoryIsRequired_AndUnknownFieldsInsideEntriesAreSkipped()
+    {
+        byte[] entry = Pb.Cat(Pb.Str(1, "jason"), Pb.Fixed32(4, 1f), Pb.Vint(8, 3), Pb.Msg(3, Pb.Vint(1, 10), Pb.Vint(2, 20), Pb.Str(3, "x")));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeNames(Pb.Msg(1, entry)));
+        var ok = HexRegistryCodec.DecodeNames(Pb.Cat(Pb.Msg(1, entry), Pb.Str(2, "hexpm")));
+
+        Assert.Contains("Names.repository", ex.Message);
+        Assert.Equal(new HexTimestamp(10, 20), ok.Packages[0].UpdatedAt);
+    }
+
+    [Fact]
+    public void Versions_RequireRepositoryAndPackageName_AndSkipMismatchedWireTypes()
+    {
+        var noRepo = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeVersions(Pb.Msg(1, Pb.Str(1, "jason"))));
+        var noName = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeVersions(
+            Pb.Cat(Pb.Msg(1, Pb.Vint(1, 1), Pb.Str(2, "1.0.0")), Pb.Str(2, "hexpm"))));
+        var tolerant = HexRegistryCodec.DecodeVersions(Pb.Cat(
+            Pb.Msg(1, Pb.Str(1, "jason"), Pb.Vint(2, 1), Pb.Str(2, "1.4.1"), Pb.Str(4, "ignored"), Pb.Str(3, "\u0000"), Pb.Vint(5, 0)),
+            Pb.Vint(1, 0),
+            Pb.Vint(2, 0),
+            Pb.Str(2, "hexpm")));
+
+        Assert.Contains("Versions.repository", noRepo.Message);
+        Assert.Contains("Versions.Package.name", noName.Message);
+        var entry = Assert.Single(tolerant.Packages);
+        Assert.Equal(new[] { "1.4.1" }, entry.Versions);
+        Assert.Equal(new[] { 0 }, entry.WithAdvisories);
+        Assert.Equal(new[] { 0 }, entry.Retired);
+    }
+
+    [Fact]
+    public void Package_DependencyWithOptionalFalse_KeepsTheExplicitFalse()
+    {
+        var package = new HexPackage("phoenix", "hexpm", new[]
+        {
+            new HexRelease("1.7.0", new byte[32], new[] { new HexDependency("plug", "~> 1.14", Optional: false) }),
+        }, Array.Empty<HexSecurityAdvisory>());
+
+        var decoded = HexRegistryCodec.DecodePackage(HexRegistryCodec.EncodePackage(package));
+
+        Assert.False(Assert.Single(Assert.Single(decoded.Releases).Dependencies).Optional);
+        Assert.Null(decoded.Releases[0].AdvisoryIndexes);
+        Assert.Null(decoded.Releases[0].Retired);
+    }
+
+    [Fact]
+    public void Package_RetirementWithoutAMessage_RoundTripsWithANullMessage()
+    {
+        var package = new HexPackage("phoenix", "hexpm", new[]
+        {
+            new HexRelease("1.7.0", new byte[32], Array.Empty<HexDependency>(), new HexRetirementStatus(HexRetirementReason.Renamed)),
+        }, Array.Empty<HexSecurityAdvisory>());
+
+        var retired = HexRegistryCodec.DecodePackage(HexRegistryCodec.EncodePackage(package)).Releases[0].Retired;
+
+        Assert.Equal(HexRetirementReason.Renamed, retired!.Reason);
+        Assert.Null(retired.Message);
+    }
+
+    [Fact]
+    public void Release_AdvisoryIndexes_AcceptPackedAndUnpackedRuns()
+    {
+        byte[] release = Pb.Cat(Pb.Str(1, "1.0.0"), Pb.Bytes(2, new byte[32]), Pb.Vint(6, 4), Pb.Bytes(6, new byte[] { 0x01, 0x02 }));
+        byte[] package = Pb.Cat(Pb.Msg(1, release), Pb.Str(2, "jason"), Pb.Str(3, "hexpm"));
+
+        var decoded = HexRegistryCodec.DecodePackage(package);
+
+        Assert.Equal(new uint[] { 4, 1, 2 }, decoded.Releases[0].AdvisoryIndexes);
+    }
+
+    [Theory]
+    [InlineData("version", "Release.version")]
+    [InlineData("checksum", "Release.inner_checksum")]
+    public void Release_MissingRequiredFields_AreRefusedByName(string missing, string expectedField)
+    {
+        byte[] release = missing == "version"
+            ? Pb.Bytes(2, new byte[32])
+            : Pb.Str(1, "1.0.0");
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePackage(
+            Pb.Cat(Pb.Msg(1, release), Pb.Str(2, "jason"), Pb.Str(3, "hexpm"))));
+
+        Assert.Contains(expectedField, ex.Message);
+    }
+
+    [Fact]
+    public void Package_WrongWireTypesAndUnknownFields_AreSkippedInsideReleases()
+    {
+        byte[] release = Pb.Cat(
+            Pb.Vint(1, 1), Pb.Str(1, "2.0.0"),
+            Pb.Vint(2, 1), Pb.Bytes(2, new byte[32]),
+            Pb.Vint(3, 1), Pb.Vint(4, 1), Pb.Vint(5, 1), Pb.Vint(7, 1),
+            Pb.Fixed32(30, 2f));
+        byte[] package = Pb.Cat(Pb.Vint(1, 1), Pb.Msg(1, release), Pb.Vint(2, 1), Pb.Str(2, "jason"), Pb.Vint(3, 1), Pb.Str(3, "hexpm"), Pb.Vint(4, 1));
+
+        var decoded = HexRegistryCodec.DecodePackage(package);
+
+        Assert.Equal("jason", decoded.Name);
+        var only = Assert.Single(decoded.Releases);
+        Assert.Equal("2.0.0", only.Version);
+        Assert.Empty(only.Dependencies);
+        Assert.Null(only.Retired);
+        Assert.Null(only.OuterChecksum);
+        Assert.Null(only.PublishedAt);
+        Assert.Empty(decoded.Advisories);
+    }
+
+    [Theory]
+    [InlineData("package", "Dependency.package")]
+    [InlineData("requirement", "Dependency.requirement")]
+    public void Dependency_MissingRequiredFields_AreRefusedByName(string missing, string expectedField)
+    {
+        byte[] dependency = missing == "package"
+            ? Pb.Cat(Pb.Str(2, "~> 1.0"), Pb.Vint(1, 1), Pb.Str(3, "not-a-varint"))
+            : Pb.Cat(Pb.Str(1, "jason"), Pb.Vint(2, 1));
+        byte[] release = Pb.Cat(Pb.Str(1, "1.0.0"), Pb.Bytes(2, new byte[32]), Pb.Msg(3, dependency));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePackage(
+            Pb.Cat(Pb.Msg(1, release), Pb.Str(2, "phoenix"), Pb.Str(3, "hexpm"))));
+
+        Assert.Contains(expectedField, ex.Message);
+    }
+
+    [Fact]
+    public void Retirement_MissingReason_IsRefused()
+    {
+        byte[] release = Pb.Cat(Pb.Str(1, "1.0.0"), Pb.Bytes(2, new byte[32]), Pb.Msg(4, Pb.Str(1, "x"), Pb.Str(2, "gone"), Pb.Vint(9, 1)));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePackage(
+            Pb.Cat(Pb.Msg(1, release), Pb.Str(2, "phoenix"), Pb.Str(3, "hexpm"))));
+
+        Assert.Contains("RetirementStatus.reason", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(1, "SecurityAdvisory.id")]
+    [InlineData(2, "SecurityAdvisory.summary")]
+    [InlineData(3, "SecurityAdvisory.html_url")]
+    [InlineData(6, "SecurityAdvisory.api_url")]
+    public void Advisory_MissingRequiredFields_AreRefusedByName(int omittedField, string expectedField)
+    {
+        var fields = new List<byte[]>();
+        foreach (int field in new[] { 1, 2, 3, 6 })
+        {
+            fields.Add(field == omittedField ? Pb.Vint(field, 1) : Pb.Str(field, "v"));
+        }
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePackage(
+            Pb.Cat(Pb.Str(2, "phoenix"), Pb.Str(3, "hexpm"), Pb.Msg(4, fields.ToArray()))));
+
+        Assert.Contains(expectedField, ex.Message);
+    }
+
+    [Fact]
+    public void Advisory_MismatchedWireTypesForOptionalFields_AreSkipped()
+    {
+        byte[] advisory = Pb.Cat(
+            Pb.Str(1, "GHSA-aaaa"), Pb.Str(2, "summary"), Pb.Str(3, "https://osv.dev/x"), Pb.Str(6, "https://api.osv.dev/x"),
+            Pb.Str(4, "high"), Pb.Vint(5, 7), Pb.Vint(7, 1), Pb.Fixed32(40, 1f));
+
+        var decoded = HexRegistryCodec.DecodePackage(Pb.Cat(Pb.Str(2, "phoenix"), Pb.Str(3, "hexpm"), Pb.Msg(4, advisory)));
+
+        var only = Assert.Single(decoded.Advisories);
+        Assert.Null(only.Severity);
+        Assert.Null(only.CvssScore);
+        Assert.Null(only.Aliases);
+    }
+
+    [Fact]
+    public void Policy_RoundTripsRestrictionsOverridesAndEveryOptionalField()
+    {
+        var policy = new HexPolicy("acme", "strict", HexVisibility.Public, new[]
+        {
+            new HexRepositoryPolicy(
+                "hexpm",
+                new HexRestriction(HexAdvisorySeverity.High, new[] { HexRetirementReason.Security, HexRetirementReason.Invalid }, "P7D"),
+                new[]
+                {
+                    new HexOverride(HexOverrideAction.Allow, new HexPackageRef("jason", "~> 1.4"), "GHSA-aaaa", HexRetirementReason.Deprecated, "known-safe"),
+                    new HexOverride(HexOverrideAction.Deny, new HexPackageRef("plug")),
+                }),
+            new HexRepositoryPolicy("acme", null, Array.Empty<HexOverride>()),
+        }, "A strict policy");
+
+        var decoded = HexRegistryCodec.DecodePolicy(HexRegistryCodec.EncodePolicy(policy));
+
+        Assert.Equal("A strict policy", decoded.Description);
+        Assert.Equal(HexVisibility.Public, decoded.Visibility);
+        var hexpm = decoded.Repositories[0];
+        Assert.Equal(HexAdvisorySeverity.High, hexpm.Restriction!.AdvisoryMinSeverity);
+        Assert.Equal(new[] { HexRetirementReason.Security, HexRetirementReason.Invalid }, hexpm.Restriction.RetirementReasons);
+        Assert.Equal("P7D", hexpm.Restriction.Cooldown);
+        Assert.Equal(HexOverrideAction.Allow, hexpm.Overrides[0].Action);
+        Assert.Equal("~> 1.4", hexpm.Overrides[0].Ref.Requirement);
+        Assert.Equal("GHSA-aaaa", hexpm.Overrides[0].AdvisoryId);
+        Assert.Equal(HexRetirementReason.Deprecated, hexpm.Overrides[0].RetirementReason);
+        Assert.Equal("known-safe", hexpm.Overrides[0].Comment);
+        Assert.Equal(HexOverrideAction.Deny, hexpm.Overrides[1].Action);
+        Assert.Null(hexpm.Overrides[1].Ref.Requirement);
+        Assert.Null(hexpm.Overrides[1].AdvisoryId);
+        Assert.Null(hexpm.Overrides[1].RetirementReason);
+        Assert.Null(hexpm.Overrides[1].Comment);
+        Assert.Null(decoded.Repositories[1].Restriction);
+        Assert.Empty(decoded.Repositories[1].Overrides);
+    }
+
+    [Fact]
+    public void Policy_WithoutOptionalPieces_RoundTripsAsNulls()
+    {
+        var policy = new HexPolicy("acme", "open", HexVisibility.Private, new[]
+        {
+            new HexRepositoryPolicy("hexpm", new HexRestriction(null, Array.Empty<HexRetirementReason>(), null), Array.Empty<HexOverride>()),
+        });
+
+        var decoded = HexRegistryCodec.DecodePolicy(HexRegistryCodec.EncodePolicy(policy));
+
+        Assert.Null(decoded.Description);
+        var restriction = decoded.Repositories[0].Restriction!;
+        Assert.Null(restriction.AdvisoryMinSeverity);
+        Assert.Empty(restriction.RetirementReasons);
+        Assert.Null(restriction.Cooldown);
+    }
+
+    [Theory]
+    [InlineData("repository", "Policy.repository")]
+    [InlineData("name", "Policy.name")]
+    public void Policy_MissingTopLevelFields_AreRefusedByName(string missing, string expectedField)
+    {
+        byte[] bytes = missing == "repository"
+            ? Pb.Cat(Pb.Vint(1, 1), Pb.Str(2, "p"), Pb.Vint(4, 1))
+            : Pb.Cat(Pb.Str(1, "acme"), Pb.Vint(2, 1), Pb.Vint(4, 1));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePolicy(bytes));
+
+        Assert.Contains(expectedField, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("repo", "RepositoryPolicy.repository")]
+    [InlineData("action", "Override.action")]
+    [InlineData("ref", "Override.ref")]
+    [InlineData("refpackage", "PackageRef.package")]
+    public void Policy_MissingNestedFields_AreRefusedByName(string missing, string expectedField)
+    {
+        byte[] overrideBody = missing switch
+        {
+            "action" => Pb.Msg(2, Pb.Str(1, "jason")),
+            "ref" => Pb.Vint(1, 0),
+            "refpackage" => Pb.Cat(Pb.Vint(1, 0), Pb.Msg(2, Pb.Str(2, "~> 1.0"), Pb.Vint(1, 1))),
+            _ => Pb.Cat(Pb.Vint(1, 0), Pb.Msg(2, Pb.Str(1, "jason"))),
+        };
+        byte[] repoPolicy = missing == "repo"
+            ? Pb.Cat(Pb.Vint(1, 1), Pb.Msg(3, overrideBody))
+            : Pb.Cat(Pb.Str(1, "hexpm"), Pb.Msg(3, overrideBody));
+        byte[] bytes = Pb.Cat(Pb.Str(1, "acme"), Pb.Str(2, "p"), Pb.Vint(4, 0), Pb.Msg(5, repoPolicy));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePolicy(bytes));
+
+        Assert.Contains(expectedField, ex.Message);
+    }
+
+    [Fact]
+    public void Policy_WrongWireTypesAndUnknownFields_AreSkippedAtEveryLevel()
+    {
+        byte[] overrideBody = Pb.Cat(
+            Pb.Str(1, "x"), Pb.Vint(1, 1), Pb.Vint(2, 1), Pb.Msg(2, Pb.Str(1, "jason"), Pb.Vint(2, 1), Pb.Vint(9, 1)),
+            Pb.Vint(3, 1), Pb.Vint(5, 1), Pb.Str(4, "x"), Pb.Vint(9, 1));
+        byte[] restriction = Pb.Cat(Pb.Str(1, "x"), Pb.Vint(2, 1), Pb.Vint(3, 1), Pb.Fixed32(9, 1f));
+        byte[] repoPolicy = Pb.Cat(Pb.Vint(1, 1), Pb.Str(1, "hexpm"), Pb.Vint(2, 1), Pb.Msg(2, restriction), Pb.Vint(3, 1), Pb.Msg(3, overrideBody), Pb.Vint(9, 1));
+        byte[] bytes = Pb.Cat(
+            Pb.Vint(1, 1), Pb.Str(1, "acme"), Pb.Vint(2, 1), Pb.Str(2, "p"), Pb.Vint(3, 1), Pb.Str(4, "x"), Pb.Vint(4, 1),
+            Pb.Vint(5, 1), Pb.Msg(5, repoPolicy), Pb.Vint(9, 1));
+
+        var decoded = HexRegistryCodec.DecodePolicy(bytes);
+
+        Assert.Null(decoded.Description);
+        var repo = Assert.Single(decoded.Repositories);
+        Assert.Equal("hexpm", repo.Repository);
+        Assert.Null(repo.Restriction!.AdvisoryMinSeverity);
+        Assert.Null(repo.Restriction.Cooldown);
+        Assert.Equal(new[] { HexRetirementReason.Invalid }, repo.Restriction.RetirementReasons);
+        var only = Assert.Single(repo.Overrides);
+        Assert.Equal(HexOverrideAction.Deny, only.Action);
+        Assert.Null(only.AdvisoryId);
+        Assert.Null(only.RetirementReason);
+        Assert.Null(only.Comment);
+    }
+
+    [Fact]
+    public void Timestamp_MismatchedWireTypesAreSkipped_ThenRequiredFieldsAreEnforced()
+    {
+        byte[] entry = Pb.Cat(Pb.Str(1, "jason"), Pb.Msg(3, Pb.Str(1, "x"), Pb.Str(2, "y")));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeNames(Pb.Cat(Pb.Msg(1, entry), Pb.Str(2, "hexpm"))));
+
+        Assert.Contains("Timestamp.seconds", ex.Message);
+    }
+
+    [Fact]
+    public void RepeatedEntries_BeyondTheElementLimit_AreRefused()
+    {
+        byte[] entry = Pb.Msg(1, Pb.Str(1, "a"));
+        byte[] payload = new byte[entry.Length * (HexRegistryCodec.MaxRepeatedElements + 1)];
+        for (int i = 0; i <= HexRegistryCodec.MaxRepeatedElements; i++)
+        {
+            entry.CopyTo(payload, i * entry.Length);
+        }
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeNames(payload));
+
+        Assert.Contains("repeated field exceeds the element limit", ex.Message);
+    }
+
+    [Fact]
+    public void PayloadOverTheSizeLimit_IsRefusedByEveryDecoderBeforeWalking()
+    {
+        byte[] oversized = new byte[HexRegistryCodec.MaxPayloadBytes + 1];
+
+        Assert.Contains("byte limit", Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeSigned(oversized)).Message);
+        Assert.Contains("byte limit", Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeNames(oversized)).Message);
+        Assert.Contains("byte limit", Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodeVersions(oversized)).Message);
+        Assert.Contains("byte limit", Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePackage(oversized)).Message);
+        Assert.Contains("byte limit", Assert.Throws<HexProtocolException>(() => HexRegistryCodec.DecodePolicy(oversized)).Message);
+    }
+
+    [Fact]
     public void Timestamp_ConvertsBothWays()
     {
         var instant = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero).AddTicks(1234567);
@@ -292,6 +677,37 @@ public sealed class HexRegistryCodecTests
         Assert.Equal(instant.ToUnixTimeSeconds(), ts.Seconds);
         Assert.Equal(123456700, ts.Nanos);
         Assert.Equal(instant, ts.ToDateTimeOffset());
+    }
+
+    /// <summary>Hand-assembled protobuf wire bytes, so a test controls the exact tag and wire type of every field.</summary>
+    private static class Pb
+    {
+        public static byte[] Cat(params byte[][] parts) => parts.SelectMany(p => p).ToArray();
+
+        public static byte[] Varint(ulong value)
+        {
+            var bytes = new List<byte>();
+            while (value >= 0x80)
+            {
+                bytes.Add((byte)(value | 0x80));
+                value >>= 7;
+            }
+
+            bytes.Add((byte)value);
+            return bytes.ToArray();
+        }
+
+        public static byte[] Tag(int field, int wire) => Varint(((ulong)field << 3) | (uint)wire);
+
+        public static byte[] Vint(int field, ulong value) => Cat(Tag(field, 0), Varint(value));
+
+        public static byte[] Bytes(int field, byte[] body) => Cat(Tag(field, 2), Varint((ulong)body.Length), body);
+
+        public static byte[] Str(int field, string value) => Bytes(field, System.Text.Encoding.UTF8.GetBytes(value));
+
+        public static byte[] Msg(int field, params byte[][] parts) => Bytes(field, Cat(parts));
+
+        public static byte[] Fixed32(int field, float value) => Cat(Tag(field, 5), BitConverter.GetBytes(value));
     }
 
     /// <summary>Record equality is reference-based for arrays; this compares the content.</summary>

@@ -35,14 +35,18 @@ public sealed class PolicyController : ControllerBase
     private readonly ProvenanceAnchorStatusResolver _anchors;
     private readonly IAirGapMode _airGap;
 
+    private readonly Dependably.Infrastructure.OciScan.OciScanOptions? _ociScan;
+
     public PolicyController(
         OrgSettingsRepository settings,
         LicenseRepository licenses,
         OrgAccessGuard guard,
         InstanceVulnTrackerConfig vulnTracker,
         ProvenanceAnchorStatusResolver anchors,
-        IAirGapMode airGap)
+        IAirGapMode airGap,
+        Dependably.Infrastructure.OciScan.OciScanOptions? ociScan = null)
     {
+        _ociScan = ociScan;
         _settings = settings;
         _licenses = licenses;
         _guard = guard;
@@ -64,7 +68,7 @@ public sealed class PolicyController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         var settings = await _settings.GetSettingsAsync(orgId, ct);
         var allowlist = await _licenses.GetAllowlistAsync(orgId, ct);
@@ -79,11 +83,12 @@ public sealed class PolicyController : ControllerBase
         // and rescan passes' shared batch pipeline (ProcessVersionsInBatchesAsync, called by both
         // RunScanPassInnerAsync and RunRescanPassInnerAsync) — the on-demand ScanVersionAsync path
         // never calls it. Either pass alone keeps enrichment flowing, so this is only inactive
-        // when BOTH are disabled (AIR_GAPPED, or both named explicitly in DISABLE_BACKGROUND_JOBS).
+        // when BOTH are disabled (AIR_GAPPED, DISABLE_BACKGROUND_JOBS=true, or both named in its list).
         bool vulnTrackerActive = tracker.IsActive
             && !(_airGap.IsJobDisabled("vuln-scan") && _airGap.IsJobDisabled("vuln-rescan"));
 
-        var summary = PolicySummaryBuilder.Build(settings, vulnTrackerActive, threatFeedActive, anchors);
+        var summary = PolicySummaryBuilder.Build(
+            settings, vulnTrackerActive, threatFeedActive, anchors, ociScanActive: _ociScan?.Enabled ?? false);
 
         // The gate posture and thresholds this carries change what a caller can infer about the
         // tenant's serve path — never cache or let an intermediary cache a stale read.

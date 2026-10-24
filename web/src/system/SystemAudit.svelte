@@ -374,6 +374,7 @@
     text-transform: capitalize;
   }
   .outcome-success { color: var(--success); }
+  .outcome-degraded { color: var(--warning); }
   .outcome-server_error { color: var(--danger); }
   .outcome-cancelled { color: var(--text2); }
 

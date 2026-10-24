@@ -173,7 +173,7 @@ public sealed partial class CargoController
     private async Task<HashSet<string>> BlockedIndexVersionsAsync(
         string orgId, string name, OrgSettings settings, CancellationToken ct)
     {
-        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var blocked = new HashSet<string>(VersionIdentity.Comparer("cargo"));
         var now = _time.GetUtcNow();
 
         var pkg = await _packages.GetByPurlNameAsync(orgId, "cargo", name, ct);
@@ -211,9 +211,9 @@ public sealed partial class CargoController
     /// Parses the local version set from the local index lines so upstream versions can be
     /// shadowed on collision.
     /// </summary>
-    private static HashSet<string> ParseLocalVersions(IReadOnlyList<string> localLines)
+    internal static HashSet<string> ParseLocalVersions(IReadOnlyList<string> localLines)
     {
-        var localVersions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var localVersions = new HashSet<string>(VersionIdentity.Comparer("cargo"));
         foreach (string line in localLines)
         {
             string? vers = ParseVersionFromIndexLine(line);
@@ -347,6 +347,9 @@ public sealed partial class CargoController
     /// allowed, else by stream — after the claim recheck and block gate, or returns null on a miss
     /// so the caller proxies it from upstream.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "The parameter list is the call's declared inputs; a bundling type would hide which of them each "
+                        + "caller supplies.")]
     private async Task<IActionResult?> TryServeCachedCrateAsync(
         string orgId, string name, string version, IBlobStore tier, string storeKey,
         TokenRecord? token, OrgSettings settings, CancellationToken ct)
@@ -761,13 +764,15 @@ public sealed partial class CargoController
     /// <summary>
     /// Chooses the Authorization header to attach to the crate-download fetch. The configured
     /// upstream's credential rides along only when <paramref name="downloadUrl"/> stays on
-    /// <paramref name="upstreamBase"/>'s own host — never to a host <see cref="BuildCrateDownloadUrl"/>
-    /// switched to (the index.crates.io → static.crates.io rewrite), mirroring the PyPI proxy's
-    /// host-pin invariant so a credential never leaks to a host the operator never configured.
+    /// <paramref name="upstreamBase"/>'s own origin (scheme, host and port) — never to a host
+    /// <see cref="BuildCrateDownloadUrl"/> switched to (the index.crates.io → static.crates.io
+    /// rewrite), mirroring the PyPI proxy's pin so a credential never leaks to an origin the
+    /// operator never configured. Off-origin, the download proceeds anonymously; it is
+    /// checksum-verified either way.
     /// </summary>
     internal static string? ResolveDownloadAuthorizationHeader(
         string upstreamBase, string downloadUrl, string? authorizationHeader) =>
-        UpstreamHostPin.IsSameHost(upstreamBase, downloadUrl) ? authorizationHeader : null;
+        UpstreamHostPin.IsSameOrigin(upstreamBase, downloadUrl) ? authorizationHeader : null;
 
     /// <summary>
     /// Records a proxied Cargo version in the global cache plane. Ensures the per-tenant

@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
@@ -41,19 +42,23 @@ public sealed class PasswordResetTokenRepository
         string expiresStr = expiresAt.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await TenantMintGate.RequireMintableAsync(conn, _db.Provider, orgId, tx, ct);
 
         // Void any outstanding reset link for this user before minting a new one — only the
         // most recently requested link is ever redeemable.
-        await conn.ExecuteAsync(
+        await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM password_reset_tokens WHERE user_id = @userId AND org_id = @orgId AND consumed_at IS NULL",
-            new { userId, orgId });
+            new { userId, orgId }, transaction: tx, cancellationToken: ct));
 
-        await conn.ExecuteAsync(
+        await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO password_reset_tokens (id, user_id, org_id, token_hash, expires_at)
             VALUES (@id, @userId, @orgId, @hash, @expires)
             """,
-            new { id, userId, orgId, hash, expires = expiresStr });
+            new { id, userId, orgId, hash, expires = expiresStr },
+            transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
 
         return raw;
     }
@@ -88,45 +93,81 @@ public sealed class PasswordResetTokenRepository
     }
 
     /// <summary>
-    /// Atomically consumes a reset token. The UPDATE predicate guards both the not-yet-consumed
-    /// and not-yet-expired conditions in one statement, so concurrent requests carrying the same
-    /// token race on the DB write — exactly one wins (rowsAffected == 1); all others see
-    /// rowsAffected == 0 and receive null. Returns the token record on success.
+    /// Atomically consumes a reset token and nothing else. Returns the token record on success,
+    /// null when the token is unknown, expired, or already consumed. See
+    /// <see cref="RedeemAsync{TResult}"/>, which this delegates to.
     /// </summary>
-    public async Task<PasswordResetTokenRecord?> ConsumeAsync(string rawToken, CancellationToken ct = default)
+    public async Task<PasswordResetTokenRecord?> ConsumeAsync(string rawToken, CancellationToken ct = default) =>
+        (await RedeemAsync(rawToken, static (_, _, _) => Task.FromResult(true), ct))?.Credential;
+
+    /// <summary>
+    /// Consumes a reset token and runs <paramref name="redeem"/> (the password write the link
+    /// authorizes) in the same transaction, so the link is spent exactly when the new password
+    /// commits.
+    ///
+    /// <para>
+    /// The transaction runs <see cref="TenantMintGate"/> before it consumes anything: a suspension
+    /// deletes only the pending links, so a link consumed just before the suspension's revoke and
+    /// turned into a password just after it would leave that password in place when the tenant is
+    /// restored. A refused redemption throws <see cref="Dependably.Storage.TenantNotReadyException"/>
+    /// and leaves the link pending.
+    /// </para>
+    ///
+    /// <para>
+    /// The conditional UPDATE guards both the not-yet-consumed and not-yet-expired conditions in
+    /// one statement, so concurrent requests carrying the same token race on the write and exactly
+    /// one wins; every other caller receives null.
+    /// </para>
+    /// </summary>
+    public async Task<CredentialRedemption<PasswordResetTokenRecord, TResult>?> RedeemAsync<TResult>(
+        string rawToken,
+        Func<PasswordResetTokenRecord, DbConnection, DbTransaction, Task<TResult>> redeem,
+        CancellationToken ct = default)
     {
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
         string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
-        // Single conditional UPDATE: wins the race only when the row is still pending and
-        // unexpired. Concurrent requests with the same token both reach this statement but at
-        // most one will match (SQLite serializes writes); the loser gets 0 rows.
-        // xtenant: keyed by the SHA-256 of the reset token, same rationale as InviteRepository.AcceptAsync.
-        int rowsAffected = await conn.ExecuteAsync(
+        // xtenant: keyed by the SHA-256 of the reset token, same rationale as InviteRepository.RedeemAsync.
+        string? orgId = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT org_id FROM password_reset_tokens WHERE token_hash = @hash AND consumed_at IS NULL AND expires_at > @now",
+            new { hash, now }, transaction: tx, cancellationToken: ct));
+        if (orgId is null)
+        {
+            return null;
+        }
+
+        await TenantMintGate.RequireMintableAsync(conn, _db.Provider, orgId, tx, ct);
+
+        // xtenant: keyed by the SHA-256 of the reset token, same rationale as InviteRepository.RedeemAsync.
+        int rowsAffected = await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE password_reset_tokens SET consumed_at = @now WHERE token_hash = @hash AND consumed_at IS NULL AND expires_at > @now",
-            new { now, hash });
-
+            new { now, hash }, transaction: tx, cancellationToken: ct));
         if (rowsAffected == 0)
         {
             return null;
         }
 
-        // Read the now-immutably-consumed row. token_hash is globally unique, so no org_id
-        // predicate is required; the returned org_id/user_id are what the caller uses downstream.
-        // xtenant: keyed by the SHA-256 of the reset token, same rationale as InviteRepository.AcceptAsync.
+        // token_hash is globally unique, so no org_id predicate is required; the returned
+        // org_id/user_id are what the caller uses downstream.
+        // xtenant: keyed by the SHA-256 of the reset token, same rationale as InviteRepository.RedeemAsync.
         var (Id, UserId, OrgId, Email) = await conn.QuerySingleAsync<(string Id, string UserId, string OrgId, string Email)>(
-            """
-            SELECT prt.id, prt.user_id AS UserId, prt.org_id AS OrgId, u.email
-            FROM password_reset_tokens prt
-            JOIN users u ON u.id = prt.user_id
-            WHERE prt.token_hash = @hash
-            """,
-            new { hash });
+            new CommandDefinition(
+                """
+                SELECT prt.id, prt.user_id AS UserId, prt.org_id AS OrgId, u.email
+                FROM password_reset_tokens prt
+                JOIN users u ON u.id = prt.user_id
+                WHERE prt.token_hash = @hash
+                """,
+                new { hash }, transaction: tx, cancellationToken: ct));
 
-        return new PasswordResetTokenRecord(Id, UserId, OrgId, Email, _time.GetUtcNow());
+        var consumed = new PasswordResetTokenRecord(Id, UserId, OrgId, Email, _time.GetUtcNow());
+        var result = await redeem(consumed, conn, tx);
+        await tx.CommitAsync(ct);
+        return new CredentialRedemption<PasswordResetTokenRecord, TResult>(consumed, result);
     }
 }
 

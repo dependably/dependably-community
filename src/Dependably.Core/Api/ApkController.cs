@@ -116,9 +116,11 @@ public sealed class ApkController : OrgScopedControllerBase
         OrgSettings? settings, TokenRecord? token, CancellationToken ct)
     {
         // A non-matching filename (parsed is null) has no stable name/version to key the
-        // global-plane / block-gate / reserved-namespace checks on — those are skipped and the
-        // artifact is served (or fetched) purely by blob key, matching the design's "never 500
-        // on an unparsable filename" contract.
+        // global-plane / block-gate / reserved-namespace checks on. An artifact already in the
+        // store is still served by blob key, but one that is not is never fetched upstream: a
+        // name that cannot be checked against the reserved namespaces must not be asked of
+        // upstream. Every apk the Alpine toolchain publishes is {name}-{ver}-r{rel}.apk, so the
+        // refusal costs no legitimate request.
         var parsed = ParseApkFilename(file);
         string? purl = parsed is { } p ? PurlNormalizer.Apk(p.PkgName, p.PkgVer, p.PkgRel, arch) : null;
         string blobKey = BlobKeys.Apk(orgId, release, repo, arch, file);
@@ -131,7 +133,7 @@ public sealed class ApkController : OrgScopedControllerBase
         bool proxyOff = settings is not null && !settings.ProxyPassthroughEffective;
         bool reserved = parsed is { } rp
             && await _svc.Reserved.IsReservedAsync(orgId, "apk", rp.PkgName, ct);
-        if (proxyOff || reserved)
+        if (proxyOff || reserved || parsed is null)
         {
             return NotFound();
         }

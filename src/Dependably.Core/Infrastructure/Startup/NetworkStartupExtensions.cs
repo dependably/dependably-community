@@ -78,7 +78,9 @@ public static class NetworkStartupExtensions
     // Host filtering — derives AllowedHosts from the host portion of BASE_URL so Kestrel rejects
     // unknown Host headers before tenant resolution, preventing Host-header injection into SAML SP
     // URLs, absolute links, and CSRF Origin comparisons. Single mode permits the apex host and
-    // localhost; multi mode additionally permits *.apex (all tenant subdomains). When BASE_URL is
+    // localhost; multi mode additionally permits *.tenantDomain (all tenant subdomains; the tenant
+    // domain is TENANT_DOMAIN when set, else the apex). The wildcard matches at any depth, so
+    // hosts deeper than one label are admitted here and refused by tenant resolution. When BASE_URL is
     // unset or contains a localhost host (dev/local mode), no apex is derivable and filtering fails
     // closed to the loopback hostnames only — never "*" — so a reverse-proxied deployment that never
     // configures BASE_URL has every non-loopback Host header rejected rather than silently accepted.
@@ -110,8 +112,14 @@ public static class NetworkStartupExtensions
             if (deploymentMode == "multi")
             {
                 // Local multi-tenant dev loop: subdomains of the loopback hostname route by tenant
-                // slug the same way *.apex does once the apex is a real domain.
+                // slug the same way *.tenantDomain does once the tenant domain is a real domain.
                 allowed.Add("*.localhost");
+
+                string? explicitTenantDomain = BaseUrlHostHelper.ResolveUsableTenantDomain(builder.Configuration);
+                if (explicitTenantDomain is not null)
+                {
+                    allowed.Add($"*.{explicitTenantDomain}");
+                }
             }
         }
         else
@@ -121,8 +129,10 @@ public static class NetworkStartupExtensions
 
             if (deploymentMode == "multi")
             {
-                // Wildcard subdomain: each tenant is reached at <slug>.<apex>.
-                allowed.Add($"*.{apex}");
+                // Wildcard subdomain: each tenant is reached at <slug>.<tenantDomain>, where the
+                // tenant domain is the apex unless TENANT_DOMAIN names a different parent.
+                string tenantDomain = BaseUrlHostHelper.ResolveUsableTenantDomain(builder.Configuration) ?? apex;
+                allowed.Add($"*.{tenantDomain}");
             }
         }
 

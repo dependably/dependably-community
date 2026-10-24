@@ -288,6 +288,95 @@ describe('terraform', () => {
   })
 })
 
+describe('hex', () => {
+  const base = { ecosystem: 'hex', name: 'phoenix', origin: HTTPS }
+
+  it('unpinned names the dependably repo with a permissive requirement', () => {
+    const r = pkg(base)
+    expect(r.command).toBe('{:phoenix, ">= 0.0.0", repo: :dependably}')
+    expect(r.labelKey).toBe('install')
+    expect(r.caveatKey).toBe(CAVEATS.requiresSetup)
+  })
+
+  it('version-pinned shows both the mix and rebar3 forms', () => {
+    const r = ver({ ...base, version: '1.7.14' })
+    expect(r.command).toBe([
+      '# mix.exs',
+      '{:phoenix, "~> 1.7.14", repo: :dependably}',
+      '# rebar.config',
+      '{phoenix, "1.7.14", {pkg, phoenix, {repo, dependably}}}',
+    ].join('\n'))
+    expect(r.caveatKey).toBe(CAVEATS.requiresSetup)
+  })
+
+  it('renders nothing for a pinned command without a version', () => {
+    expect(versionInstallCommand(base)).toBeNull()
+  })
+})
+
+describe('registryOrigin with missing inputs', () => {
+  it('yields an empty origin when there is no location', () => {
+    expect(registryOrigin(null, undefined)).toBe('')
+    expect(registryOrigin({ insecureHttp: false }, undefined)).toBe('')
+  })
+
+  it('removes every trailing slash, not just one', () => {
+    expect(registryOrigin(null, { origin: 'https://reg.example.ca///', protocol: 'https:' }))
+      .toBe('https://reg.example.ca')
+  })
+
+  it('does not upgrade when the deployment flag is unset', () => {
+    expect(registryOrigin({}, { origin: 'http://reg.example.ca', protocol: 'http:' }))
+      .toBe('http://reg.example.ca')
+  })
+})
+
+describe('remaining declined and edge forms', () => {
+  it('rpm renders nothing for a pinned command with neither filename nor version', () => {
+    expect(versionInstallCommand({ ecosystem: 'rpm', name: 'nginx', origin: HTTPS })).toBeNull()
+  })
+
+  it('maven renders nothing when the artifact half of the coordinate is empty', () => {
+    expect(versionInstallCommand({ ecosystem: 'maven', name: 'group:', origin: HTTPS, version: '1' })).toBeNull()
+    expect(versionInstallCommand({ ecosystem: 'maven', name: ':artifact', origin: HTTPS, version: '1' })).toBeNull()
+  })
+
+  it('maven renders nothing without a version even for a valid coordinate', () => {
+    expect(versionInstallCommand({ ecosystem: 'maven', name: 'g:a', origin: HTTPS })).toBeNull()
+  })
+
+  it('oci ignores empty tag entries and falls back to the digest', () => {
+    expect(ver({ ecosystem: 'oci', name: 'img', origin: HTTPS, version: 'sha256:abc', tags: /** @type {any} */ (['', null]) }).command)
+      .toBe('docker pull reg.example.ca/img@sha256:abc')
+  })
+
+  it('oci with an unparseable origin drops the host rather than throwing', () => {
+    expect(ver({ ecosystem: 'oci', name: 'img', origin: 'not a url', version: 'sha256:abc', tags: ['latest'] }).command)
+      .toBe('docker pull /img:latest')
+  })
+
+  it('pypi over a plain-HTTP origin that cannot be parsed omits the host name', () => {
+    expect(ver({ ecosystem: 'pypi', name: 'requests', origin: 'http://', version: '1' }).command)
+      .toBe('pip install requests==1 --index-url http:/simple/ --trusted-host ')
+  })
+
+  it('quotes an empty and a single-quoted argument', () => {
+    expect(ver({ ecosystem: 'nuget', name: "it's", origin: HTTPS, version: '1' }).command)
+      .toBe("dotnet add package 'it'\\''s' --version 1 --source https://reg.example.ca/nuget/v3/index.json")
+    expect(ver({ ecosystem: 'nuget', name: 'pkg', origin: HTTPS, version: '' }).command)
+      .toBe("dotnet add package pkg --version '' --source https://reg.example.ca/nuget/v3/index.json")
+  })
+
+  it('quotes a null version as an empty argument', () => {
+    expect(versionInstallCommand({ ecosystem: 'nuget', name: 'pkg', origin: HTTPS, version: null })?.command)
+      .toBe("dotnet add package pkg --version '' --source https://reg.example.ca/nuget/v3/index.json")
+  })
+
+  it('terraform renders nothing for a missing version', () => {
+    expect(versionInstallCommand({ ecosystem: 'terraform', name: 'h/n/t', origin: HTTPS })).toBeNull()
+  })
+})
+
 describe('degenerate input', () => {
   it.each([
     ['unknown ecosystem', { ecosystem: 'cocoapods', name: 'x', origin: HTTPS }],

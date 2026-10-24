@@ -44,38 +44,75 @@ describe('applyLocale', () => {
   })
 
   it('skips html[lang] when document is undefined (SSR-style guard)', () => {
-    // Cover the false branch of `typeof document !== 'undefined'` on line 19.
-    // We swap `document` for a getter that returns the real jsdom document for
-    // every access except the `typeof document` read on line 19 — which we
-    // intercept to return `undefined`. That makes the guard take its else
-    // branch, so the documentElement assignment site (line 19, col 40) is
-    // never invoked. We assert exactly that: the getter is never called from
-    // that column.
+    // The first `document` read after the cookie write is the `typeof document` guard. Once the
+    // cookie setter has run, the global reports undefined for exactly one read, which takes the
+    // guard's else branch, so html[lang] must be left as it was.
     const realDoc = document
     const original = Object.getOwnPropertyDescriptor(globalThis, 'document')
-    let assignmentSiteCalls = 0
+    const writes = []
+    vi.spyOn(realDoc, 'cookie', 'set').mockImplementation((v) => { writes.push(v) })
+    let armed = false
+    let hidden = 0
     Object.defineProperty(globalThis, 'document', {
       configurable: true,
       get() {
-        const stack = new Error().stack || ''
-        // line 19 col 40 is the `document.documentElement.lang = code` read.
-        if (/locale\.js:19:40\b/.test(stack)) assignmentSiteCalls += 1
-        // line 19 col 3 is the `typeof document` read in the guard.
-        if (/locale\.js:19:3\b/.test(stack)) return undefined
+        if (armed) {
+          armed = false
+          hidden += 1
+          return undefined
+        }
         return realDoc
       },
     })
+    realDoc.documentElement.lang = 'en'
+    writes.push = (v) => { armed = true; return Array.prototype.push.call(writes, v) }
     try {
       applyLocale('fr')
     } finally {
-      if (original) Object.defineProperty(globalThis, 'document', original)
-      else Reflect.deleteProperty(globalThis, 'document')
+      Object.defineProperty(globalThis, 'document', /** @type {PropertyDescriptor} */ (original))
     }
-    // Cookie write on line 17 still ran against the real document.
-    expect(realDoc.cookie).toContain('.AspNetCore.Culture=')
-    // If the false branch was taken, the assignment expression was never
-    // evaluated and the getter was never called from column 40.
-    expect(assignmentSiteCalls).toBe(0)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toContain('.AspNetCore.Culture=')
+    // The guard saw no document and returned without touching it. (html[lang] itself cannot be
+    // asserted here: svelte-i18n's own locale store also writes it on every locale.set.)
+    expect(hidden).toBe(1)
+    expect(armed).toBe(false)
+  })
+
+  describe('cookie Secure attribute', () => {
+    function captureCookieWrites() {
+      const writes = []
+      vi.spyOn(document, 'cookie', 'set').mockImplementation((v) => { writes.push(v) })
+      return writes
+    }
+
+    it('adds Secure when served over https', () => {
+      vi.stubGlobal('location', { protocol: 'https:' })
+      const writes = captureCookieWrites()
+      applyLocale('fr')
+      vi.unstubAllGlobals()
+      expect(writes).toEqual([
+        '.AspNetCore.Culture=c%3Dfr%7Cuic%3Dfr; path=/; max-age=31536000; SameSite=Lax; Secure',
+      ])
+    })
+
+    it('omits Secure over plain http', () => {
+      vi.stubGlobal('location', { protocol: 'http:' })
+      const writes = captureCookieWrites()
+      applyLocale('fr')
+      vi.unstubAllGlobals()
+      expect(writes).toEqual([
+        '.AspNetCore.Culture=c%3Dfr%7Cuic%3Dfr; path=/; max-age=31536000; SameSite=Lax',
+      ])
+    })
+
+    it('omits Secure when there is no location', () => {
+      vi.stubGlobal('location', undefined)
+      const writes = captureCookieWrites()
+      applyLocale('fr')
+      vi.unstubAllGlobals()
+      expect(writes[0]).not.toContain('Secure')
+    })
   })
 })
 

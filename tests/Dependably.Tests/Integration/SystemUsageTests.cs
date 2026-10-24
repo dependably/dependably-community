@@ -353,10 +353,14 @@ public sealed class SystemUsageTests : IClassFixture<DependablyMultiFactory>, IA
     public async Task Per_tenant_daily_series_and_month_to_date_carry_cache_storage_bytes()
     {
         var (orgId, slug, _, _, _) = await CreateTenantAsync();
-        await SeedDailyAsync(orgId, "cache_storage_bytes", "2026-09-01", 700);
+        // monthToDate is the host clock's current UTC month, so the seeded day must fall inside
+        // it: a fixed date stops counting toward month-to-date once the calendar moves on.
+        var now = _factory.Services.GetRequiredService<TimeProvider>().GetUtcNow();
+        string day = $"{now.Year:D4}-{now.Month:D2}-01";
+        await SeedDailyAsync(orgId, "cache_storage_bytes", day, 700);
 
         using var client = await _factory.CreateSystemAdminClient();
-        var resp = await client.GetAsync($"/api/v1/system/tenants/{slug}/usage?from=2026-09-01&to=2026-09-01");
+        var resp = await client.GetAsync($"/api/v1/system/tenants/{slug}/usage?from={day}&to={day}");
         Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
 
         var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());

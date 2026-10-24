@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Tests.Infrastructure;
 using Npgsql;
 
 namespace Dependably.Tests.Integration;
@@ -25,6 +26,10 @@ internal static class LivePostgresReset
     // the SAME advisory lock, so the key is a constant, not per-call.
     private const long AdvisoryLockKey = 0x0DE9_ED87_57A6_10CC;
 
+    // Bounds the wait behind a concurrent process's test so a wedged peer fails this run loudly
+    // instead of hanging it.
+    private static readonly TimeSpan AdvisoryLockWait = TimeSpan.FromMinutes(15);
+
     /// <summary>
     /// Acquires the cross-process advisory lock, resets <c>public</c> to a pristine slate, and
     /// returns a store plus a disposable handle that releases the lock. Callers should
@@ -33,6 +38,10 @@ internal static class LivePostgresReset
     /// </summary>
     public static async Task<LivePostgresHandle> FreshAsync(string connectionString)
     {
+        // Before the lock connection opens: nothing reaches a database that is not provably a
+        // disposable test database.
+        DisposableTestDatabaseGuard.EnsureDisposable(connectionString);
+
         // Pooling=false is load-bearing: a session-level advisory lock is tied to the physical
         // backend session, not to the .NET NpgsqlConnection object. With the default pool,
         // DisposeAsync() only returns the connection to the pool — the backend session (and the
@@ -44,7 +53,24 @@ internal static class LivePostgresReset
         string lockConnectionString = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ToString();
         var lockConnection = new NpgsqlConnection(lockConnectionString);
         await lockConnection.OpenAsync();
-        await lockConnection.ExecuteAsync("SELECT pg_advisory_lock(@key)", new { key = AdvisoryLockKey });
+        try
+        {
+            // The wait lasts as long as another process's test holds the lock, which routinely
+            // exceeds the 30 s default command timeout; that timeout would fail this test with a
+            // bare "Timeout during reading attempt" that reads as a fault in the code under test.
+            await lockConnection.ExecuteAsync(new CommandDefinition(
+                "SELECT pg_advisory_lock(@key)",
+                new { key = AdvisoryLockKey },
+                commandTimeout: (int)AdvisoryLockWait.TotalSeconds));
+        }
+        catch (NpgsqlException ex) when (ex.InnerException is TimeoutException)
+        {
+            await lockConnection.DisposeAsync();
+            throw new TimeoutException(
+                $"Waited {AdvisoryLockWait} for the live-Postgres reset lock; another test process "
+                + "pointed at the same TEST_POSTGRES_CONNECTION database still holds it.",
+                ex);
+        }
 
         var store = new NpgsqlMetadataStore(connectionString);
         await using (var conn = await store.OpenAsync())

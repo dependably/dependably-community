@@ -27,6 +27,16 @@ namespace Dependably.Infrastructure;
 /// per-user generation token before its read and binds the cache entry to that token as an
 /// expiration trigger; <see cref="Invalidate"/> cancels the current token, so a fill that raced
 /// the bump binds an already-cancelled token and its write is dropped (or immediately evicted).
+///
+/// Only an <c>active</c> user has a current version. A locked or disabled user reads as null,
+/// exactly like a deleted one, so the caller fails the session. This is defence in depth behind
+/// <see cref="OrgRepository.SetUserAccountStatusAsync"/>, which already bumps the version on a
+/// status change: a status written by any path that forgets the bump still ends the user's
+/// sessions on the next uncached read (at most one TTL on a single replica, at once under
+/// <c>ha</c>). A non-active answer is never cached, and every status change evicts the entry, so
+/// a re-activation is seen on the next request. The per-request session check is this store's
+/// only reader, and a non-active user has no flow that needs a working session: they cannot sign
+/// in either, and re-activating them is an operator's action.
 /// </summary>
 public sealed class UserTokenVersionStore
 {
@@ -57,8 +67,9 @@ public sealed class UserTokenVersionStore
     internal int FillGuardCount => _fillGuards.Count;
 
     /// <summary>
-    /// Returns the user's current token version, or null when the user row no longer exists
-    /// (the caller fails the session — a tenant JWT must reference a live user).
+    /// Returns the user's current token version, or null when the user row no longer exists or
+    /// the user is not <c>active</c> (the caller fails the session — a tenant JWT must reference a
+    /// live, active user).
     /// </summary>
     public async Task<long?> GetCurrentVersionAsync(string userId, CancellationToken ct = default)
     {
@@ -86,10 +97,12 @@ public sealed class UserTokenVersionStore
             // xtenant: keyed by users PK from the validated JWT's subject claim — the session's own
             // user. Reading another tenant's row would require forging a signed token.
             long? version = await conn.ExecuteScalarAsync<long?>(
-                "SELECT token_version FROM users WHERE id = @id", new { id = userId });
+                "SELECT token_version FROM users WHERE id = @id AND account_status = 'active'",
+                new { id = userId });
 
-            // Only cache the found case. A missing row fails the session anyway, and not caching
-            // it keeps a just-created user from being spuriously rejected for a TTL.
+            // Only cache the found case. A missing or non-active user fails the session anyway,
+            // and not caching it keeps a just-created or just-re-activated user from being
+            // spuriously rejected for a TTL.
             if (version is not null && _cache is not null)
             {
                 var options = new MemoryCacheEntryOptions
@@ -113,9 +126,10 @@ public sealed class UserTokenVersionStore
         {
             if (guardSource is not null && !tied)
             {
-                // A missing user row is never cached, so the generation minted before the read is
-                // never tied to a cache entry. Retire the just-minted instance here so a deleted
-                // user's id (or a thrown DB open/read) does not leave its guard in the map forever.
+                // A missing or non-active user is never cached, so the generation minted before the
+                // read is never tied to a cache entry. Retire the just-minted instance here so a
+                // deleted or disabled user's id (or a thrown DB open/read) does not leave its guard
+                // in the map forever.
                 CacheFillGuard.RetireUnbound(_fillGuards, userId, guardSource);
             }
         }

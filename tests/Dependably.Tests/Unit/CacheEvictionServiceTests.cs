@@ -171,8 +171,9 @@ public class CacheEvictionServiceTests : IAsyncLifetime
             new PackageRepository(_db, time: _clock),
             new Dependably.Protocol.OciOrphanBlobDeleter(
                 _db, tiered, new Dependably.Protocol.OciBlobKeyLock()));
-        return new CacheEvictionService(deps, Config(cfg), NullLogger<CacheEvictionService>.Instance, _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+        var config = Config(cfg);
+        return new CacheEvictionService(deps, config, NullLogger<CacheEvictionService>.Instance, _clock,
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock), new AirGapMode(config));
     }
 
     // The inverse of ExplicitCap_Evicts below, and the reason this pair exists: an unconfigured
@@ -212,6 +213,59 @@ public class CacheEvictionServiceTests : IAsyncLifetime
         var repo = new CacheArtifactRepository(_db);
         Assert.Null(await repo.GetByCoordinateAsync("npm", "lodash", "stale", "lodash-stale.tgz"));
         Assert.NotNull(await repo.GetByCoordinateAsync("npm", "lodash", "fresh", "lodash-fresh.tgz"));
+    }
+
+    // ── Job switches: the pass gate agrees with the instance report ──────────────
+
+    // AIR_GAPPED and the whole-set switch exempt eviction (no egress; stopping it leaves the
+    // cache unbounded), and edge mode keeps it, so a configured cap still evicts and the
+    // report says the job runs.
+    [Theory]
+    [InlineData("DISABLE_BACKGROUND_JOBS", "true")]
+    [InlineData("DISABLE_BACKGROUND_JOBS", "1")]
+    [InlineData("AIR_GAPPED", "true")]
+    [InlineData("DEPLOYMENT_MODE", "edge")]
+    [InlineData("DISABLE_BACKGROUND_JOBS", "oci-staging-janitor,vuln-scan")]
+    public async Task SwitchThatExemptsEviction_CapStillEvicts(string key, string value)
+    {
+        var t = _clock.GetUtcNow();
+        await SeedAsync("stale", t.AddDays(-15));
+        var cfg = new Dictionary<string, string?> { ["CACHE_MAX_AGE_DAYS"] = "7", [key] = value };
+
+        var result = await Build(cfg).RunOnceAsync();
+
+        Assert.Equal(1, result.ArtifactsEvicted);
+        Assert.Null(await new CacheArtifactRepository(_db).GetByCoordinateAsync("npm", "lodash", "stale", "lodash-stale.tgz"));
+        Assert.Null(BackgroundJobDisabledReason.For(new AirGapMode(Config(cfg)), CacheEvictionService.JobName));
+    }
+
+    // Naming eviction is an explicit decision about it, and it is real: a configured cap evicts
+    // nothing, and the report attributes the stop to the list. Mixed with other names, and with
+    // AIR_GAPPED on top (which alone would leave eviction running).
+    [Theory]
+    [InlineData("cache-eviction", null, null)]
+    [InlineData("vuln-scan,Cache-Eviction", null, null)]
+    [InlineData("cache-eviction", "true", null)]
+    [InlineData("cache-eviction", null, "edge")]
+    public async Task EvictionNamedInList_CapEvictsNothing(string disableJobs, string? airGapped, string? deploymentMode)
+    {
+        var t = _clock.GetUtcNow();
+        await SeedAsync("stale", t.AddDays(-15));
+        var cfg = new Dictionary<string, string?>
+        {
+            ["CACHE_MAX_AGE_DAYS"] = "7",
+            ["DISABLE_BACKGROUND_JOBS"] = disableJobs,
+            ["AIR_GAPPED"] = airGapped,
+            ["DEPLOYMENT_MODE"] = deploymentMode,
+        };
+
+        var result = await Build(cfg).RunOnceAsync();
+
+        Assert.Equal(0, result.ArtifactsEvicted);
+        Assert.NotNull(await new CacheArtifactRepository(_db).GetByCoordinateAsync("npm", "lodash", "stale", "lodash-stale.tgz"));
+        Assert.Equal(
+            BackgroundJobDisabledReason.Named,
+            BackgroundJobDisabledReason.For(new AirGapMode(Config(cfg)), CacheEvictionService.JobName));
     }
 
     [Fact]

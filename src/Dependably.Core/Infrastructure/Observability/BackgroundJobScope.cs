@@ -92,6 +92,19 @@ public sealed class BackgroundJobScope : IDisposable
         }
     }
 
+    /// <summary>
+    /// Records a run that completed but did not do its job: a feed was rejected, or a source could
+    /// not be reached, and the job kept its previous data. Distinct from <see cref="Complete"/>
+    /// because the last-success gauge must not advance, and from <see cref="Fail"/> because
+    /// nothing threw. <paramref name="detail"/> lands in the run row's error message.
+    /// </summary>
+    public void Degrade(string detail)
+    {
+        _outcome = "degraded";
+        _errorMessage = detail;
+        _activity?.SetTag("dependably.outcome", _outcome);
+    }
+
     public void Fail(Exception? exception = null, string outcome = "server_error")
     {
         _outcome = outcome;

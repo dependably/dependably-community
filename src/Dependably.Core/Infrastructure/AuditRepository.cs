@@ -509,6 +509,26 @@ public sealed class AuditRepository
     }
 
     /// <summary>
+    /// True when the org has an <paramref name="action"/> audit row for <paramref name="purl"/> (or the
+    /// same purl with further qualifiers appended, as the version block endpoint records it) written
+    /// at or after <paramref name="sinceIso"/> (compared on its first 19 characters, so a row in the
+    /// same second counts). Lets a caller tell whether a later actor re-asserted a state.
+    /// </summary>
+    public async Task<bool> HasActionSinceAsync(
+        string orgId, string purl, string action, string sinceIso, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        return await conn.ExecuteScalarAsync<int>(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE org_id = @orgId AND action = @action
+              AND (purl = @purl OR SUBSTR(purl, 1, LENGTH(@purl) + 1) IN (@purl || '?', @purl || '&'))
+              AND SUBSTR(created_at, 1, 19) >= SUBSTR(@sinceIso, 1, 19)
+            """,
+            new { orgId, purl, action, sinceIso }) > 0;
+    }
+
+    /// <summary>
     /// Returns the distinct set of <c>action</c> values for <c>scope='system'</c> audit rows,
     /// for populating the operator audit-page filter dropdown. Sorted alphabetically.
     /// </summary>

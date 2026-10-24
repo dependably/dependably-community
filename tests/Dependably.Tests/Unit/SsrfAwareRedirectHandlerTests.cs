@@ -180,6 +180,34 @@ public class SsrfAwareRedirectHandlerTests
     }
 
     /// <summary>
+    /// A same-host https → http downgrade redirect is the redirect-layer form of the plaintext
+    /// credential leak the upstream origin pin closes for document-named URLs. Authorization is
+    /// stripped on every hop regardless of host or scheme, so the downgraded hop carries no
+    /// credential even though it stays on the upstream's own host.
+    /// </summary>
+    [Fact]
+    public async Task SendAsync_SameHostHttpsToHttpDowngradeRedirect_DoesNotForwardAuthorizationHeader()
+    {
+        var validator = new StubValidator();
+        var inner = new StubInnerHandler();
+        var client = new HttpClient(new SsrfAwareRedirectHandler(validator) { InnerHandler = inner });
+
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.Found)
+        {
+            Headers = { Location = new Uri("http://upstream.test/v3/registration/foo/page1.json") }
+        });
+        inner.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.OK));
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "https://upstream.test/v3/registration/foo/index.json");
+        request.Headers.TryAddWithoutValidation("Authorization", "Bearer same-host-secret");
+        await client.SendAsync(request);
+
+        Assert.Equal(2, inner.CallCount);
+        Assert.Equal("http", inner.Requests[1].RequestUri!.Scheme);
+        Assert.False(inner.Requests[1].Headers.Contains("Authorization"));
+    }
+
+    /// <summary>
     /// OCI upstreams configured with Basic auth (username:password) produce an
     /// <c>Authorization: Basic …</c> header. Verifies that the Basic-format credential
     /// is not forwarded to the redirect target, preventing registry credentials from

@@ -75,6 +75,38 @@ public sealed class SchemaBaselineResolverTests
     }
 
     [Fact]
+    public void ReleaseTagOnHead_IsThisBuild_SoTheBaselineIsTheReleaseBeforeIt()
+    {
+        // main's pipeline for a release commit can start after the tag lands on it. Picking that
+        // tag would compare the schema with itself and pass having checked nothing.
+        using var repo = TempGitRepo.Create();
+        repo.CommitSchema("CREATE TABLE released_before (id INTEGER);");
+        repo.Git("tag", "-a", "v0.1.0", "-m", "v0.1.0");
+        repo.CommitSchema("CREATE TABLE released_now (id INTEGER);");
+        repo.Git("tag", "-a", "v0.2.0", "-m", "v0.2.0");
+
+        var resolution = SchemaBaselineResolver.Resolve(repo.Path);
+
+        Assert.NotNull(resolution.Baseline);
+        Assert.Equal("v0.1.0", resolution.Baseline.Tag);
+        Assert.Contains("released_before", resolution.Baseline.SqliteSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OnlyReleaseTagIsOnHead_IsABootstrap()
+    {
+        // The first release has nothing before it to be compatible with.
+        using var repo = TempGitRepo.Create();
+        repo.CommitSchema("CREATE TABLE first (id INTEGER);");
+        repo.Git("tag", "-a", "v0.1.0", "-m", "v0.1.0");
+
+        var resolution = SchemaBaselineResolver.Resolve(repo.Path);
+
+        Assert.Null(resolution.Baseline);
+        Assert.Equal(BaselineAbsence.NoReleaseTags, resolution.Absence);
+    }
+
+    [Fact]
     public void ThisCheckout_ClassifiesCleanly_AndAnyBaselineItProducesIsWellFormed()
     {
         // Exactly as strict as the gate itself, and no stricter: an export or an offline checkout
@@ -123,6 +155,16 @@ public sealed class SchemaBaselineResolverTests
             return repo;
         }
 
+        public void CommitSchema(string ddl)
+        {
+            string dir = System.IO.Path.Combine(Path, "src", "Infrastructure", "schema");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(System.IO.Path.Combine(dir, "Schema.sql"), ddl);
+            File.WriteAllText(System.IO.Path.Combine(dir, "Schema.pg.sql"), ddl);
+            Git("add", "--all");
+            Git("commit", "--quiet", "-m", ddl);
+        }
+
         public void Git(params string[] args)
         {
             var psi = new ProcessStartInfo("git")
@@ -138,6 +180,13 @@ public sealed class SchemaBaselineResolverTests
             }
 
             psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+            // Commits and annotated tags need an identity, and a CI runner has none configured.
+            psi.Environment["GIT_AUTHOR_NAME"] = "test";
+            psi.Environment["GIT_AUTHOR_EMAIL"] = "test@example.invalid";
+            psi.Environment["GIT_COMMITTER_NAME"] = "test";
+            psi.Environment["GIT_COMMITTER_EMAIL"] = "test@example.invalid";
+            psi.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
+            psi.Environment["GIT_CONFIG_GLOBAL"] = "/dev/null";
             using var process = Process.Start(psi)!;
             string error = process.StandardError.ReadToEnd();
             process.WaitForExit(30_000);

@@ -346,50 +346,121 @@ public sealed class SchemaInitializerTimestampNormalizationTests : IAsyncLifetim
     }
 
     [Fact]
-    public async Task SetBasedSweep_HandlesTenThousandLegacyRows_WellUnderASecond()
+    public async Task SetBasedSweep_IssuesTheSameStatementsRegardlessOfLegacyRowCount()
     {
-        // Not a comparison against the deleted row-by-row implementation (see
-        // TimestampNormalizationPostgresTests for that, against the live engine the reviewer's
-        // benchmark used) — this just demonstrates the set-based UPDATE scales to a realistic
-        // cache_artifact row count without the per-row round-trip cost a row-by-row C# loop
-        // would add, even against in-memory SQLite.
-        const int rowCount = 10_000;
-        await using (var conn = await _db.OpenAsync())
-        {
-            for (int batchStart = 0; batchStart < rowCount; batchStart += 500)
-            {
-                var batch = Enumerable.Range(batchStart, Math.Min(500, rowCount - batchStart))
-                    .Select(i => new
-                    {
-                        id = $"ca-perf-{i}",
-                        version = $"1.0.{i}",
-                        filename = $"lodash-1.0.{i}.tgz",
-                        blobKey = $"proxy/perf-{i}",
-                    });
-                await conn.ExecuteAsync(
-                    """
-                    INSERT INTO cache_artifact
-                        (id, ecosystem, name, version, filename, blob_key, content_hash,
-                         first_cached_at, last_accessed_at)
-                    VALUES
-                        (@id, 'npm', 'lodash', @version, @filename, @blobKey, 'h',
-                         '2026-03-04 05:06:07+02:00', '2026-03-04 05:06:07+02:00')
-                    """,
-                    batch);
-            }
-        }
+        // Two backlogs two orders of magnitude apart. A set-based sweep issues an identical,
+        // fixed statement list for both; any per-row round trip makes the larger list longer.
+        // Counting statements rather than timing them means a contended runner cannot fail
+        // this and a per-row regression fails it on an idle one.
+        const int smallBacklog = 10;
+        const int largeBacklog = 1_000;
 
         var initializer = new SchemaInitializer(_db);
-        await using var sweepConn = await _db.OpenAsync();
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew(); // now-ok: timing evidence for the set-based sweep, logged not branched on
-        await initializer.NormalizeLegacyDateTimeOffsetColumnsAsync(sweepConn);
-        stopwatch.Stop();
 
-        Assert.True(stopwatch.ElapsedMilliseconds < 2000,
-            $"set-based sweep of {rowCount} rows took {stopwatch.ElapsedMilliseconds}ms, expected well under 2000ms");
+        // Each backlog is seeded and swept on its own, so the second sweep sees only its own
+        // legacy rows: the first sweep has already made the small backlog canonical.
+        await SeedLegacyCacheArtifactRowsAsync("small", smallBacklog);
+        var smallStatements = await CaptureSweepStatementsAsync(initializer);
+        Assert.Equal(smallBacklog, await CountNormalizedCacheArtifactRowsAsync("small"));
 
-        long normalizedCount = await sweepConn.ExecuteScalarAsync<long>(
-            "SELECT COUNT(*) FROM cache_artifact WHERE id LIKE 'ca-perf-%' AND first_cached_at = '2026-03-04T03:06:07Z'");
-        Assert.Equal(rowCount, normalizedCount);
+        await SeedLegacyCacheArtifactRowsAsync("large", largeBacklog);
+        var largeStatements = await CaptureSweepStatementsAsync(initializer);
+        Assert.Equal(largeBacklog, await CountNormalizedCacheArtifactRowsAsync("large"));
+
+        // The statement list does not grow with the backlog, statement for statement.
+        Assert.True(
+            smallStatements.SequenceEqual(largeStatements),
+            $"expected the same statements for a {smallBacklog}-row and a {largeBacklog}-row " +
+            $"backlog, got {smallStatements.Count} and {largeStatements.Count}");
+
+        // Exactly one statement writes each high-volume column: a per-row UPDATE matches too.
+        foreach (var (table, column) in new[]
+        {
+            ("cache_artifact", "first_cached_at"), ("cache_artifact", "last_accessed_at"),
+            ("claim", "created_at"), ("claim", "updated_at"), ("claim", "deleted_at"),
+            ("claim_history", "occurred_at"),
+            ("audit_event", "occurred_at"),
+            ("tenant_artifact_access", "first_accessed_at"), ("tenant_artifact_access", "last_accessed_at"),
+            ("tenant_artifact_access", "last_used"),
+        })
+        {
+            Assert.Single(
+                largeStatements,
+                sql => sql.Contains($"UPDATE {table} SET {column} =", StringComparison.Ordinal));
+        }
+
+        // Twin: the same counter on a row-by-row loop (one SELECT, then one UPDATE per row, the
+        // shape the set-based sweep replaces) counts every round trip. Without this, a counter
+        // that silently saw nothing would pass the equality above.
+        const int rowBacklog = 25;
+        await SeedLegacyCacheArtifactRowsAsync("row", rowBacklog);
+        await using (var inner = await _db.OpenAsync())
+        {
+            var counting = new CountingConnection(inner);
+            var legacyRows = (await counting.QueryAsync<(string Id, string Value)>(
+                "SELECT id AS Id, first_cached_at AS Value FROM cache_artifact " +
+                "WHERE ecosystem = 'row' AND first_cached_at IS NOT NULL"))
+                .ToList();
+            foreach (var (id, value) in legacyRows)
+            {
+                var parsed = DateTimeOffset.Parse(value, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal);
+                await counting.ExecuteAsync(
+                    "UPDATE cache_artifact SET first_cached_at = @normalized WHERE id = @id",
+                    new { normalized = parsed.ToUtcIso(), id });
+            }
+
+            Assert.Equal(1 + rowBacklog, counting.Statements.Count);
+        }
+
+        await using var read = await _db.OpenAsync();
+        Assert.Equal(rowBacklog, await read.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact " +
+            "WHERE ecosystem = 'row' AND first_cached_at = '2026-03-04T03:06:07Z'"));
+    }
+
+    private async Task<IReadOnlyList<string>> CaptureSweepStatementsAsync(SchemaInitializer initializer)
+    {
+        await using var inner = await _db.OpenAsync();
+        var counting = new CountingConnection(inner);
+        await initializer.NormalizeLegacyDateTimeOffsetColumnsAsync(counting);
+        return counting.Statements;
+    }
+
+    private async Task<long> CountNormalizedCacheArtifactRowsAsync(string ecosystemTag)
+    {
+        await using var conn = await _db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = @ecosystemTag " +
+            "AND first_cached_at = '2026-03-04T03:06:07Z' AND last_accessed_at = '2026-03-04T03:06:07Z'",
+            new { ecosystemTag });
+    }
+
+    private async Task SeedLegacyCacheArtifactRowsAsync(string ecosystemTag, int rowCount)
+    {
+        const int batchSize = 500;
+        await using var conn = await _db.OpenAsync();
+        for (int batchStart = 0; batchStart < rowCount; batchStart += batchSize)
+        {
+            var batch = Enumerable.Range(batchStart, Math.Min(batchSize, rowCount - batchStart))
+                .Select(i => new
+                {
+                    id = $"ca-{ecosystemTag}-{i}",
+                    ecosystemTag,
+                    version = $"1.0.{i}",
+                    filename = $"lodash-1.0.{i}.tgz",
+                    blobKey = $"proxy/{ecosystemTag}-{i}",
+                });
+            await conn.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact
+                    (id, ecosystem, name, version, filename, blob_key, content_hash,
+                     first_cached_at, last_accessed_at)
+                VALUES
+                    (@id, @ecosystemTag, 'lodash', @version, @filename, @blobKey, 'h',
+                     '2026-03-04 05:06:07+02:00', '2026-03-04 05:06:07+02:00')
+                """,
+                batch);
+        }
     }
 }

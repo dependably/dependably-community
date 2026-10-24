@@ -34,13 +34,15 @@ public sealed class DeprecationRefreshSuspensionTests : IAsyncLifetime
 
     // Seeds an org, an upstream registry, and one npm proxy group (cache_artifact +
     // tenant_artifact_access) named after the org so a request URL can be attributed back to it.
-    private async Task SeedOrgWithProxyGroupAsync(string orgId, string status)
+    private async Task SeedOrgWithProxyGroupAsync(string orgId, string status, int passthrough = 1)
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug, status) VALUES (@orgId, @orgId, @status)",
             new { orgId, status });
-        await conn.ExecuteAsync("INSERT INTO org_settings (org_id) VALUES (@orgId)", new { orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO org_settings (org_id, proxy_passthrough_enabled) VALUES (@orgId, @passthrough)",
+            new { orgId, passthrough });
 
         string name = "pkg-" + orgId;
         string caId = orgId + "-ca";
@@ -79,13 +81,15 @@ public sealed class DeprecationRefreshSuspensionTests : IAsyncLifetime
     // (PackageRepository.ListHostedGroupsNeedingUpstreamRefreshAsync) that a package which was
     // never proxied (or whose proxy rows were evicted) is picked up through, distinct from the
     // cache-plane query SeedOrgWithProxyGroupAsync exercises.
-    private async Task SeedOrgWithHostedOnlyGroupAsync(string orgId, string status)
+    private async Task SeedOrgWithHostedOnlyGroupAsync(string orgId, string status, int passthrough = 1)
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
             "INSERT INTO orgs (id, slug, status) VALUES (@orgId, @orgId, @status)",
             new { orgId, status });
-        await conn.ExecuteAsync("INSERT INTO org_settings (org_id) VALUES (@orgId)", new { orgId });
+        await conn.ExecuteAsync(
+            "INSERT INTO org_settings (org_id, proxy_passthrough_enabled) VALUES (@orgId, @passthrough)",
+            new { orgId, passthrough });
 
         string name = "hosted-pkg-" + orgId;
         string packageId = orgId + "-pkg";
@@ -181,6 +185,83 @@ public sealed class DeprecationRefreshSuspensionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RefreshPass_NeverFetchesUpstreamFor_APassthroughOffOrgsCachedGroup_ButStillFetchesAPassthroughOnOrg()
+    {
+        await SeedOrgWithProxyGroupAsync("ptoff", "active", passthrough: 0);
+        await SeedOrgWithProxyGroupAsync("pton", "active");
+
+        var handler = new RecordingUrlHandler();
+        await BuildService(handler).RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(handler.RequestedUrls, u => u.Contains("pkg-ptoff", StringComparison.Ordinal));
+        Assert.Null(await DeprecationCheckedAtAsync("ptoff"));
+        Assert.Contains(handler.RequestedUrls, u => u.Contains("pkg-pton", StringComparison.Ordinal));
+        Assert.NotNull(await DeprecationCheckedAtAsync("pton"));
+    }
+
+    [Fact]
+    public async Task RefreshPass_NeverFetchesUpstreamFor_APassthroughOffOrgsHostedOnlyPackage_ButStillFetchesAPassthroughOnOrg()
+    {
+        await SeedOrgWithHostedOnlyGroupAsync("hptoff", "active", passthrough: 0);
+        await SeedOrgWithHostedOnlyGroupAsync("hpton", "active");
+        string seededStaleStamp = _clock.GetUtcNow().AddHours(-48).ToUtcIso();
+
+        var handler = new RecordingUrlHandler();
+        await BuildService(handler).RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(handler.RequestedUrls, u => u.Contains("hosted-pkg-hptoff", StringComparison.Ordinal));
+        Assert.Equal(seededStaleStamp, await UpstreamLatestCheckedAtAsync("hptoff"));
+        Assert.Contains(handler.RequestedUrls, u => u.Contains("hosted-pkg-hpton", StringComparison.Ordinal));
+        Assert.NotEqual(seededStaleStamp, await UpstreamLatestCheckedAtAsync("hpton"));
+    }
+
+    [Fact]
+    public async Task RefreshPass_ReChecksPassthroughPerGroup_SoAFlipAfterEnumerationStopsTheFetch()
+    {
+        await SeedOrgWithProxyGroupAsync("flipa", "active");
+        await SeedOrgWithProxyGroupAsync("flipb", "active");
+
+        // Both orgs are enumerated with passthrough on. The first upstream request switches the
+        // other org's passthrough off, so only the per-group re-check can stop that org's fetch.
+        var handler = new RecordingUrlHandler
+        {
+            OnRequest = async url =>
+            {
+                string other = url.Contains("pkg-flipa", StringComparison.Ordinal) ? "flipb" : "flipa";
+                await using var conn = await _db.OpenAsync();
+                await conn.ExecuteAsync(
+                    "UPDATE org_settings SET proxy_passthrough_enabled = 0 WHERE org_id = @other",
+                    new { other });
+            }
+        };
+
+        await BuildService(handler).RunRefreshPassAsync(CancellationToken.None);
+
+        var fetchedOrgs = new[] { "flipa", "flipb" }
+            .Where(o => handler.RequestedUrls.Any(u => u.Contains("pkg-" + o, StringComparison.Ordinal)))
+            .ToList();
+        Assert.Single(fetchedOrgs);
+        string skipped = fetchedOrgs[0] == "flipa" ? "flipb" : "flipa";
+        Assert.Null(await DeprecationCheckedAtAsync(skipped));
+        Assert.NotNull(await DeprecationCheckedAtAsync(fetchedOrgs[0]));
+    }
+
+    [Fact]
+    public async Task RefreshPass_TreatsAnOrgWithNoSettingsRow_AsPassthroughOn()
+    {
+        await SeedOrgWithProxyGroupAsync("nosettings", "active");
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("DELETE FROM org_settings WHERE org_id = 'nosettings'");
+        }
+
+        var handler = new RecordingUrlHandler();
+        await BuildService(handler).RunRefreshPassAsync(CancellationToken.None);
+
+        Assert.Contains(handler.RequestedUrls, u => u.Contains("pkg-nosettings", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task RefreshPass_ResumesFetching_OnceTheOrgIsReinstated()
     {
         await SeedOrgWithProxyGroupAsync("reinstated", "suspended");
@@ -227,12 +308,14 @@ public sealed class DeprecationRefreshSuspensionTests : IAsyncLifetime
         var packages = new PackageRepository(_db, time: _clock);
         var cacheArtifacts = new CacheArtifactRepository(_db);
         var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, _clock, TestEnvelope.Unconfigured()));
-        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries);
+        var reserved = new Dependably.Protocol.ReservedNamespaceService(_db, new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()), _clock);
+        var latestResolver = new UpstreamLatestVersionResolver(upstream, registries, reserved);
         return new DeprecationRefreshService(
             packages, cacheArtifacts, audit, upstream, latestResolver, registries, airGap, config,
             NullLogger<DeprecationRefreshService>.Instance,
             _clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(_clock),
+            reserved, new Dependably.Infrastructure.Hex.HexReleaseRepository(_db));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -243,10 +326,17 @@ public sealed class DeprecationRefreshSuspensionTests : IAsyncLifetime
     {
         public List<string> RequestedUrls { get; } = [];
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        public Func<string, Task>? OnRequest { get; set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             RequestedUrls.Add(request.RequestUri!.ToString());
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            if (OnRequest is not null)
+            {
+                await OnRequest(request.RequestUri!.ToString());
+            }
+
+            return (new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent("""{"dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{}}}""",
                     Encoding.UTF8, "application/json")

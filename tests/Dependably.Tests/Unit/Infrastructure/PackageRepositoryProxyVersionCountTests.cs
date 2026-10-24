@@ -1,5 +1,6 @@
 using Dapper;
 using Dependably.Infrastructure;
+using Dependably.Protocol;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
 
@@ -109,7 +110,10 @@ public sealed class PackageRepositoryProxyVersionCountTests : IAsyncLifetime
             _db, packages, new CacheArtifactRepository(_db),
             new VulnerabilityRepository(_db, _clock));
         var versions = await inventory.ListServeableVersionsAsync(_orgId, pkgId, ecosystem, name);
-        return versions.Select(v => v.Version).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        // The page groups rows by the exact version string (VersionTable.svelte buildGroups), after
+        // the management endpoint's NuGet sidecar collapse.
+        return ArtifactInventoryRepository.CollapseSidecarProxyRows(ecosystem, versions)
+            .Select(v => v.Version).Distinct(StringComparer.Ordinal).Count();
     }
 
     [Fact]
@@ -141,6 +145,20 @@ public sealed class PackageRepositoryProxyVersionCountTests : IAsyncLifetime
 
         Assert.Equal(1, row.VersionCount);
         Assert.Equal(await DetailPageDistinctVersionsAsync(pkgId, "nuget", "newtonsoft.json"), row.VersionCount);
+    }
+
+    [Fact]
+    public async Task UploadedPyPiVersions_Pep440Equal_CountOnce_AndDistinctOnesCountSeparately()
+    {
+        string pkgId = await SeedPackageAsync("pypi", "dupes");
+        await SeedUploadedVersionAsync(pkgId, "1.0.0rc1");
+        await SeedUploadedVersionAsync(pkgId, "1.0.0-rc1");
+
+        Assert.Equal(1, (await TileRowAsync("pypi")).VersionCount);
+
+        await SeedUploadedVersionAsync(pkgId, "1.0.0rc2");
+
+        Assert.Equal(2, (await TileRowAsync("pypi")).VersionCount);
     }
 
     [Fact]
@@ -194,6 +212,182 @@ public sealed class PackageRepositoryProxyVersionCountTests : IAsyncLifetime
         // Three distinct versions across 2 uploaded rows + 5 cache_artifact rows.
         Assert.Equal(3, row.VersionCount);
         Assert.Equal(await DetailPageDistinctVersionsAsync(pkgId, "maven", "com.acme:mixed"), row.VersionCount);
+    }
+
+    // An uploaded version and a proxied version differing only in case. Where the ecosystem's
+    // version identity is case-sensitive they are two real versions and both are listed and
+    // counted; where it folds case (NuGet, PyPI) the proxied copy is shadowed. The tile and the
+    // detail list must agree either way.
+    [Theory]
+    [InlineData("npm", "case-npm", 2)]
+    [InlineData("golang", "example.com/case-go", 2)]
+    [InlineData("cargo", "case-cargo", 2)]
+    [InlineData("maven", "com.acme:case-mvn", 2)]
+    [InlineData("hex", "case_hex", 2)]
+    [InlineData("nuget", "case.nuget", 1)]
+    [InlineData("pypi", "case-pypi", 1)]
+    public async Task CaseOnlyDifferentVersionOnBothPlanes_ShadowsOnlyWhereVersionIdentityFoldsCase(
+        string ecosystem, string name, int expected)
+    {
+        string pkgId = await SeedPackageAsync(ecosystem, name);
+
+        await SeedUploadedVersionAsync(pkgId, "1.0.0-RC1");
+        await SeedProxyFileAsync(ecosystem, name, "1.0.0-rc1", "case-1.0.0-rc1.bin");
+
+        var row = await TileRowAsync(ecosystem);
+
+        Assert.Equal(expected, row.VersionCount);
+        Assert.Equal(expected, await DetailPageDistinctVersionsAsync(pkgId, ecosystem, name));
+    }
+
+    // PEP 440 spells one release many ways. An uploaded and a proxied spelling of the same release
+    // shadow each other, count once, and the tile agrees with the detail list.
+    [Theory]
+    [InlineData("1.0.0-rc1", "1.0.0rc1")]
+    [InlineData("1.0.0rc1", "1.0.0.rc1")]
+    [InlineData("v1.0", "1.0")]
+    [InlineData("1.0alpha1", "1.0a1")]
+    [InlineData("1.0-post1", "1.0.post1")]
+    [InlineData("1.0.post", "1.0.post0")]
+    public async Task PyPiSpellingVariantsOnBothPlanes_ShadowAndCountOnce(string uploaded, string proxied)
+    {
+        string pkgId = await SeedPackageAsync("pypi", "spell");
+
+        await SeedUploadedVersionAsync(pkgId, uploaded);
+        await SeedProxyFileAsync("pypi", "spell", proxied, "spell-" + proxied + ".tar.gz");
+
+        var row = await TileRowAsync("pypi");
+
+        Assert.Equal(1, row.VersionCount);
+        Assert.Equal(1, await DetailPageDistinctVersionsAsync(pkgId, "pypi", "spell"));
+        var inventory = new ArtifactInventoryRepository(
+            _db, new PackageRepository(_db), new CacheArtifactRepository(_db), new VulnerabilityRepository(_db, _clock));
+        var listed = await inventory.ListServeableVersionsAsync(_orgId, pkgId, "pypi", "spell");
+        Assert.Equal(uploaded, Assert.Single(listed).Version);
+    }
+
+    // Within one plane the page lists versions by exact string, so two spellings of a release
+    // there are two rows and count as two; only the cross-plane shadow follows the canonical form.
+    [Fact]
+    public async Task PyPiProxyFilesOfOneReleaseInTwoSpellings_CountAsTheRowsListed()
+    {
+        string pkgId = await SeedPackageAsync("pypi", "proxyspell");
+
+        await SeedProxyFileAsync("pypi", "proxyspell", "1.0RC1", "proxyspell-1.0RC1.tar.gz");
+        await SeedProxyFileAsync("pypi", "proxyspell", "1.0rc1", "proxyspell-1.0rc1-py3-none-any.whl");
+
+        var row = await TileRowAsync("pypi");
+
+        Assert.Equal(2, row.VersionCount);
+        Assert.Equal(2, await DetailPageDistinctVersionsAsync(pkgId, "pypi", "proxyspell"));
+    }
+
+    // A respelled publish attaches to the stored row, so this shape only exists for rows stored
+    // before that resolution. The tile counts the release once; the page still lists each stored
+    // row so an operator can see and delete the stray spelling.
+    [Fact]
+    public async Task PyPiUploadedSpellingsOfOneRelease_CountOnce_WhileBothRowsStayListed()
+    {
+        string pkgId = await SeedPackageAsync("pypi", "upspell");
+
+        await SeedUploadedVersionAsync(pkgId, "1.0.0-rc1");
+        await SeedUploadedVersionAsync(pkgId, "1.0.0rc1");
+        await SeedProxyFileAsync("pypi", "upspell", "1.0.0.rc1", "upspell-1.0.0.rc1.tar.gz");
+
+        var row = await TileRowAsync("pypi");
+
+        Assert.Equal(1, row.VersionCount);
+        Assert.Equal(2, await DetailPageDistinctVersionsAsync(pkgId, "pypi", "upspell"));
+    }
+
+    [Fact]
+    public async Task PyPiDistinctReleases_StayDistinct()
+    {
+        string pkgId = await SeedPackageAsync("pypi", "distinct");
+
+        await SeedUploadedVersionAsync(pkgId, "1.0rc1");
+        await SeedProxyFileAsync("pypi", "distinct", "1.0rc2", "distinct-1.0rc2.tar.gz");
+
+        var row = await TileRowAsync("pypi");
+
+        Assert.Equal(2, row.VersionCount);
+        Assert.Equal(2, await DetailPageDistinctVersionsAsync(pkgId, "pypi", "distinct"));
+    }
+
+    [Fact]
+    public async Task PyPiCount_IsScopedToTheOrgsOwnCacheAccess()
+    {
+        string pkgId = await SeedPackageAsync("pypi", "scoped");
+        await SeedUploadedVersionAsync(pkgId, "1.0");
+
+        string otherOrg = await OrgSeeder.InsertAsync(_db, "other");
+        var inserted = await new CacheArtifactRepository(_db).InsertAsync(new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "pypi",
+            Name = "scoped",
+            Version = "2.0",
+            Filename = "scoped-2.0.tar.gz",
+            BlobKey = Dependably.Storage.BlobKeys.Proxy(new string('a', 64)),
+            ContentHash = "abc123",
+            SizeBytes = 10,
+        });
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "INSERT INTO tenant_artifact_access (org_id, cache_artifact_id, download_count) VALUES (@otherOrg, @id, 0)",
+                new { otherOrg, id = inserted.Id });
+        }
+
+        var row = await TileRowAsync("pypi");
+
+        Assert.Equal(1, row.VersionCount);
+    }
+
+    [Fact]
+    public async Task NuGetProxyFiles_DifferingOnlyInCase_CountAsOneVersion()
+    {
+        string pkgId = await SeedPackageAsync("nuget", "cased.pkg");
+
+        await SeedProxyFileAsync("nuget", "cased.pkg", "1.0.0-RC1", "cased.pkg.1.0.0-RC1.nupkg");
+        await SeedProxyFileAsync("nuget", "cased.pkg", "1.0.0-rc1", "cased.pkg.1.0.0-rc1.nuspec");
+
+        var row = await TileRowAsync("nuget");
+
+        Assert.Equal(1, row.VersionCount);
+        Assert.Equal(await DetailPageDistinctVersionsAsync(pkgId, "nuget", "cased.pkg"), row.VersionCount);
+    }
+
+    [Theory]
+    [InlineData("npm", "case-npm")]
+    [InlineData("maven", "com.acme:case-mvn")]
+    public async Task ProxyOnly_CaseOnlyVariants_StayTwoVersions_AsTheListShowsThem(string ecosystem, string name)
+    {
+        string pkgId = await SeedPackageAsync(ecosystem, name);
+
+        await SeedProxyFileAsync(ecosystem, name, "1.0.0-RC1", "a-1.0.0-RC1.bin");
+        await SeedProxyFileAsync(ecosystem, name, "1.0.0-rc1", "a-1.0.0-rc1.bin");
+
+        var row = await TileRowAsync(ecosystem);
+
+        Assert.Equal(2, row.VersionCount);
+        Assert.Equal(2, await DetailPageDistinctVersionsAsync(pkgId, ecosystem, name));
+    }
+
+    [Theory]
+    [InlineData("npm", "up-npm")]
+    [InlineData("maven", "com.acme:up-mvn")]
+    public async Task UploadedOnly_CaseOnlyVariants_StayTwoVersions_AsTheListShowsThem(string ecosystem, string name)
+    {
+        string pkgId = await SeedPackageAsync(ecosystem, name);
+
+        await SeedUploadedVersionAsync(pkgId, "1.0.0-RC1");
+        await SeedUploadedVersionAsync(pkgId, "1.0.0-rc1");
+
+        var row = await TileRowAsync(ecosystem);
+
+        Assert.Equal(2, row.VersionCount);
+        Assert.Equal(2, await DetailPageDistinctVersionsAsync(pkgId, ecosystem, name));
     }
 
     [Fact]

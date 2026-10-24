@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
 
@@ -55,12 +56,101 @@ public sealed partial class PackageRepository
             var pageRows = await conn.QueryAsync<Package>(
                 PageHydrateSqlFor(plainOrderBy).Replace("@pageIds", pageIdsClause),
                 pageIdsParams);
-            return (ApplyAbandonedState(pageRows), total);
+            return (await ApplyAggregateFixupsAsync(conn, query.OrgId, pageRows, ct), total);
         }
 
         var rows = await conn.QueryAsync<Package>(FullCteSqlFor(query.SortBy, query.SortDir),
             new { orgId = query.OrgId, ecosystem = query.Ecosystem, searchPattern, limit = query.Limit, offset = query.Offset });
-        return (ApplyAbandonedState(rows), total);
+        return (await ApplyAggregateFixupsAsync(conn, query.OrgId, rows, ct), total);
+    }
+
+    /// <summary>
+    /// The aggregate columns (version count, download total, severity counts, malicious/KEV flags)
+    /// for one package, computed by the same projection the packages list uses so the detail view
+    /// and the list cannot disagree. Null when the package is not in the org.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "An IN list built by DapperInClause.Expand: only generated @name placeholders are spliced, every "
+                        + "value is bound; the rest is constant SQL text. The org filter is bound as @orgId.")]
+    public async Task<Package?> GetWithAggregatesAsync(string orgId, string packageId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        var (idsClause, idsParams) = DapperInClause.Expand("pageId", new[] { packageId });
+        idsParams.Add("orgId", orgId);
+        var row = await conn.QuerySingleOrDefaultAsync<Package>(
+            (CteOpen + PkgDataSelect + PageFilterClause + ") SELECT * FROM pkg_data")
+                .Replace("@pageIds", idsClause),
+            idsParams);
+        return row is null ? null : (await ApplyAggregateFixupsAsync(conn, orgId, new[] { row }, ct))[0];
+    }
+
+    // Post-query corrections to the SQL aggregates, then the abandoned tri-state. The SQL count
+    // cannot evaluate PEP 440 canonicalization, so PyPI rows are recounted here.
+    private async Task<List<Package>> ApplyAggregateFixupsAsync(
+        System.Data.Common.DbConnection conn, string orgId, IEnumerable<Package> rows, CancellationToken ct)
+    {
+        var list = ApplyAbandonedState(rows);
+        await RecountPyPiVersionsAsync(conn, orgId, list, ct);
+        return list;
+    }
+
+    // PyPI's SQL VersionCount cannot apply PEP 440 canonicalization to the cross-plane shadow, so
+    // PyPI rows are recounted here the way ListServeableVersionsAsync lists them: uploaded versions
+    // are distinct by PEP 440 identity and proxied versions by exact string within their own plane, and a proxied
+    // version is dropped only when an uploaded version is canonically equal to it (VersionIdentity).
+    // Two queries cover the whole page. package_versions is read through its org-filtered packages
+    // row; the cache plane is bounded by this org's tenant_artifact_access rows.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "An IN list built by DapperInClause.Expand: only generated @name placeholders are spliced, every "
+                        + "value is bound; the rest is constant SQL text. The org filter is bound as @orgId.")]
+    private static async Task RecountPyPiVersionsAsync(
+        System.Data.Common.DbConnection conn, string orgId, List<Package> list, CancellationToken ct)
+    {
+        var pypi = list.Where(p => p.Ecosystem == "pypi").ToList();
+        if (pypi.Count == 0)
+        {
+            return;
+        }
+
+        var uploadedBy = pypi.ToDictionary(p => p.Id, _ => new HashSet<string>(VersionIdentity.Comparer("pypi")));
+        var proxiedBy = pypi.ToDictionary(p => p.Id, _ => new HashSet<string>(StringComparer.Ordinal));
+
+        var (idsClause, idsParams) = DapperInClause.Expand("pkgId", pypi.Select(p => p.Id).ToList());
+        idsParams.Add("orgId", orgId);
+        // rawsql: idsClause is a DapperInClause (@pkgId0, ...) placeholder list; values are bound.
+        var uploaded = await conn.QueryAsync<(string PackageId, string Version)>(new CommandDefinition(
+            "SELECT pv.package_id AS PackageId, pv.version AS Version FROM package_versions pv" +
+            " JOIN packages p ON p.id = pv.package_id" +
+            " WHERE p.org_id = @orgId AND pv.origin = 'uploaded' AND pv.package_id IN " + idsClause,
+            idsParams, cancellationToken: ct));
+        foreach (var (packageId, version) in uploaded)
+        {
+            uploadedBy[packageId].Add(version);
+        }
+
+        var byPurlName = pypi.GroupBy(p => p.PurlName).ToDictionary(g => g.Key, g => g.ToList());
+        var (namesClause, namesParams) = DapperInClause.Expand("purlName", byPurlName.Keys.ToList());
+        namesParams.Add("orgId", orgId);
+        // rawsql: namesClause is a DapperInClause (@purlName0, ...) placeholder list; values are bound.
+        var proxied = await conn.QueryAsync<(string Name, string Version)>(new CommandDefinition(
+            "SELECT DISTINCT ca.name AS Name, ca.version AS Version FROM cache_artifact ca" +
+            " JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id" +
+            " WHERE taa.org_id = @orgId AND ca.ecosystem = 'pypi' AND ca.name IN " + namesClause,
+            namesParams, cancellationToken: ct));
+        foreach (var (name, version) in proxied)
+        {
+            foreach (var pkg in byPurlName[name])
+            {
+                proxiedBy[pkg.Id].Add(version);
+            }
+        }
+
+        var identity = VersionIdentity.Comparer("pypi");
+        foreach (var pkg in pypi)
+        {
+            var shadowing = new HashSet<string>(uploadedBy[pkg.Id], identity);
+            pkg.VersionCount = uploadedBy[pkg.Id].Count + proxiedBy[pkg.Id].Count(v => !shadowing.Contains(v));
+        }
     }
 
     // Computes the "abandoned" tri-state for each row in C# (against the injected TimeProvider)
@@ -97,18 +187,32 @@ public sealed partial class PackageRepository
                    -- cache plane is keyed UNIQUE (ecosystem, name, version, filename): one proxied
                    -- version owns one row per file, so a Maven version (jar+pom+sources+javadoc)
                    -- casts 4 rows, NuGet with its .nuspec 2, multi-file PyPI 2. A version present
-                   -- on both planes casts a row on each. UNION + COUNT(DISTINCT) collapses both —
-                   -- the same shape the severity counts below use — so the tile reports the version
-                   -- count the detail page renders (ArtifactInventoryRepository
-                   -- .ListServeableVersionsAsync, which suppresses a proxy version already
-                   -- uploaded) rather than a file tally.
-                   (SELECT COUNT(DISTINCT ver) FROM (
+                   -- on both planes casts a row on each. UNION + COUNT collapses both — the same
+                   -- shape the severity counts below use — so the tile reports the version count
+                   -- the detail page renders (ArtifactInventoryRepository
+                   -- .ListServeableVersionsAsync) rather than a file tally. The comparison mirrors
+                   -- that list exactly, and VersionIdentity decides its case rule: versions are
+                   -- counted by exact string, except that for the case-insensitive ecosystems (nuget,
+                   -- pypi) a proxied version matching an uploaded one ignoring case is not counted
+                   -- again (the NOT EXISTS), and NuGet proxy rows, which the list collapses
+                   -- case-insensitively, fold case among themselves. Every other ecosystem keeps a
+                   -- case-only variant as a separate version, on either plane, as the list does.
+                   -- PyPI shadows across planes by the PEP 440 canonical form, which SQL cannot
+                   -- compute, so RecountPyPiVersionsAsync replaces this column for PyPI rows.
+                   (SELECT COUNT(*) FROM (
                         SELECT pv2.version AS ver FROM package_versions pv2
                         WHERE pv2.package_id = p.id AND pv2.origin = 'uploaded'
                         UNION
-                        SELECT ca.version FROM cache_artifact ca
+                        SELECT CASE WHEN p.ecosystem = 'nuget' THEN LOWER(ca.version) ELSE ca.version END
+                        FROM cache_artifact ca
                         JOIN tenant_artifact_access taa ON taa.cache_artifact_id = ca.id
                         WHERE taa.org_id = p.org_id AND ca.ecosystem = p.ecosystem AND ca.name = p.purl_name
+                          AND NOT EXISTS (
+                              SELECT 1 FROM package_versions pu
+                              WHERE pu.package_id = p.id AND pu.origin = 'uploaded'
+                                AND (pu.version = ca.version
+                                     OR (p.ecosystem IN ('nuget', 'pypi')
+                                         AND LOWER(pu.version) = LOWER(ca.version))))
                    ) vn) as VersionCount,
                    -- Severity counts span both planes: uploaded versions carry
                    -- owner_kind='package_version' vuln rows (joined via package_version_id),

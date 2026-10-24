@@ -487,8 +487,8 @@ public sealed class OrgAuthConfigController : ControllerBase
         User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
         ?? User.FindFirst("sub")?.Value;
 
-    private string CurrentTenantId() =>
-        ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+    // Not an OrgScopedControllerBase, so it reads the tenant through the same throwing guard.
+    private string CurrentTenantId() => HttpContext.RequireTenantId();
 }
 
 public sealed record UpdateAuthConfigRequest(

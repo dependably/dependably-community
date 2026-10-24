@@ -23,7 +23,8 @@ namespace Dependably.Tests.Unit.Api;
 /// index may name an absolute href to any host (PEP 503 permits it, and mirror/proxy upstreams
 /// commonly link straight to <c>files.pythonhosted.org</c>). The resolver must attach that
 /// upstream's stored Authorization header only when the resolved artefact URL stays on the
-/// upstream's own host — never to whatever third-party host the upstream's own response named.
+/// upstream's own origin (scheme, host and port) — never to whatever third-party host, plaintext
+/// scheme, or other port the upstream's own response named.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class PyPiProxyUpstreamAuthHostPinningTests : IAsyncLifetime
@@ -168,6 +169,42 @@ public sealed class PyPiProxyUpstreamAuthHostPinningTests : IAsyncLifetime
         Assert.Equal($"https://private-upstream.test/packages/{file}", result.Value.Url);
         Assert.Equal(sha, result.Value.Sha256Hex);
         Assert.Equal("Bearer own-host-secret", result.Value.AuthorizationHeader);
+    }
+
+    [Theory]
+    // A hostile index downgrading the file href to plaintext on the configured https host.
+    [InlineData("http://private-upstream.test")]
+    // An explicit different port on the configured host: a different service.
+    [InlineData("https://private-upstream.test:8443")]
+    public async Task ResolveProxyUpstreamUrl_HrefOnSameHostDifferentSchemeOrPort_DoesNotAttachUpstreamAuthHeader(string hrefOrigin)
+    {
+        // The href stays on the configured host but leaves its origin. The resolver keeps its
+        // off-origin semantics — the file is still resolved (it is checksum-verified against the
+        // index's #sha256 either way) — but the credential does not ride along, so it never
+        // crosses the wire in plaintext or reaches another port's service.
+        const string pkgName = "widget";
+        const string version = "1.0.0";
+        const string file = "widget-1.0.0-py3-none-any.whl";
+        const string sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+        var source = new UpstreamSource("https://private-upstream.test", "Bearer origin-pin-secret");
+
+        string html = $"<a href=\"{hrefOrigin}/packages/{file}#sha256={sha}\">{file}</a>";
+        _server.Given(Request.Create().WithPath($"/simple/{pkgName}/")
+                .WithHeader("Authorization", "Bearer origin-pin-secret").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200)
+                .WithHeader("Content-Type", "text/html").WithBody(html));
+
+        var fetcher = BuildFetcher();
+        var parsed = new PyPiFilename(pkgName, version);
+
+        var result = await fetcher.ResolveProxyUpstreamUrlAsync(
+            file, parsed, pkgVersions: null, bases: [source], CancellationToken.None);
+
+        Assert.NotNull(result);
+        Assert.Equal($"{hrefOrigin}/packages/{file}", result.Value.Url);
+        Assert.Equal(sha, result.Value.Sha256Hex);
+        Assert.Null(result.Value.AuthorizationHeader);
     }
 
     private sealed class StubAirGapMode : IAirGapMode

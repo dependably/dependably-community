@@ -4,9 +4,10 @@ using NSubstitute;
 namespace Dependably.Tests.Infrastructure;
 
 /// <summary>
-/// Factory for <see cref="IOsvSource"/> test doubles that configures ALL FIVE members —
+/// Factory for <see cref="IOsvSource"/> test doubles that configures ALL SIX members —
 /// <c>QueryAsync</c>, <c>QueryBatchAsync</c>, the reachability-reporting
-/// <c>TryQueryAsync</c>/<c>TryQueryBatchAsync</c> pair, and <c>HasCoverageFor</c> — from one
+/// <c>TryQueryAsync</c>/<c>TryQueryBatchAsync</c> pair, <c>HasCoverageFor</c>, and the by-id
+/// <c>TryGetAdvisoryAsync</c> — from one
 /// advisory selector.
 ///
 /// Configuring only a subset is a silent trap: <see cref="IOsvSource"/> declares
@@ -33,10 +34,20 @@ public static class TestOsvSource
     /// unreachable advisory source — the all-empty answer every failure mode produces, which the
     /// scan service must never persist as "scanned, 0 advisories".
     /// </param>
-    public static IOsvSource Create(Func<string, List<OsvAdvisory>>? selector = null, bool reached = true)
+    /// <param name="byId">
+    /// What <c>TryGetAdvisoryAsync</c> answers for an advisory id (default: the source does not
+    /// know it). Reachability follows <paramref name="reached"/>.
+    /// </param>
+    public static IOsvSource Create(
+        Func<string, List<OsvAdvisory>>? selector = null, bool reached = true, Func<string, OsvAdvisory?>? byId = null)
     {
         var select = selector ?? (_ => []);
+        var lookup = byId ?? (_ => null);
         var osv = Substitute.For<IOsvSource>();
+
+        osv.TryGetAdvisoryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(call => Task.FromResult(
+                new OsvIdLookupResult(reached ? lookup(call.ArgAt<string>(0)) : null, reached)));
 
         osv.QueryAsync(Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(call => Task.FromResult(select(call.ArgAt<string>(0))));
@@ -72,6 +83,16 @@ public static class TestOsvSource
                 CvssScore: cvssScore, AffectedPackages: [], Published: null, Modified: null,
                 IsHydrated: true),
         ]);
+
+    /// <summary>
+    /// A double that answers no PURL query and knows the given OSV records by id, as the advisory
+    /// source would answer <c>GET /vulns/{id}</c>.
+    /// </summary>
+    public static IOsvSource WithRecords(IEnumerable<OsvAdvisory> records, bool reached = true)
+    {
+        var known = records.ToDictionary(r => r.Id, StringComparer.Ordinal);
+        return Create(reached: reached, byId: id => known.GetValueOrDefault(id));
+    }
 
     private static List<List<OsvAdvisory>> Batch(
         IReadOnlyList<string> purls, Func<string, List<OsvAdvisory>> select)

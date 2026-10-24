@@ -8,6 +8,7 @@ namespace Dependably.Tests.Infrastructure;
 /// In-memory SQLite metadata store for integration tests.
 /// Uses a named shared-cache database so multiple connections see the same data.
 /// Holds one permanent anchor connection to prevent the DB from being destroyed.
+/// Every connection it opens records its write transactions in <see cref="LockDiagnostics"/>.
 /// </summary>
 public sealed class TestMetadataStore : IMetadataStore, IAsyncDisposable
 {
@@ -21,6 +22,9 @@ public sealed class TestMetadataStore : IMetadataStore, IAsyncDisposable
         _anchor.Open();
     }
 
+    /// <summary>Hold times and owners of the write transactions on this database.</summary>
+    public SqliteLockDiagnostics LockDiagnostics { get; } = new();
+
     public DbProvider Provider => DbProvider.Sqlite;
 
     /// <summary>
@@ -31,8 +35,9 @@ public sealed class TestMetadataStore : IMetadataStore, IAsyncDisposable
 
     public async Task<DbConnection> OpenAsync(CancellationToken ct = default)
     {
-        var conn = new SqliteConnection(ConnectionString);
+        var conn = new TrackedSqliteConnection(ConnectionString, LockDiagnostics);
         await conn.OpenAsync(ct);
+        LockDiagnostics.Attach(conn);
         return conn;
     }
 

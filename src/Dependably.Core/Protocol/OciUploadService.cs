@@ -53,6 +53,7 @@ public sealed class OciUploadService
     private readonly OciReferenceGraph _referenceGraph;
     private readonly ILogger<OciUploadService> _logger;
     private readonly TimeProvider _time;
+    private readonly Dependably.Infrastructure.OciScan.OciScanEnqueuer? _scanEnqueuer;
 
     /// <summary>
     /// Injected dependencies for <see cref="OciUploadService"/>. Bundles the DI services so the
@@ -68,7 +69,9 @@ public sealed class OciUploadService
         OciImageLicenseRecorder LicenseRecorder,
         OciBlobKeyLock BlobKeyLock,
         ILogger<OciUploadService> Logger,
-        TimeProvider Time);
+        TimeProvider Time,
+        // Queues a newly catalogued image for the org's scanner; absent where scanning is not wired.
+        Dependably.Infrastructure.OciScan.OciScanEnqueuer? ScanEnqueuer = null);
 
     public OciUploadService(Dependencies deps)
     {
@@ -85,6 +88,7 @@ public sealed class OciUploadService
         _blobKeyLock = deps.BlobKeyLock;
         _logger = deps.Logger;
         _time = deps.Time;
+        _scanEnqueuer = deps.ScanEnqueuer;
 
         string? configured = deps.Configuration["PROXY_STAGING_PATH"];
         _stagingPath = string.IsNullOrWhiteSpace(configured) ? Path.GetTempPath() : configured;
@@ -488,7 +492,9 @@ public sealed class OciUploadService
 
             // Repoint the tag and surface the image in the shared catalogue (only tag pushes are
             // catalogued — by-digest manifest pushes, e.g. an index's children, are not the
-            // user-facing unit). Mirrors the proxy path's cataloguing with origin='uploaded'.
+            // user-facing unit). Mirrors the proxy path's cataloguing with origin='uploaded'. A
+            // digest-only push that is no index's child is catalogued by its first gated pull
+            // instead (CatalogueDigestPushAsync).
             bool isTag = !OciCoordinatesParser.IsValidDigest(a.Reference) && OciCoordinatesParser.IsValidTag(a.Reference);
             if (isTag)
             {
@@ -496,12 +502,80 @@ public sealed class OciUploadService
                 await RecordCatalogVersionAsync(
                     new OciCatalogEntry(a.OrgId, a.Repository, a.Reference, a.Digest, a.Hex, a.Bytes.Length, a.BlobKey), ct);
             }
+            else if (OciCoordinatesParser.IsValidDigest(a.Reference))
+            {
+                await RecordDigestPushAsync(a.OrgId, a.Repository, a.Digest, ct);
+            }
 
             _logger.LogInformation(
                 "OCI manifest push {Repository}/{Reference} → {Digest} ({Bytes} B)",
                 a.Repository, a.Reference, a.Digest, a.Bytes.Length);
             return OciManifestStoreResult.Ok(a.Digest);
         }
+    }
+
+    /// <summary>
+    /// Catalogues, and queues for this org's scanner, a manifest the org pushed by digest only and
+    /// holds no catalogue row for. A push catalogues only a tag, because the platform manifests of
+    /// a multi-arch push arrive by digest before the index that lists them; that index is not known
+    /// yet at push time, so the decision waits for the first pull the OCI pull gate answers under
+    /// scan enforcement. A digest that is by then a platform child of an image the org holds in
+    /// <paramref name="repository"/> inherits that image's verdict and is left alone, as is a
+    /// manifest this org did not push. Only the repository the manifest was pushed to
+    /// (<c>oci_manifest_pushes</c>) is catalogued: the bytes are held per digest, so they are
+    /// reachable under every repository name of the org, and cataloguing under the requested name
+    /// would let any reader mint a second, unblocked owner for a pushed image. Returns true when a
+    /// catalogue row was written.
+    /// </summary>
+    public async Task<bool> CatalogueDigestPushAsync(
+        string orgId, string repository, string digest, CancellationToken ct)
+    {
+        string[] parts = digest.Split(':', 2);
+        if (parts.Length != 2 || parts[0] != "sha256")
+        {
+            return false;
+        }
+
+        (string? BlobKey, long SizeBytes, string? Origin) row;
+        bool pushedHere;
+        bool isChild;
+        await using (var conn = await _db.OpenAsync(ct))
+        {
+            // xtenant: (digest, org_id) PK is tenant-scoped.
+            row = await conn.QuerySingleOrDefaultAsync<(string? BlobKey, long SizeBytes, string? Origin)>(
+                "SELECT blob_key AS BlobKey, size_bytes AS SizeBytes, origin AS Origin " +
+                "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+                new { digest, orgId });
+            // xtenant: (org_id, repository, digest) PK is tenant-scoped.
+            pushedHere = await conn.ExecuteScalarAsync<bool>(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM oci_manifest_pushes
+                    WHERE org_id = @orgId AND repository = @repository AND digest = @digest)
+                """,
+                new { orgId, repository, digest });
+            isChild = await OciReferenceGraph.IsPlatformOfHeldImageAsync(conn, orgId, repository, digest);
+        }
+
+        return row.BlobKey is not null && row.Origin == "uploaded" && pushedHere && !isChild
+            && await RecordCatalogVersionAsync(
+                new OciCatalogEntry(orgId, repository, Tag: null, digest, parts[1].ToLowerInvariant(), row.SizeBytes, row.BlobKey),
+                ct);
+    }
+
+    // Records the repository a digest-only push went to: the only name its first gated pull may
+    // catalogue it under (CatalogueDigestPushAsync).
+    private async Task RecordDigestPushAsync(string orgId, string repository, string digest, CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: org_id is in the INSERT column list; the PK is (org_id, repository, digest).
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO oci_manifest_pushes (org_id, repository, digest)
+            VALUES (@orgId, @repository, @digest)
+            ON CONFLICT (org_id, repository, digest) DO NOTHING
+            """,
+            new { orgId, repository, digest });
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -555,26 +629,37 @@ public sealed class OciUploadService
     /// same tag→digest, or many-tags-to-one-digest) is the expected case and swallowed; any
     /// other failure is logged but never propagated, since the push has already succeeded.
     /// </summary>
-    /// <summary>Identity of a pushed image tag, as recorded in the shared package catalogue.</summary>
+    /// <summary>Identity of a pushed image (its tag, or none for a digest-only push), as recorded in the shared package catalogue.</summary>
     private readonly record struct OciCatalogEntry(
-        string OrgId, string Repository, string Tag, string Digest, string Sha256Hex,
+        string OrgId, string Repository, string? Tag, string Digest, string Sha256Hex,
         long SizeBytes, string BlobKey);
 
-    private async Task RecordCatalogVersionAsync(OciCatalogEntry entry, CancellationToken ct)
+    // True when this call wrote the version row.
+    private async Task<bool> RecordCatalogVersionAsync(OciCatalogEntry entry, CancellationToken ct)
     {
         try
         {
             var pkg = await _packages.GetOrCreateAsync(
                 entry.OrgId, "oci", entry.Repository, entry.Repository, isProxy: false, ct);
             string purl = PurlNormalizer.Oci(entry.Repository, entry.Digest, entry.Tag);
-            await _packages.CreateVersionAsync(
+            var version = await _packages.CreateVersionAsync(
                 new NewPackageVersion(pkg.Id, entry.Digest, purl, entry.BlobKey, entry.SizeBytes,
                     entry.Sha256Hex, FirstFetch: false, Origin: "uploaded"),
                 ct);
 
+            // Only a digest catalogued for the first time reaches this line: a re-push of a known
+            // digest stops at the unique (package_id, version) constraint above.
+            if (_scanEnqueuer is not null)
+            {
+                await _scanEnqueuer.EnqueueAsync(
+                    entry.OrgId, Dependably.Infrastructure.OciScan.OciScanOwner.Hosted(version.Id),
+                    entry.Repository, entry.Digest, ct);
+            }
+
             // The manifest's license was stamped onto oci_blobs before this row existed; project it
             // onto the row now so every license reader sees it through the shared table.
             await _licenseRecorder.ProjectLicenseToCatalogAsync(entry.OrgId, entry.Digest, ct);
+            return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -585,6 +670,8 @@ public sealed class OciUploadService
                     ex.GetType().Name, entry.Repository, entry.Digest, entry.BlobKey,
                     System.Diagnostics.Activity.Current?.TraceId.ToString());
             }
+
+            return false;
         }
     }
 

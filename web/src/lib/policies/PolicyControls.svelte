@@ -53,6 +53,7 @@
     revoked: 'blockRevoked',
     install_script: 'blockInstallScripts',
     ssvc_exploitation: 'blockSsvcExploitation',
+    unscanned: 'ociScanEnforcement',
   }
   const PROVENANCE_PROXY_FIELD = {
     npm: 'verifyNpmSignatures',

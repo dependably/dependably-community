@@ -12,7 +12,8 @@ namespace Dependably.Tests.Infrastructure;
 /// concurrently with any other collection, while the rest of the suite stays parallel.
 ///
 /// Membership is enforced by <c>MeterListenerIsolationComplianceTests</c> — any new
-/// <c>MeterListener</c> filtered by <c>DependablyMeter.MeterName</c> must live in a class
+/// <c>MeterListener</c> that selects the shared meter, by <c>DependablyMeter.MeterName</c> or by a
+/// <c>"dependably"</c> meter or <c>"dependably.*"</c> instrument-name literal, must live in a class
 /// carrying <c>[Collection("MeterSensitive")]</c>.
 /// </summary>
 [CollectionDefinition("MeterSensitive", DisableParallelization = true)]

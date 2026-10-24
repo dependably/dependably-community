@@ -6,7 +6,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 namespace Dependably.Infrastructure.Startup;
 
 /// <summary>
-/// Wires the ASP.NET Core Identity spine for MFA: stores, hashers, and UserManager singletons
+/// Wires the ASP.NET Core Identity spine for MFA: stores, hashers, and the scoped UserManager
 /// for both tenant users and system_admin accounts. No authentication scheme is added — the
 /// existing JwtBearer and ApiToken schemes are unchanged.
 /// </summary>

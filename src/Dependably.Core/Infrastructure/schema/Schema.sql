@@ -221,6 +221,13 @@ CREATE TABLE IF NOT EXISTS org_settings (
     -- A deployment without one records no enrichment stamps at all, so no row is ever active OR
     -- stale and this arm never fires however it is set — unaffected by construction.
     block_ssvc_exploitation   TEXT    NOT NULL DEFAULT 'off' CHECK (block_ssvc_exploitation IN ('off', 'warn', 'block')),
+    -- OCI pull gate over the org's own image scan results: 'off' (default) / 'warn' / 'block'.
+    -- 'off' leaves every OCI response exactly as the licence-only gate answers it. Under 'warn'
+    -- or 'block' every manifest-returning OCI path evaluates the vulnerability arms (each still
+    -- obeying its own mode or ceiling above) against this org's stored scan of the image, and an
+    -- image with no complete result for the org reads as the 'unscanned' arm, never as clean.
+    -- Only 'block' refuses. Opt-in because a first pull is unscanned by construction.
+    oci_scan_enforcement      TEXT    NOT NULL DEFAULT 'off' CHECK (oci_scan_enforcement IN ('off', 'warn', 'block')),
     -- Policy for artefacts that ship an install/lifecycle script (package_versions.has_install_script).
     -- 'off' (default) / 'warn' (surface in UI only) / 'block' (deny fetch and serve). Opt-in;
     -- a manual per-version allow override still wins.
@@ -333,7 +340,8 @@ CREATE TABLE IF NOT EXISTS users (
     language    TEXT,  -- NULL = inherit org_settings.default_language
     timezone    TEXT,  -- IANA zone name; NULL = inherit org_settings.default_timezone
     -- Monotonic session-invalidation counter. Embedded in tenant JWTs as the `tver` claim
-    -- and bumped on password change so outstanding sessions go stale immediately.
+    -- and bumped on a password, role or account_status change so outstanding sessions go
+    -- stale immediately.
     token_version INTEGER NOT NULL DEFAULT 1,
     -- MFA fields used by the ASP.NET Core Identity UserStore. mfa_authenticator_key holds
     -- the AES-GCM-encrypted TOTP key; mfa_recovery_codes holds a JSON array of SHA-256
@@ -358,9 +366,10 @@ CREATE TABLE IF NOT EXISTS system_admins (
     must_change_password INTEGER NOT NULL DEFAULT 0,
     last_login_at TEXT
         CHECK (last_login_at IS NULL OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_login_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
-    -- Mirrors users.account_status: 'active' (can log in), 'locked' (auto-lockout from
-    -- throttling), 'disabled' (operator-set). Required for /api/v1/system/admins CRUD so
-    -- operators can disable peers without hard-deleting and losing the audit-trail identity.
+    -- Mirrors users.account_status: 'active' (can log in), 'locked' and 'disabled' (both
+    -- operator-set; failed-login throttling lives in the lockout store and never writes this
+    -- column). Required for /api/v1/system/admins CRUD so operators can disable peers without
+    -- hard-deleting and losing the audit-trail identity.
     account_status TEXT NOT NULL DEFAULT 'active' CHECK (account_status IN ('active','locked','disabled')),
     password_reset_issued_at TEXT
         CHECK (password_reset_issued_at IS NULL OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR password_reset_issued_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
@@ -1001,15 +1010,11 @@ CREATE TABLE IF NOT EXISTS nuget_symbol_index (
 CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_lookup ON nuget_symbol_index(org_id, ssqp_key, pdb_filename);
 -- FK-column index so cascade delete on package_versions does not table-scan.
 CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv ON nuget_symbol_index(package_version_id);
--- Same for the cache_artifact cascade.
-CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca ON nuget_symbol_index(cache_artifact_id);
--- Per-owner uniqueness, partial so each arm ignores the other's NULL FK.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv_key
-    ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, package_version_id)
-    WHERE owner_kind = 'package_version';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca_key
-    ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, cache_artifact_id)
-    WHERE owner_kind = 'cache_artifact';
+-- idx_nuget_symbol_index_ca, idx_nuget_symbol_index_pv_key and idx_nuget_symbol_index_ca_key are
+-- created in SchemaInitializer.RunAdditiveMigrationsAsync, next to the ALTERs that add
+-- cache_artifact_id and owner_kind. Releases up to 0.4.4 created this table without those columns,
+-- and on a database from one of them every statement here runs against that older shape, so an
+-- index naming either column would fail the boot (SchemaUpgradeOrderComplianceTests).
 
 -- Per-org operator-pinned signature trust anchors. Each row is one trust anchor
 -- (PGP public key, X.509 cert, npm SPKI key, Sigstore root, Rekor key, or publisher
@@ -1105,6 +1110,11 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     ecosystem       TEXT NOT NULL,
     package_name    TEXT NOT NULL,
     aliases         TEXT,           -- JSON array of alias IDs
+    -- The aliases value the vulnerability_aliases side table currently reflects. A row whose
+    -- aliases differs from this column (a NULL here against non-NULL aliases included) is one a
+    -- writer that does not maintain the side table has touched, and the reconcile sweep re-derives
+    -- its alias rows. Maintained only alongside vulnerability_aliases.
+    aliases_indexed TEXT,
     summary         TEXT,
     severity        TEXT            -- NULL when the advisory carries no CVSS severity classification
                     CHECK (severity IN ('CRITICAL','HIGH','MEDIUM','LOW')),
@@ -1249,7 +1259,15 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     cvelist_ssvc_technical_impact TEXT
                               CHECK (cvelist_ssvc_technical_impact IN ('partial','total')),
     cvelist_checked_at       TEXT
-        CHECK (cvelist_checked_at IS NULL OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+        CHECK (cvelist_checked_at IS NULL OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR cvelist_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    -- The advisory fields that decide what an alias donates (severity, score, summary, aliases),
+    -- joined into one string, and when they last changed. Alias-donor resolution on the links
+    -- compares a link's resolve time with donor_changed_at, so an unchanged re-fetch (which
+    -- rewrites fetched_at) does not make any link stale. NULL donor_basis is an advisory no
+    -- sweep has recorded yet. See VulnerabilityRepository.AliasDonors.cs.
+    donor_basis      TEXT,
+    donor_changed_at TEXT
+        CHECK (donor_changed_at IS NULL OR donor_changed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR donor_changed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR donor_changed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
 );
 
 CREATE TABLE IF NOT EXISTS package_version_vulns (
@@ -1291,6 +1309,26 @@ CREATE TABLE IF NOT EXISTS package_version_vulns (
     -- arrives as a new 0 rather than a stale 1.
     mal_still_live_for_version INTEGER NOT NULL DEFAULT 0
                                 CHECK (mal_still_live_for_version IN (0,1)),
+    -- Alias-donor values for THIS link, resolved when the link is written and again whenever a
+    -- sibling link or the advisory's own values change. A flaw published under several database
+    -- ids is one vulnerabilities row per id, and some databases omit severity and summary; the
+    -- report and the severity summary fill a missing value from an alias advisory linked to the
+    -- same owner. Resolving that donor per row per query made every report page and the
+    -- instance-wide summary cost a correlated lookup per link, so the donor's values are read
+    -- here instead. NULL means no donor supplied the value. The row's own advisory values are
+    -- never copied: readers take COALESCE(own, alias_*), so an advisory edit is visible at once and
+    -- only a donor edit needs the reconcile. alias_resolved_at is when the link was last resolved
+    -- (stamped a couple of minutes in the past, see VulnerabilityRepository.AliasDonors.cs); NULL
+    -- marks a link nobody has resolved (written by a release that predates the columns, or inserted
+    -- directly). Readers fall back to resolving the donor in the query for exactly those rows. The
+    -- sweep run at boot and after each scan tick re-resolves every owner that has such a link, or
+    -- whose advisory's donor fields changed at or after the link was resolved. For a proxied link the owner is
+    -- the cache artifact's ecosystem, name and version (each artifact is linked separately).
+    alias_severity   TEXT,
+    alias_cvss_score REAL,
+    alias_summary    TEXT,
+    alias_resolved_at TEXT
+        CHECK (alias_resolved_at IS NULL OR alias_resolved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR alias_resolved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR alias_resolved_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- Owner invariant: exactly one FK arm is active and matches owner_kind.
     CHECK (
         (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
@@ -1341,6 +1379,22 @@ CREATE TABLE IF NOT EXISTS account_send_throttle (
 
 CREATE INDEX IF NOT EXISTS idx_packages_org_ecosystem ON packages(org_id, ecosystem);
 CREATE INDEX IF NOT EXISTS idx_vulns_ecosystem_pkg ON vulnerabilities(ecosystem, package_name);
+-- Normalized alias -> advisory lookup, one row per (alias, advisory) pair, derived from
+-- vulnerabilities.aliases (a JSON array in a TEXT column that no index can search). `alias` is
+-- stored trimmed and upper-cased, the same normalization every lookup applies to its key, so a
+-- resolution is an indexed equality match instead of a LIKE scan of the whole advisory table.
+-- Written by VulnerabilityRepository.UpsertVulnerabilityAsync in the same transaction as the
+-- advisory row, and re-derived at every boot (and on each threat-feed pass) for rows a writer
+-- that predates the table left behind: see vulnerabilities.aliases_indexed.
+-- Instance-global and public data: no org_id, no personal data.
+-- personal-data: excluded — advisory identifiers only; no actor, address, or tenant identifier.
+CREATE TABLE IF NOT EXISTS vulnerability_aliases (
+    alias   TEXT NOT NULL,
+    osv_id  TEXT NOT NULL REFERENCES vulnerabilities(osv_id) ON DELETE CASCADE,
+    PRIMARY KEY (alias, osv_id)
+);
+-- Re-deriving one advisory's rows (and the FK cascade) is keyed by osv_id.
+CREATE INDEX IF NOT EXISTS idx_vulnerability_aliases_osv_id ON vulnerability_aliases(osv_id);
 -- vuln_id FK index: cascade deletes on vulnerabilities scan the child table without this.
 -- package_version_id and cache_artifact_id are covered by the partial unique indexes above.
 CREATE INDEX IF NOT EXISTS idx_pkg_version_vulns_vuln ON package_version_vulns(vuln_id);
@@ -1637,7 +1691,8 @@ CREATE TABLE IF NOT EXISTS oci_blobs (
     PRIMARY KEY (digest, org_id)
 );
 CREATE INDEX IF NOT EXISTS idx_oci_blobs_org ON oci_blobs(org_id);
-CREATE INDEX IF NOT EXISTS idx_oci_blobs_org_config_digest ON oci_blobs(org_id, config_digest);
+-- idx_oci_blobs_org_config_digest is created in SchemaInitializer.RunAdditiveMigrationsAsync next to
+-- the ALTER that adds config_digest: releases up to 0.3.0 created oci_blobs without that column.
 
 -- tag → digest mapping. Each tag points at exactly one manifest digest at a time.
 CREATE TABLE IF NOT EXISTS oci_tags (
@@ -1692,6 +1747,18 @@ CREATE TABLE IF NOT EXISTS oci_manifest_blobs (
 -- for the org FK cascade comes from the PK.
 CREATE INDEX IF NOT EXISTS idx_oci_manifest_blobs_org_blob
     ON oci_manifest_blobs(org_id, blob_digest);
+
+-- The repository each hosted manifest pushed by digest only was pushed to. A digest-only push
+-- has no tag to catalogue it under, and the platform manifests of a multi-arch push arrive this
+-- way before the index that lists them, so it is catalogued later, by its first pull under scan
+-- enforcement, and only under a repository named here. The bytes are held per (digest, org), so
+-- without this a pull under any other name would catalogue the image there too.
+CREATE TABLE IF NOT EXISTS oci_manifest_pushes (
+    org_id      TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    repository  TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    PRIMARY KEY (org_id, repository, digest)
+);
 
 -- In-progress OCI blob upload sessions (push). A `docker push` opens a session via
 -- POST /v2/{name}/blobs/uploads/, streams the blob via PATCH chunks, then finalizes with
@@ -2113,6 +2180,14 @@ CREATE TABLE IF NOT EXISTS tenant_artifact_access (
     content_hash        TEXT,
     blob_key            TEXT,
     size_bytes          INTEGER,
+    -- ISO 8601 UTC; when the deprecation-refresh pass last processed this tenant's
+    -- (ecosystem, name) group, whatever its outcome (refreshed, upstream failed, no upstream
+    -- configured, name reserved). The pass selects and orders groups by this per-tenant stamp,
+    -- not by the shared cache_artifact.deprecation_checked_at, so one tenant's pass over a row
+    -- several tenants cache cannot make another tenant's pending group read as fresh. NULL means
+    -- this tenant's group has not been processed since the row was recorded.
+    refresh_checked_at  TEXT
+        CHECK (refresh_checked_at IS NULL OR refresh_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR refresh_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR refresh_checked_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     PRIMARY KEY (org_id, cache_artifact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_artifact
@@ -2204,7 +2279,8 @@ CREATE INDEX IF NOT EXISTS idx_tenant_provisioning_jobs_org ON tenant_provisioni
 -- BackgroundJobScope.Dispose() fire-and-forget; surfaced in the sysadmin Audit page
 -- "Background Jobs" tab. id is a GUID-N; run_id matches the OTel trace correlation id
 -- attached to the activity. outcome is the same vocabulary BackgroundJobScope already
--- emits to the histogram ('success' | 'server_error' | 'cancelled'). No automatic
+-- emits to the histogram ('success' | 'degraded' | 'server_error' | 'cancelled'); 'degraded' is a
+-- run that finished but kept its previous data (a rejected or unreachable feed). No automatic
 -- retention yet — rows accumulate until a retention pass ages them out.
 CREATE TABLE IF NOT EXISTS background_job_runs (
     id              TEXT PRIMARY KEY,
@@ -3203,3 +3279,260 @@ CREATE INDEX IF NOT EXISTS idx_sbom_policy_findings_component ON sbom_policy_fin
 -- Those are no-ops on fresh installs (duplicate column error is swallowed / IF NOT EXISTS).
 -- They exist solely to add the columns to databases created before those columns were
 -- included in the CREATE TABLE blocks. Schema.sql is the authoritative complete schema.
+
+-- ── CISA KEV catalogue ──────────────────────────────────────────────────────────
+-- Local copy of the CISA Known Exploited Vulnerabilities catalogue, keyed by CVE id. Written only
+-- by ThreatFeedRefreshService, replaced as a whole inside one transaction on each successful feed
+-- fetch. A failed fetch, an empty one, or one under half the stored size is treated as a broken
+-- feed and leaves the table untouched, so it holds the last complete catalogue.
+-- Read by the package lookup, which evaluates advisories fetched live from OSV that have no
+-- vulnerabilities row and so cannot be flagged through is_kev. Instance-global and public data:
+-- no org_id, no personal data.
+-- personal-data: excluded — public catalogue entries; no actor, address, or tenant identifier.
+CREATE TABLE IF NOT EXISTS kev_catalog (
+    cve_id          TEXT PRIMARY KEY,
+    -- Tri-state, same meaning as vulnerabilities.kev_known_ransomware: 1 = CISA marks the entry
+    -- Known, 0 = Unknown, NULL = the entry carried no such field.
+    known_ransomware INTEGER
+                    CHECK (known_ransomware IN (0,1)),
+    -- Calendar date as CISA publishes it (YYYY-MM-DD), so not a canonical-UTC *_at column.
+    date_added      TEXT,
+    refreshed_at    TEXT NOT NULL
+        CHECK (refreshed_at IS NULL OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+-- ── FIRST.org EPSS scores ───────────────────────────────────────────────────────
+-- Local copy of FIRST.org's daily EPSS bulk file: one row per CVE the model scores. Written only
+-- by ThreatFeedRefreshService, replaced as a whole inside one transaction on each successful
+-- fetch. A failed fetch, an empty one, or one under half the stored size is treated as a broken
+-- feed and leaves the table untouched, so it holds the last complete file.
+-- Read by the package lookup, which evaluates advisories fetched live from OSV for CVEs this
+-- instance has never stored a vulnerabilities row for, and so would otherwise have no EPSS to
+-- compare against a tenant's tolerance. Instance-global and public data: no org_id, no personal
+-- data.
+-- personal-data: excluded — public model scores keyed by CVE id; no actor, address, or tenant identifier.
+CREATE TABLE IF NOT EXISTS epss_scores (
+    cve_id       TEXT PRIMARY KEY,
+    epss         REAL NOT NULL
+                 CHECK (epss >= 0.0 AND epss <= 1.0),
+    percentile   REAL
+                 CHECK (percentile IS NULL OR (percentile >= 0.0 AND percentile <= 1.0)),
+    -- The calendar date FIRST.org stamped on the file (YYYY-MM-DD), NULL when the file carried
+    -- none, so not a canonical-UTC *_at column.
+    score_date   TEXT,
+    refreshed_at TEXT NOT NULL
+        CHECK (refreshed_at IS NULL OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+-- Landing area the EPSS bulk file is loaded into, in short committed batches, before it is copied
+-- over epss_scores in bounded committed batches by key range. Loading epss_scores directly would hold the database's
+-- single write lock for the whole ~380k-row file and fail every concurrent writer with
+-- SQLITE_BUSY. Empty outside a refresh pass; holds no data a reader consults.
+-- personal-data: excluded — transient copy of the public EPSS file; no actor, address, or tenant identifier.
+CREATE TABLE IF NOT EXISTS epss_scores_staging (
+    cve_id       TEXT PRIMARY KEY,
+    epss         REAL NOT NULL
+                 CHECK (epss >= 0.0 AND epss <= 1.0),
+    percentile   REAL
+                 CHECK (percentile IS NULL OR (percentile >= 0.0 AND percentile <= 1.0)),
+    -- The calendar date FIRST.org stamped on the file (YYYY-MM-DD), NULL when the file carried
+    -- none, so not a canonical-UTC *_at column.
+    score_date   TEXT,
+    refreshed_at TEXT NOT NULL
+        CHECK (refreshed_at IS NULL OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR refreshed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+-- ── OCI image scanning ─────────────────────────────────────────────────────────────────────────
+-- An out-of-process scanner, authenticated by a tenant API token holding scan:oci, claims an
+-- image, reads its manifests and blobs, and posts the image's package inventory and the advisories
+-- that affect it. Every row belongs to the org whose scanner wrote it: a proxied image lives once
+-- on the global cache plane, but one tenant's scan result never becomes another tenant's view of
+-- it. The owner is the hosted package_versions row or the proxied cache_artifact row, and every
+-- table cascades from both the org and the owner.
+
+CREATE TABLE IF NOT EXISTS oci_scan_jobs (
+    id                     TEXT PRIMARY KEY,
+    org_id                 TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    package_version_id     TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
+    cache_artifact_id      TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind             TEXT NOT NULL
+                           CHECK (owner_kind IN ('package_version','cache_artifact')),
+    repository             TEXT NOT NULL,
+    digest                 TEXT NOT NULL,
+    -- scan: read the layers. rematch: re-match the stored inventory without reading any layer.
+    kind                   TEXT NOT NULL DEFAULT 'scan' CHECK (kind IN ('scan','rematch')),
+    state                  TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','done','failed')),
+    attempts               INTEGER NOT NULL DEFAULT 0,
+    -- Claims whose result was refused because the advisory source was unreachable. They count
+    -- in attempts (the claim fence) but not against the attempt budget (attempts - deferrals).
+    deferrals              INTEGER NOT NULL DEFAULT 0,
+    -- When the first of those deferrals happened: the deferral window runs from it, so time a
+    -- job spent queued before its first claim never shortens the window. NULL until one defers.
+    first_deferred_at      TEXT
+        CHECK (first_deferred_at IS NULL OR first_deferred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR first_deferred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR first_deferred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    lease_expires_at            TEXT
+        CHECK (lease_expires_at IS NULL OR lease_expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR lease_expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR lease_expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    next_attempt_at        TEXT
+        CHECK (next_attempt_at IS NULL OR next_attempt_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR next_attempt_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR next_attempt_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    last_error             TEXT,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (created_at IS NULL OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        CHECK (updated_at IS NULL OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    completed_at           TEXT
+        CHECK (completed_at IS NULL OR completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
+);
+-- One job per (owner, org, kind): a repeat push, a revalidated pull or a sweep re-run never queues
+-- a second one.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oci_scan_jobs_pv
+    ON oci_scan_jobs(package_version_id, org_id, kind) WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oci_scan_jobs_ca
+    ON oci_scan_jobs(cache_artifact_id, org_id, kind) WHERE owner_kind = 'cache_artifact';
+-- The cascade from a deleted package_versions / cache_artifact row looks its children up by the
+-- owner column alone, with no owner_kind predicate, so it cannot use the partial indexes above.
+CREATE INDEX IF NOT EXISTS idx_oci_scan_jobs_package_version ON oci_scan_jobs(package_version_id);
+CREATE INDEX IF NOT EXISTS idx_oci_scan_jobs_cache_artifact ON oci_scan_jobs(cache_artifact_id);
+-- The claim's scan: an org's pending jobs in due order.
+CREATE INDEX IF NOT EXISTS idx_oci_scan_jobs_claim
+    ON oci_scan_jobs(org_id, state, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS oci_scanners (
+    org_id                 TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    last_seen_at           TEXT NOT NULL
+        CHECK (last_seen_at IS NULL OR last_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR last_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR last_seen_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    scanner_version        TEXT,
+    -- remote or local; with local, osv_state_json lists the OSV dumps the scanner has loaded.
+    osv_source             TEXT,
+    osv_state_json         TEXT,
+    -- 1 when the org's scanner last claimed with rematch among its kinds, 0 when it claimed
+    -- without; NULL (never claimed since the column existed) reads as 0. The sweep queues rematch
+    -- and legacy re-extraction jobs only for an org whose scanner has opted in.
+    accepts_rematch        INTEGER
+);
+
+-- Edge nodes only: the OCI scan-enforcement posture each org's master last stated on a response
+-- (X-Dependably-Oci-Scan-Enforcement; a response without it records nothing), and recorded_at, when
+-- the master last stated it. An edge holds no scan results and no copy of the master's org
+-- settings, so this is how it knows not to answer a manifest from its own cache, or serve one
+-- through a master outage, for an org the master gates.
+CREATE TABLE IF NOT EXISTS edge_oci_scan_postures (
+    org_id                 TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    posture                TEXT NOT NULL CHECK (posture IN ('off', 'warn', 'block')),
+    recorded_at            TEXT NOT NULL
+        CHECK (recorded_at IS NULL OR recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+);
+
+CREATE TABLE IF NOT EXISTS oci_scan_coverage (
+    id                     TEXT PRIMARY KEY,
+    org_id                 TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    package_version_id     TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
+    cache_artifact_id      TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind             TEXT NOT NULL
+                           CHECK (owner_kind IN ('package_version','cache_artifact')),
+    platform               TEXT NOT NULL,
+    scanner_version        TEXT NOT NULL,
+    extraction_version     TEXT NOT NULL,
+    osv_source             TEXT NOT NULL,
+    scanned_at             TEXT NOT NULL
+        CHECK (scanned_at IS NULL OR scanned_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR scanned_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR scanned_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    -- The scanner's coverage gaps, verbatim, as a JSON array. A non-empty list makes the image
+    -- partial: something in it was not inventoried or not matched.
+    gaps_json              TEXT NOT NULL DEFAULT '[]',
+    gap_count              INTEGER NOT NULL DEFAULT 0,
+    entrypoint_kind        TEXT,
+    closure_bounded        INTEGER NOT NULL DEFAULT 0,
+    -- The subset of gaps_json about the image's contents (extraction gaps, platforms not scanned),
+    -- as a JSON array. A rematch keeps it and recomputes only the matching gaps. NULL is a row from
+    -- a scanner that does not classify its gaps; such an image is re-extracted, never re-matched.
+    content_gaps_json      TEXT,
+    -- When OSV was last matched against this platform's inventory, by a scan or a rematch.
+    -- scanned_at stays the extraction instant. NULL on a row written before the column existed.
+    matched_at             TEXT
+        CHECK (matched_at IS NULL OR matched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z' OR matched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z' OR matched_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    -- The manifest this platform's result describes: the image's own digest for a single-platform
+    -- image, or the child manifest its index lists for the platform. Derived server-side from the
+    -- stored index when the result is written, so the OCI pull gate can tell a platform that was
+    -- scanned from one the scanner skipped. NULL on a row written before the column existed, until
+    -- the oci-scan-sweep backfill fills it; until then the reference graph alone decides membership.
+    manifest_digest        TEXT,
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oci_scan_coverage_pv
+    ON oci_scan_coverage(package_version_id, org_id, platform) WHERE owner_kind = 'package_version';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oci_scan_coverage_ca
+    ON oci_scan_coverage(cache_artifact_id, org_id, platform) WHERE owner_kind = 'cache_artifact';
+-- The owner cascade's lookup, which the partial indexes above cannot serve (see oci_scan_jobs).
+CREATE INDEX IF NOT EXISTS idx_oci_scan_coverage_package_version ON oci_scan_coverage(package_version_id);
+CREATE INDEX IF NOT EXISTS idx_oci_scan_coverage_cache_artifact ON oci_scan_coverage(cache_artifact_id);
+
+CREATE TABLE IF NOT EXISTS oci_image_components (
+    id                     TEXT PRIMARY KEY,
+    org_id                 TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    package_version_id     TEXT REFERENCES package_versions(id) ON DELETE CASCADE,
+    cache_artifact_id      TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+    owner_kind             TEXT NOT NULL
+                           CHECK (owner_kind IN ('package_version','cache_artifact')),
+    platform               TEXT NOT NULL,
+    purl                   TEXT NOT NULL,
+    ecosystem              TEXT NOT NULL,
+    name                   TEXT NOT NULL,
+    version                TEXT NOT NULL,
+    -- The distro source package, which distro advisories are keyed by.
+    source_name            TEXT,
+    source_version         TEXT,
+    layer_index            INTEGER,
+    layer_diff_id          TEXT,
+    layer_instruction      TEXT,
+    files_present          INTEGER,
+    files_removed          INTEGER,
+    -- 1 or 0 only when the entrypoint's link closure is bounded; NULL means not determined.
+    in_entrypoint_closure  INTEGER,
+    -- For a language package installed by an OS package: that OS package's purl.
+    owned_by_purl          TEXT,
+    -- The component's own reachability verdict, which depends on the component and not on any
+    -- advisory, so a rematch copies it onto whatever advisory it finds. NULL on a row from a
+    -- scanner that does not report component verdicts; a finding then reads 'unknown'.
+    reachability_status    TEXT
+                           CHECK (reachability_status IS NULL
+                                  OR reachability_status IN ('reachable','not_observed','unknown')),
+    not_observed_basis     TEXT,
+    confidence             TEXT,
+    CHECK (
+        (owner_kind = 'package_version' AND package_version_id IS NOT NULL AND cache_artifact_id IS NULL)
+        OR
+        (owner_kind = 'cache_artifact' AND cache_artifact_id IS NOT NULL AND package_version_id IS NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_oci_image_components_pv ON oci_image_components(package_version_id);
+CREATE INDEX IF NOT EXISTS idx_oci_image_components_ca ON oci_image_components(cache_artifact_id);
+CREATE INDEX IF NOT EXISTS idx_oci_image_components_org_purl ON oci_image_components(org_id, purl);
+-- The version page reads one image's components a platform at a time, keyed by its owner kind.
+CREATE INDEX IF NOT EXISTS idx_oci_image_components_pv_platform
+    ON oci_image_components(package_version_id, org_id, platform) WHERE owner_kind = 'package_version';
+CREATE INDEX IF NOT EXISTS idx_oci_image_components_ca_platform
+    ON oci_image_components(cache_artifact_id, org_id, platform) WHERE owner_kind = 'cache_artifact';
+
+CREATE TABLE IF NOT EXISTS oci_component_vulns (
+    id                     TEXT PRIMARY KEY,
+    org_id                 TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    component_id           TEXT NOT NULL REFERENCES oci_image_components(id) ON DELETE CASCADE,
+    vuln_id                TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
+    reachability_status    TEXT NOT NULL DEFAULT 'unknown'
+                           CHECK (reachability_status IN ('reachable','not_observed','unknown')),
+    not_observed_basis     TEXT,
+    confidence             TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oci_component_vulns_component_vuln
+    ON oci_component_vulns(component_id, vuln_id);
+CREATE INDEX IF NOT EXISTS idx_oci_component_vulns_vuln ON oci_component_vulns(vuln_id);
+-- The cascade from a deleted org.
+CREATE INDEX IF NOT EXISTS idx_oci_component_vulns_org ON oci_component_vulns(org_id);

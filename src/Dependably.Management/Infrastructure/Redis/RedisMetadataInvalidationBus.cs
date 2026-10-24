@@ -24,9 +24,19 @@ namespace Dependably.Infrastructure.Redis;
 /// Redis instance do not cross-evict each other, and each message carries this process's
 /// <see cref="Origin"/> so a replica ignores its own broadcast (it evicted before publishing).</para>
 ///
+/// <para><b>The receiver is resolved at <see cref="StartAsync"/>, not in the constructor.</b> The
+/// dependency runs in a loop: the coordinator publishes through this bus, and this bus applies
+/// received messages through the receiver, which evicts through the coordinator. Taking the
+/// receiver eagerly makes constructing the bus construct the coordinator, which needs the bus
+/// first; the container recurses on that until it deadlocks on its own singleton lock. Deferring
+/// the receiver to the point the subscription opens breaks the loop: by then the bus singleton
+/// exists, so the coordinator resolves against it. Nothing is lost by the deferral, because no
+/// message can arrive before the subscription that delivers it.</para>
+///
 /// <para>
-/// suspension-ok: not per-tenant. Broadcasts a fleet-wide cache-invalidation signal keyed by
-/// cache entry, not by org; there is no per-org selection point to gate.
+/// suspension-ok: not per-tenant. Broadcasts a fleet-wide cache-invalidation signal for a change
+/// another request already made; an org-wide message names the org whose caches to clear, but
+/// clearing a cache only forces a re-read, so there is no per-org selection point to gate.
 /// </para>
 /// </summary>
 public sealed class RedisMetadataInvalidationBus : IMetadataInvalidationBus, IHostedService
@@ -35,16 +45,19 @@ public sealed class RedisMetadataInvalidationBus : IMetadataInvalidationBus, IHo
     public const string ChannelName = "metadata-invalidation";
 
     private readonly IRedisClient _redis;
-    private readonly MetadataInvalidationReceiver _receiver;
+    private readonly Func<MetadataInvalidationReceiver> _resolveReceiver;
     private readonly ILogger<RedisMetadataInvalidationBus> _logger;
+
+    // Set once by StartAsync, before the subscription that delivers messages to OnMessage opens.
+    private MetadataInvalidationReceiver? _receiver;
 
     public RedisMetadataInvalidationBus(
         IRedisClient redis,
-        MetadataInvalidationReceiver receiver,
+        Func<MetadataInvalidationReceiver> resolveReceiver,
         ILogger<RedisMetadataInvalidationBus> logger)
     {
         _redis = redis;
-        _receiver = receiver;
+        _resolveReceiver = resolveReceiver;
         _logger = logger;
     }
 
@@ -71,22 +84,34 @@ public sealed class RedisMetadataInvalidationBus : IMetadataInvalidationBus, IHo
     /// </summary>
     public async Task PublishAsync(MetadataInvalidation invalidation)
     {
-        var ecosystem = new KeyValuePair<string, object?>("ecosystem", invalidation.Ecosystem);
+        var tags = invalidation.MetricTags();
         try
         {
             string payload = MetadataInvalidationCodec.Encode(invalidation, Origin);
             await _redis.GetSubscriber().PublishAsync(Channel, payload);
-            DependablyMeter.MetadataInvalidationsPublished.Add(
-                1, ecosystem, new KeyValuePair<string, object?>("outcome", "success"));
+            var success = tags;
+            success.Add(new KeyValuePair<string, object?>("outcome", "success"));
+            DependablyMeter.MetadataInvalidationsPublished.Add(1, success);
         }
         catch (Exception ex)
         {
-            DependablyMeter.MetadataInvalidationsPublished.Add(
-                1, ecosystem, new KeyValuePair<string, object?>("outcome", "server_error"));
-            _logger.LogWarning(ex,
-                "Metadata-invalidation broadcast failed for {Ecosystem}: {ExceptionType}. Peer replicas "
-                + "fall back to metadata TTL expiry for this change.",
-                invalidation.Ecosystem, ex.GetType().Name);
+            var failed = tags;
+            failed.Add(new KeyValuePair<string, object?>("outcome", "server_error"));
+            DependablyMeter.MetadataInvalidationsPublished.Add(1, failed);
+            if (invalidation.IsOrgWide)
+            {
+                _logger.LogWarning(ex,
+                    "Metadata-invalidation broadcast failed for {Scope} scope: {ExceptionType}. Peer "
+                    + "replicas fall back to metadata TTL expiry for this change.",
+                    invalidation.Scope, ex.GetType().Name);
+            }
+            else
+            {
+                _logger.LogWarning(ex,
+                    "Metadata-invalidation broadcast failed for {Scope} scope {Ecosystem}: {ExceptionType}. "
+                    + "Peer replicas fall back to metadata TTL expiry for this change.",
+                    invalidation.Scope, invalidation.Ecosystem, ex.GetType().Name);
+            }
         }
     }
 
@@ -97,6 +122,10 @@ public sealed class RedisMetadataInvalidationBus : IMetadataInvalidationBus, IHo
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        // Outside the try: failing to build the receiver is a composition fault, not a broker
+        // outage, and must fail startup as loudly as it would have from the constructor.
+        _receiver ??= _resolveReceiver();
+
         try
         {
             await _redis.GetSubscriber().SubscribeAsync(Channel, OnMessage);
@@ -128,11 +157,24 @@ public sealed class RedisMetadataInvalidationBus : IMetadataInvalidationBus, IHo
 
     // Subscriber callback. Runs on a StackExchange.Redis message-pump thread, so it must never
     // throw: an escaping exception there tears down the pump for every subscriber in the process.
-    private void OnMessage(RedisChannel _, RedisValue message)
+    // Internal so a test can deliver a message to a bus whose receiver was never bound.
+    internal void OnMessage(RedisChannel _, RedisValue message)
     {
+        if (_receiver is not { } receiver)
+        {
+            // StartAsync binds the receiver before it opens the subscription that calls this, so
+            // reaching here means that ordering was broken. The message cannot be applied; say so,
+            // because otherwise a peer's change is silently missed until the entries' TTL.
+            _logger.LogWarning(
+                "Received a metadata invalidation before the receiver was bound; it was not applied. "
+                + "The affected entries on replica {Origin} expire on their TTL instead.",
+                Origin);
+            return;
+        }
+
         try
         {
-            _receiver.Apply(message.ToString(), Origin);
+            receiver.Apply(message.ToString(), Origin);
         }
         catch (Exception ex)
         {

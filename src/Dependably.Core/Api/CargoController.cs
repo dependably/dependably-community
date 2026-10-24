@@ -307,7 +307,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
         {
             var uploadedVersionSet = uploadedVersions
                 .Select(v => v.Version)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                .ToHashSet(VersionIdentity.Comparer("cargo"));
 
             var proxyIds = proxyEntries.Select(e => e.Id).ToList();
             var proxySignals = proxyIds.Count > 0
@@ -316,7 +316,7 @@ public sealed partial class CargoController : OrgScopedControllerBase
 
             var synthetic = proxyEntries
                 .Where(e => !uploadedVersionSet.Contains(e.Version))
-                .GroupBy(e => e.Version, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(e => e.Version, VersionIdentity.Comparer("cargo"))
                 .Select(g => g.First().ToPackageVersionSynthetic(proxySignals))
                 .ToList();
 

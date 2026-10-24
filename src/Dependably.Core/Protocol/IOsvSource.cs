@@ -66,6 +66,16 @@ public interface IOsvSource
     }
 
     /// <summary>
+    /// One advisory by its OSV id, read from this source. <see cref="OsvIdLookupResult.Reached"/>
+    /// false means the source could not answer (outage, rate limit, missing dump directory), so
+    /// a null advisory says nothing; Reached true with a null advisory means the source does not
+    /// know the id. The default answers unreached, so a source that cannot look an advisory up
+    /// by id never reads as "unknown" and never lets a caller fall back to another record.
+    /// </summary>
+    Task<OsvIdLookupResult> TryGetAdvisoryAsync(string id, CancellationToken ct = default) =>
+        Task.FromResult(new OsvIdLookupResult(null, Reached: false));
+
+    /// <summary>
     /// True when this source's currently loaded/reachable state actually carries advisory
     /// coverage for <paramref name="ecosystem"/> — a dynamic, source-aware refinement of
     /// <see cref="OsvFeedCoverage.HasAdvisoryFeed"/>. The static gate is the hard,
@@ -73,10 +83,10 @@ public interface IOsvSource
     /// ecosystem could ever match" — OCI, Terraform); this member only ever narrows further,
     /// never widens what the static gate already excludes, for a source whose own loaded state
     /// can fall short of what the static gate allows. <c>LocalOsvSource</c> overrides it: a
-    /// sideloaded dump may carry no distro feeds for an ecosystem the static gate still allows
-    /// (RPM has no single OSV ecosystem — it resolves via distro feeds like "Rocky Linux" —
-    /// so a dump with none of those loaded queries empty for every RPM purl, which is
-    /// indistinguishable from a genuine clean scan unless this member says so).
+    /// sideloaded dump may carry no feed for an ecosystem the static gate still allows (a dump
+    /// without the PyPI feed, or with none of the distro feeds like "Rocky Linux" that RPM, having
+    /// no single OSV ecosystem, resolves through), and it then queries empty for every purl of that
+    /// ecosystem, which is indistinguishable from a genuine clean scan unless this member says so.
     ///
     /// The default implementation defers entirely to the static gate, which is correct for any
     /// source (like <see cref="OsvClient"/>) whose reachability is not ecosystem-dependent — a
@@ -85,7 +95,30 @@ public interface IOsvSource
     /// </summary>
     Task<bool> HasCoverageFor(string? ecosystem) =>
         Task.FromResult(OsvFeedCoverage.HasAdvisoryFeed(ecosystem));
+
+    /// <summary>
+    /// Release-scoped package query for distro feeds (Alpine, the RPM distros): the advisories
+    /// filed under <paramref name="scope"/>'s OSV ecosystem that affect <paramref name="version"/>
+    /// of <paramref name="name"/>, ordered by the distro's own version scheme. A bare PURL cannot
+    /// carry the release, so the PURL queries cannot answer this.
+    ///
+    /// The default implementation answers <see cref="OsvScopedQueryResult.Reached"/> false: a
+    /// source that has not implemented the scoped query must read as "not consulted", never as an
+    /// empty, clean answer.
+    /// </summary>
+    Task<OsvScopedQueryResult> TryQueryDistroPackageAsync(
+        DistroScope scope, string name, string version, CancellationToken ct = default) =>
+        Task.FromResult(new OsvScopedQueryResult([], Reached: false, Covered: false));
 }
+
+/// <summary>
+/// Result of <see cref="IOsvSource.TryQueryDistroPackageAsync"/>. <see cref="Reached"/> false means
+/// the source was not consulted (outage, or no scoped query). <see cref="Covered"/> false with
+/// <see cref="Reached"/> true means the source was consulted but holds no feed for the requested
+/// release, which an offline dump can lack; in both cases an empty <see cref="Advisories"/> is not
+/// a clean answer.
+/// </summary>
+public sealed record OsvScopedQueryResult(List<OsvAdvisory> Advisories, bool Reached, bool Covered = true);
 
 /// <summary>
 /// Result of <see cref="IOsvSource.TryQueryAsync"/>: the advisories found (empty on both a
@@ -94,6 +127,8 @@ public interface IOsvSource
 /// <see cref="Advisories"/> as authoritative.
 /// </summary>
 public sealed record OsvQueryResult(List<OsvAdvisory> Advisories, bool Reached);
+
+public sealed record OsvIdLookupResult(OsvAdvisory? Advisory, bool Reached);
 
 /// <summary>
 /// Result of <see cref="IOsvSource.TryQueryBatchAsync"/>: the per-purl advisory lists (parallel to

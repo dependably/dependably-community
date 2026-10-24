@@ -110,7 +110,74 @@ public sealed class NuGetSymbolProxyTests : IAsyncLifetime
         Assert.Equal(pdb, await second.Content.ReadAsByteArrayAsync());
     }
 
+    [Theory]
+    [InlineData("proxy_passthrough_enabled")]
+    [InlineData("air_gapped")]
+    public async Task SsqpMiss_OrgProxiesNothing_NeverAsksTheSymbolServer(string setting)
+    {
+        // Passthrough off and an org-level air-gap are both "this org does not talk to its
+        // upstreams". A debug-id lookup carries the PDB name of the org's code, so the symbol
+        // server must not be asked either.
+        StubPdb(PdbName);
+        await SetSymbolServerUrlAsync($"{_factory.MockUpstream.Urls[0]}/symbols");
+        await SetOrgFlagAsync(setting, setting == "air_gapped");
+
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        var resp = await client.GetAsync(Url);
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Equal(0, SymbolRequestCount(PdbName));
+        Assert.Equal(0, await CachedSymbolCountAsync());
+    }
+
+    [Fact]
+    public async Task SsqpMiss_ReservedPdbName_IsNotAsked_UnreservedNameStillIs()
+    {
+        // A PDB is named after its assembly, which is normally the package id: a reserved
+        // internal id must not leave the instance as a symbol-server path. Another name on the
+        // same request stream is unaffected.
+        const string otherPdb = "public-lib.pdb";
+        StubPdb(PdbName);
+        StubPdb(otherPdb);
+        await SetSymbolServerUrlAsync($"{_factory.MockUpstream.Urls[0]}/symbols");
+        await _factory.Services.GetRequiredService<Dependably.Protocol.ReservedNamespaceService>()
+            .AddAsync(await DefaultOrgIdAsync(), "nuget", "Proxied*", createdBy: null);
+
+        using var client = _factory.CreateClientWithBasic(await _factory.CreateToken("pull"));
+        var reserved = await client.GetAsync(Url);
+        var other = await client.GetAsync($"/nuget/symbols/{otherPdb}/{Key}/{otherPdb}");
+
+        Assert.Equal(HttpStatusCode.NotFound, reserved.StatusCode);
+        Assert.Equal(0, SymbolRequestCount(PdbName));
+        Assert.Equal(HttpStatusCode.OK, other.StatusCode);
+        Assert.Equal(1, SymbolRequestCount(otherPdb));
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    private void StubPdb(string pdbName) =>
+        _factory.MockUpstream.Given(Request.Create().WithPath($"/symbols/{pdbName}/{Key}/{pdbName}").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(200).WithBody("portable pdb bytes"u8.ToArray()));
+
+    private int SymbolRequestCount(string pdbName) =>
+        _factory.MockUpstream.LogEntries.Count(e =>
+            (e.RequestMessage?.Path ?? "").Equals($"/symbols/{pdbName}/{Key}/{pdbName}", StringComparison.Ordinal));
+
+    // Sets passthrough off (value false) or the org air-gap on (value true).
+    private async Task SetOrgFlagAsync(string column, bool value)
+    {
+        string orgId = await DefaultOrgIdAsync();
+        var store = _factory.Services.GetRequiredService<IMetadataStore>();
+        await using (var conn = await store.OpenAsync())
+        {
+            string sql = column == "air_gapped"
+                ? "UPDATE org_settings SET air_gapped = @value WHERE org_id = @orgId"
+                : "UPDATE org_settings SET proxy_passthrough_enabled = @value WHERE org_id = @orgId";
+            Assert.Equal(1, await conn.ExecuteAsync(sql, new { orgId, value = value ? 1 : 0 }));
+        }
+
+        _factory.Services.GetRequiredService<OrgRepository>().InvalidateSettingsCache(orgId);
+    }
 
     private async Task<string> DefaultOrgIdAsync()
     {

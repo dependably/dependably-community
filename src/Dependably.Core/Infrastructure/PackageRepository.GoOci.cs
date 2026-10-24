@@ -1,4 +1,5 @@
 using Dapper;
+using Dependably.Protocol;
 
 namespace Dependably.Infrastructure;
 
@@ -56,7 +57,7 @@ public sealed partial class PackageRepository
         }
 
         // Union: local (package_versions) wins on collision; deduplicate.
-        var pvSet = new HashSet<string>(pvList, StringComparer.OrdinalIgnoreCase);
+        var pvSet = new HashSet<string>(pvList, VersionIdentity.Comparer("golang"));
         var merged = new List<string>(pvList);
         foreach (string v in globalList)
         {

@@ -17,8 +17,9 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 
 | Variable | Default | Description |
 |---|---|---|
-| `BASE_URL` | `http://localhost:8080` | Public base URL. Unless `APEX_HOST` is set, the host portion (scheme and port stripped) is the apex hostname for multi-tenant subdomain routing and host-header filtering. When the host is non-localhost, the `AllowedHosts` allowlist is derived at startup — unknown `Host` headers are rejected before tenant resolution. In `DEPLOYMENT_MODE=single`, only the apex host and localhost are permitted. In `DEPLOYMENT_MODE=multi`, the apex host, `*.apex` (all tenant subdomains), and localhost are permitted. When `BASE_URL` is unset or localhost (local/dev), filtering fails closed to loopback hosts only (`localhost`/`127.0.0.1`/`[::1]`, plus `*.localhost` in `DEPLOYMENT_MODE=multi`) — never `AllowedHosts=*` — and a startup warning is logged; a reverse-proxied deployment that never sets `BASE_URL` has every non-loopback `Host` header rejected. |
-| `APEX_HOST` | unset | Optional. Overrides the apex hostname that is otherwise the host portion of `BASE_URL`: the host that serves the system administrator in `DEPLOYMENT_MODE=multi`, whose subdomains are the tenants, and which host-header filtering admits. Accepts a bare host or a URL (scheme, port and path are stripped). Leave unset unless the tenant apex differs from the `BASE_URL` host. A blank value falls back to `BASE_URL`; a loopback value leaves no usable apex. |
+| `BASE_URL` | `http://localhost:8080` | Public base URL. Unless `APEX_HOST` is set, the host portion (scheme and port stripped) is the apex hostname for multi-tenant subdomain routing and host-header filtering. When the host is non-localhost, the `AllowedHosts` allowlist is derived at startup — unknown `Host` headers are rejected before tenant resolution. In `DEPLOYMENT_MODE=single`, only the apex host and localhost are permitted. In `DEPLOYMENT_MODE=multi`, the apex host, `*.tenantdomain` (all tenant subdomains; the tenant domain is `TENANT_DOMAIN` when set, otherwise the apex), and localhost are permitted. When `BASE_URL` is unset or localhost (local/dev), filtering fails closed to loopback hosts only (`localhost`/`127.0.0.1`/`[::1]`, plus `*.localhost`, and `*.TENANT_DOMAIN` when it is set, in `DEPLOYMENT_MODE=multi`) — never `AllowedHosts=*` — and a startup warning is logged; a reverse-proxied deployment that never sets `BASE_URL` has every non-loopback `Host` header rejected. |
+| `APEX_HOST` | unset | Optional. Overrides the apex hostname that is otherwise the host portion of `BASE_URL`: the host that serves the system administrator in `DEPLOYMENT_MODE=multi`, whose subdomains are the tenants, and which host-header filtering admits. Accepts a bare host or a URL (scheme, port and path are stripped). Leave unset unless the apex differs from the `BASE_URL` host. Tenants are its subdomains unless `TENANT_DOMAIN` places them elsewhere. A blank value falls back to `BASE_URL`; a loopback value leaves no usable apex. |
+| `TENANT_DOMAIN` | unset | Optional, `DEPLOYMENT_MODE=multi` only. The parent domain tenants are served under (`<slug>.<TENANT_DOMAIN>`), when it differs from the apex. Set `APEX_HOST=master.mydomain.com` and `TENANT_DOMAIN=mydomain.com` to run the system administrator at `master.mydomain.com` while tenants resolve at `acme.mydomain.com`. Accepts a bare host or a URL (scheme, port and path are stripped). Unset or blank, tenants are subdomains of the apex, as before. The apex host is always the system surface and never a tenant, and its label directly below the tenant domain (`master` in the example) cannot be used as a tenant slug at create time or at resolve time; an existing org with that slug is unreachable and a startup warning names it. A loopback or unparseable value (`https://`, `:8080`, `user@`) stops startup. In any other mode a set value logs a warning and is ignored: it reserves no slug and changes no host filter. A trailing dot is dropped. Host-header filtering admits `*.TENANT_DOMAIN` at any depth, which is wider than `*.apex` was when the apex is the tenant parent: hosts such as `acme.master.mydomain.com` pass the filter and then receive `404` from tenant resolution. Session cookies are host-only (no `Domain`), but any host under a shared parent domain can set a parent-scoped cookie that its siblings receive (cookie tossing), so keep `TENANT_DOMAIN` on a domain where every subdomain is yours. Setting it on a running multi deployment moves every tenant to a new host: the old `acme.<apex>` hosts answer `404` from then on, so re-point package-manager and CI configuration at `acme.<TENANT_DOMAIN>`, update each SAML identity provider with the new ACS URL (and the SP entity ID, unless the org set its own), and regenerate lockfiles whose tarball URLs name the old host. |
 | `DB_PATH` | `/data/dependably.db` | SQLite database file path |
 | `DB_PROVIDER` | `sqlite` | Database backend: `sqlite` (default, uses `DB_PATH`) or `postgres` (requires `DB_CONNECTION_STRING`). Case and surrounding whitespace are ignored; any other value (`postgresql`, `pg`, …) fails startup rather than falling back to SQLite. |
 | `DB_CONNECTION_STRING` | — | Postgres connection string. Required when `DB_PROVIDER=postgres`; ignored for SQLite. |
@@ -26,16 +27,17 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `DB_USERNAME` | — | Postgres username, with the same override rule as `DB_PASSWORD`. |
 | `DB_ROW_LEVEL_SECURITY` | `enforce` on multi-tenant Postgres, else `off` | Postgres only: `off` or `enforce`. Unset, it is `enforce` when `DB_PROVIDER=postgres` and `DEPLOYMENT_MODE` is `multi` or `header`, and `off` otherwise; an explicit `off` on such a deployment is honoured and logged as a warning at startup. **The default never blocks startup:** if the database cannot host it — the connecting role lacks `CREATEROLE` (and no pre-provisioned role, below), the server is older than Postgres 15, `DB_CONNECTION_STRING` sets `Multiplexing=true`, or the connection goes through a transaction-mode pooler such as PgBouncer `pool_mode=transaction`, which startup detects by checking that tenant connections keep their backend and tenant across statements — the node boots with it off, exactly as before, logs a warning naming the reason, and reports `dependably.db.rls_enforced=0`; fix the cause to enable it, or set `off` to acknowledge. An explicit `enforce` instead refuses to boot on any of these. With `enforce`, row-level security backs the application's `org_id` filter: tenant connections switch to `DB_ROW_LEVEL_SECURITY_ROLE` and can read or write only their own tenant's rows, and a connection with no tenant raises rather than returning an empty result. Startup applies the policies to every table with an `org_id`/`tenant_id` column — and, through their parent row, to `package_versions` and its version-scoped tables — and, with an explicit `enforce`, refuses to boot if any table or view is left uncovered, the server is older than Postgres 15, the role is a superuser, has `BYPASSRLS` or inherits the owner, `DB_CONNECTION_STRING` sets `Multiplexing=true`, or the connection goes through a transaction-mode pooler (a defaulted `enforce` falls back to off in those cases). A session-mode pool (PgBouncer `pool_mode=session`), a direct connection, and RDS Proxy are fine. Any other value fails startup. Refusals are counted on `dependably.db.rls_violations`; `dependably.db.rls_enforced` reports the state. A code path that reaches a tenant table with no tenant fails with SQLSTATE `DR001` rather than reading another tenant's rows; the whole integration suite runs this way in CI. On Postgres 15 and later the read-model views (`artifact_inventory`, `artifact_license`, `org_storage_bytes`, `org_billable_storage_bytes`) are created `security_invoker` whatever this setting says, because they are shared by every node on the database and a boot that omitted the option would remove it for every enforcing node; a role other than the connecting role that reads those views therefore needs `SELECT` on their base tables. Residual during an upgrade: a node running an earlier release, or that release's `migrate-to-postgres` command, that boots with this backstop off or fallen back recreates the views without the option, and enforcing nodes then read them with owner rights until an enforcing node next boots. During a blue-green cutover from such a release, treat the backstop as soft until the old slot drains; the application's `org_id` filter is unaffected. |
 | `DB_ROW_LEVEL_SECURITY_ROLE` | `dependably_rls` | The non-login role tenant connections switch to under `DB_ROW_LEVEL_SECURITY=enforce`. Startup creates it and grants it to the connecting role, which needs `CREATEROLE`; to pre-provision it instead, create it `NOLOGIN NOBYPASSRLS` and grant it to the connecting role (with `SET` on Postgres 16+). Must be a lower-case identifier. |
+| `UPGRADE_FLOOR_OVERRIDE` | `false` | Startup refuses, before changing anything, a database older than the [supported upgrade floor](#supported-upgrade-path) (v0.13.3), and the error says so. Set `true` to apply the schema to such a database anyway; startup logs an error naming the risk, and columns or rows may be lost. Back the database up first, and remove the setting once that boot has completed. Every database on a supported upgrade path starts without it, including a Postgres database created by 0.2.2 to 0.4.4 — except one on which a 0.14.0 or later boot has already failed partway, which needs `true` for one boot (see [Supported upgrade path](#supported-upgrade-path)). `migrate-to-postgres` reads the setting too, for a target database that is already occupied and below the floor. Any value other than `true` (in any case) leaves the check on. |
 | `DEFAULT_ORG_SLUG` | `default` | Slug of the org created on first boot |
 | `DEFAULT_TENANT_SLUG` | — | Preferred spelling of `DEFAULT_ORG_SLUG`; when both are set, `DEFAULT_TENANT_SLUG` takes precedence. |
-| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost apex: `APEX_HOST`, or the host portion of `BASE_URL`. `header` routes each request to the tenant named by `TENANT_HEADER_NAME` (default `X-Dependably-Tenant`), for transparent-intercept deployments where the host belongs to an impersonated public registry and cannot carry the slug; it **requires `TRUSTED_PROXIES`**, because the header is accepted only from a listed socket peer (an unlisted caller resolves to no tenant, so an unset `TRUSTED_PROXIES` serves nothing). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). `edge` runs a headless cache-only node whose sole upstream for every ecosystem is one central master (requires `EDGE_MASTER_URL` + `EDGE_MASTER_TOKEN`; collapses to one implicit realm; no admin user is created). |
+| `DEPLOYMENT_MODE` | `single` | Tenancy mode: `single` or `multi`. `multi` requires a non-localhost apex: `APEX_HOST`, or the host portion of `BASE_URL`; tenants are its subdomains unless `TENANT_DOMAIN` names another parent domain. `header` routes each request to the tenant named by `TENANT_HEADER_NAME` (default `X-Dependably-Tenant`), for transparent-intercept deployments where the host belongs to an impersonated public registry and cannot carry the slug; it **requires `TRUSTED_PROXIES`**, because the header is accepted only from a listed socket peer (an unlisted caller resolves to no tenant, so an unset `TRUSTED_PROXIES` serves nothing). `bound` pins every request to `BOUND_TENANT_SLUG` regardless of host (single-tenant intercept mode). `edge` runs a headless cache-only node whose sole upstream for every ecosystem is one central master (requires `EDGE_MASTER_URL` + `EDGE_MASTER_TOKEN`; collapses to one implicit realm; no admin user is created). |
 | `BOUND_TENANT_SLUG` | — | Required when `DEPLOYMENT_MODE=bound`. Every request resolves to this tenant slug; the request host is ignored. |
 | `TENANT_HEADER_NAME` | `X-Dependably-Tenant` | Header carrying the tenant slug when `DEPLOYMENT_MODE=header`. Honoured only on requests whose socket peer is in `TRUSTED_PROXIES` — the header decides which org's artifacts are served, including on anonymous protocol routes, so an unauthenticated caller reaching the app port directly must not be able to name one. |
 | `EDGE_MASTER_URL` | — | Required when `DEPLOYMENT_MODE=edge`. Base URL of the central master dependably instance the edge pulls through to for every ecosystem. First boot seeds one upstream registry row per ecosystem pointing at this URL; a changed value is re-applied on the next restart. The host is admitted through the SSRF guard so an internal/private master over a LAN link is reachable (only this exact host is exempted). Missing in edge mode is a hard startup error. |
-| `EDGE_MASTER_TOKEN` | — | Required when `DEPLOYMENT_MODE=edge`. A reader-scoped service token minted on the master (in the org whose packages this edge serves), presented on every upstream fetch. Stored encrypted at rest in the seeded upstream rows when `DEPENDABLY_MASTER_KEY` is set. Revoking it on the master takes the edge cold-only immediately. Missing in edge mode is a hard startup error. |
+| `EDGE_MASTER_TOKEN` | — | Required when `DEPLOYMENT_MODE=edge`. A reader-scoped service token minted on the master (in the org whose packages this edge serves), presented on every upstream fetch. Stored encrypted at rest in the seeded upstream rows when `DEPENDABLY_MASTER_KEY` is set. Revoking it on the master takes the edge cold-only immediately, and so does suspending or deleting its tenant on the master, which revokes it for good: mint a new one after the restore (see [Containing an incident in a tenant](#containing-an-incident-in-a-tenant)). Missing in edge mode is a hard startup error. |
 | `EDGE_ACCESS_TOKEN` | — | Optional, `DEPLOYMENT_MODE=edge` only. Pre-shared token that inbound edge clients present to the edge node. When set, it is seeded as a reader-scoped service token in the edge's own DB and anonymous pull is turned off, so clients must authenticate (`Authorization: Bearer <token>`, or Basic for PyPI/NuGet); rotating the value replaces the row on the next restart. When **unset**, the edge accepts anonymous reads (anonymous pull on) and logs a startup warning — intended for trusted networks only. Never logged. |
 | `Proxy__MetadataCacheTtlSeconds` | `0` (disabled), `120` in edge mode | Positive TTL for the upstream-metadata cache (packuments, PyPI simple-index/JSON, NuGet registration, maven-metadata). `0` disables it — the default on a standard instance, where every metadata request forwards upstream as before. Edge mode defaults to `120` so a headless pull-through node absorbs metadata load and keeps resolving versions during a brief master outage; an explicit value (including `0`) overrides the edge default. |
-| `Proxy__MetadataCacheMaxStaleSeconds` | `86400` | Serve-stale window: how long past its TTL an expired cached metadata document may still be served when the refresh fetch fails with a *transient* upstream failure (network error, timeout, 5xx). Only meaningful when the cache is enabled. A 404 is not transient and is never served stale. |
+| `Proxy__MetadataCacheMaxStaleSeconds` | `86400` | Serve-stale window: how long past its TTL an expired cached metadata document may still be served when the refresh fetch fails with a *transient* upstream failure (network error, timeout, 5xx). Only meaningful when the cache is enabled. A 404 is not transient and is never served stale. The deprecation refresh never reads a stale document as an answer: it asks the next configured upstream, or records nothing for that package. |
 | `Proxy__MetadataCacheNegativeTtlSeconds` | `60` | TTL for cached upstream 404s, so repeated misses for a missing package don't stampede the master. `0` disables negative caching. Only meaningful when the cache is enabled. |
 | `Proxy__MetadataCacheMaxBytes` | `134217728` (128 MB) | Total memory bound for cached metadata bodies. Entry size is the buffered body length plus a small overhead constant; the byte-bounded cache evicts least-recently-used entries under pressure. A single document larger than the 32 MB metadata cap passes through uncached rather than evicting the cache. |
 | `METADATA_LOCAL_CACHE_TTL_SECONDS` | `600` | TTL for the rendered-response cache of **locally-owned** metadata (npm packument, NuGet registration, PyPI simple index, Maven metadata, RPM repodata) — distinct from the `Proxy__MetadataCache*` family above, which caches the *upstream-fetch* result. Invalidated on publish/unpublish, and (when `REDIS_CONNECTION_STRING` is set) fanned out to every other replica, so this TTL is a backstop for a dropped broadcast rather than the primary convergence mechanism — see [Metadata caches are per-instance, invalidated across replicas over Redis](#metadata-caches-are-per-instance-invalidated-across-replicas-over-redis). The default is the recommended value in multi-instance deployments too. |
@@ -51,12 +53,13 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `REDIS_KEY_PREFIX` | `dependably:` | Prefix for all Redis keys written by Dependably. Change when sharing a Redis instance with other applications. |
 | `TRUSTED_PROXIES` | — (fail-closed: forwarded headers ignored) | Comma-separated IPs/CIDRs whose `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers are trusted (e.g. `10.0.1.0/24,172.18.0.1`). **When unset, all three forwarded headers are ignored** (fail-closed): `Connection.RemoteIpAddress`, `Request.Host`, and `Request.Scheme` reflect the real socket peer. A startup warning is logged. Set this to your reverse proxy's address(es) in any deployment that sits behind a TLS-terminating or IP-forwarding proxy — without it, `X-Forwarded-*` from the proxy are discarded, so `/metrics`/`/version` see the proxy's socket address, HSTS is not emitted, and scheme-dependent redirects may break. **A co-located proxy (same host/docker network, forwarding to Kestrel over loopback) additionally defeats the `/metrics`, `/version`, and management docs/OpenAPI loopback-default IP allowlists** — every caller it forwards appears as `127.0.0.1`, an allowlisted operator; see [Security model](#security-model). Forwarded-header processing walks the whole `X-Forwarded-For` chain to the first untrusted hop, so **every host inside a trusted CIDR is itself a trusted forwarding hop and can present its own forged address as the client-facing source IP** — this matters most for a broad range like a whole VPC CIDR, where every in-VPC client (not just the reverse proxy) gains that power. **`DEPLOYMENT_MODE=header` depends on this setting for its tenant routing**: the tenant header (`TENANT_HEADER_NAME`, default `X-Dependably-Tenant`) is honoured only from a socket peer listed here, on the same fail-closed footing as `X-Forwarded-*` — unset means no peer qualifies, every request resolves to no tenant, and a startup warning names it. A `/0` entry is rejected outright at startup; a narrower-but-still-broad entry (wider than `/22` for IPv4, wider than `/64` for IPv6) is not rejected — a large proxy subnet can be a legitimate deployment — but logs a startup warning naming the entry, and the full resolved trusted-network set is logged at `Information` on every boot so the effective configuration is auditable. |
 | `DEPENDABLY_MASTER_KEY` | — (opt-in; secrets stored unencrypted, startup warning) | Operator master key (KEK) that envelope-encrypts the DB-resident secrets — `jwt_secret`, `mfa_encryption_key`, the instance SMTP password (`smtp_password`), the operator Slack webhook URL (`system_slack_webhook_url`), per-org Slack webhook URLs, webhook signing secrets, and the DataProtection key ring — at rest. Value is an inline base64-encoded **32-byte** key (AES-256) **or** a path to a file containing one. When set, those secrets are transparently encrypted (`enc:v1:` envelope) and migrated in place on startup; **when unset, they are stored unencrypted** and a startup warning is logged — place the SQLite file / Postgres data directory on an OS-encrypted volume (LUKS/dm-crypt, encrypted EBS) instead. The key lives **outside** the database and must be injected identically into every replica. **Fail-closed:** if encrypted secrets exist but the key is absent (or invalid), the server refuses to start rather than mint new ones. Losing the key is unrecoverable for the encrypted data (`jwt_secret`/DataProtection regenerate at the cost of forced re-login; losing `mfa_encryption_key` forces MFA re-enrollment). Rotation is a manual offline re-wrap. See `ADR-envelope-encryption-db-secrets`. |
+| `SECRETS_VERIFY_ON_STARTUP` | `true` | After the server starts listening, try to decrypt every stored secret once in the background and log a warning for each kind that does not decrypt, naming the rows but never the values. It never delays or fails startup. Set `false` to skip it on every boot, for example on a fleet where each replica would otherwise repeat the same read-only sweep on a rolling restart; the on-demand endpoint still works. Any other value keeps the check on and logs a warning. See [Verifying stored secrets](#verifying-stored-secrets). |
 | `Auth__JwtSigningKeyRefreshSeconds` | `1` | How often each replica re-reads `instance_settings.jwt_secret` to pick up a rotation performed elsewhere (`POST /api/v1/system/jwt-secret/rotate`, apex + `scope=system`). The rotating replica reloads synchronously, so this bounds only how long *other* replicas keep honouring the superseded secret — the single trust window rotation leaves open. `0` re-reads on every validation, closing the window at the cost of a DB round trip per authenticated request. There is no old-key grace period: rotation invalidates every session, including the caller's. |
 | `HOST_ROUTING` | — | Comma-separated `host=ecosystem` pairs that map incoming `Host` headers to an ecosystem prefix (e.g. `registry.npmjs.org=npm,pypi.org=pypi`), so clients that hardcode ecosystem registry hostnames reach the right controller without needing the prefix in the request they send. For every ecosystem but PyPI the mapping is a fixed per-host prefix (`/npm`, `/nuget`, `/maven`, `/rpm`, `/v2`) prepended to the path unless it's already there. `pypi` is path-dependent: a request already under `/simple/` or `/packages/` (PyPI's PEP 503 index and download routes, already unprefixed) passes through unchanged, while everything else routed to a `pypi`-mapped host (the legacy JSON API, and twine's bare-host `/legacy/` upload endpoint) gets `/pypi` prepended so it reaches the route that actually exists. |
 | `CLAIM_ENFORCEMENT` | `off` | Set `on` to require packages to carry an upstream-provenance claim before publish is accepted. `off` (default) disables the gate; `on` enforces it on every push handler. |
 | `PUBLISH_NAME_BINDING` | `off` | Set `on` to enforce name-level publish authorization: the first principal to hosted-publish a `(ecosystem, name)` owns it, and a later publish by a different principal (a token bound to a different identity) is refused with 403 unless it holds a grant. Applies to every hosted push path (npm, PyPI, NuGet, Maven, RPM, OCI, Cargo). Ownership is recorded on first publish **regardless** of this flag (so enabling it later has authoritative first-publisher data, and so a deleted internal name never silently reverts to upstream resolution — the dependency-confusion resurrection guard). Default `off` because binding a name to its first post-upgrade publisher would otherwise break orgs that publish one name from several principals (rotated CI tokens, shared packages); enable it once grants are in place. A user token's principal is its owning user; a service token's is the token itself. Grants are managed through the management API (caller needs `tenant:configure`): `GET /api/v1/name-bindings` lists the org's bound names, `GET`/`POST /api/v1/name-grants` list and create co-publish grants against a bound name, and `DELETE /api/v1/name-grants/{grantId}` revokes one. The surface is API-only — there is no Settings page for grants; use the management docs at `/api/v1/docs/` or direct calls. |
 | `AIR_GAPPED` | `false` | Set `true` (or `1`) to declare the instance air-gapped. Skips all outbound network calls (OSV queries, deprecation refresh, threat-feed, healthcheck pings) and logs a warning if any network-dependent setting is configured. Does not stop SBOM policy re-evaluation, which makes no outbound call — see the note below the table. Also see `OSV_MODE=local`. |
-| `DISABLE_BACKGROUND_JOBS` | — | Comma-separated list of background job names to disable without fully air-gapping the instance (e.g. `vuln-scan,deprecation-refresh`). Known names are logged on startup. `AIR_GAPPED=true` disables all background jobs and takes precedence. **`sbom-scan` disables scanning only, not SBOM policy re-evaluation** — see the note below the table. |
+| `DISABLE_BACKGROUND_JOBS` | — (no job disabled) | Disables background jobs without fully air-gapping the instance. Set `true` (or `1`, or `all`; any case) to disable **every** background job except the three local housekeeping jobs `cache-eviction`, `oci-staging-janitor` and `npm-manifest-rescan`, or give a comma-separated list of job names to disable only those (e.g. `vuln-scan,deprecation-refresh`). `false`, `0`, blank, or unset disables none. **Any other value stops startup** with an error naming the unrecognized token and listing the known job names, including a typo of a job name and a switch value mixed into a list (`true,vuln-scan`). See [Disabling background jobs](#disabling-background-jobs) below the table for the job names, the housekeeping exemption, and how this differs from `AIR_GAPPED=true`, which disables the same jobs and takes precedence. **`sbom-scan` disables scanning only, not SBOM policy re-evaluation** — see the note below the table. |
 | `REQUIRE_MFA` | — | Set `true` (or `1`) to enforce MFA enrollment instance-wide. When set, every authenticated user (tenant and system_admin) must complete TOTP enrollment before accessing any API endpoint. Composes with the per-tenant `require_mfa` setting in org_settings: either signal triggers enforcement. |
 | `REQUIRE_SECURE_COOKIES` | — | Set `true` to force the `Secure` flag on the session/MFA/trusted-device cookies unconditionally, regardless of the inbound request's scheme or `BASE_URL`. Without it, `Secure` is set only when the live request is HTTPS, the request carries `X-Forwarded-Proto: https` (read even when `TRUSTED_PROXIES` left the header untrusted — for this decision a forged value only restricts the forger's own cookie), or `BASE_URL` declares an https scheme — a plain-HTTP deployment ships the session cookie without `Secure`, letting a MITM capture the session JWT. A startup warning is logged whenever cookies may be issued without `Secure` on a non-HTTPS-declared deployment. Do not set this on local plain-HTTP dev — the browser will refuse to store a `Secure` cookie over `http://`, and login will silently fail to persist a session. |
 | `TRUSTED_DEVICE_TTL_DAYS` | `30` | Days a "remember this device" MFA cookie remains valid before re-prompting for a TOTP code. |
@@ -65,6 +68,67 @@ This table is the canonical reference — other docs (including `CLAUDE.md`) lin
 | `SHUTDOWN_PRESTOP_DELAY` | `0` | Seconds to sleep after SIGTERM and before draining, so a load balancer can remove this replica from rotation before the server stops accepting new connections. The sleep runs *before* any background service shuts down, so a value that exceeds the container's stop timeout (Docker's default is 10s) means SIGKILL lands before the queues flush and the instance lock is released. Set it only with a matching stop grace period — `docker-compose.yml` reserves 45s; on Kubernetes, pair a 10s delay with a `terminationGracePeriodSeconds` of 45s so the pre-stop sleep and the in-flight drain both fit inside it. |
 | `INSTANCE_LOCK_STALE_SECONDS` | `90` | SQLite-only. Staleness window for the shared-database single-writer guard. On startup a file-backed SQLite deployment claims a heartbeat lock. A holder whose heartbeat is already older than this window (a crashed predecessor) is taken over at once; a holder whose heartbeat is still fresh is watched — startup waits up to this window and takes the lock over if the heartbeat stays frozen (an orphaned row), or fails as soon as it advances (a live peer). The heartbeat refreshes every third of this window. The lock is released on graceful shutdown. No effect on Postgres (legitimately multi-writer) or in-memory stores. |
 | `REPLICA_HINT` / `INSTANCE_ROLE` | — | Set `REPLICA_HINT=true` (or `INSTANCE_ROLE=replica`) on each multi-replica instance so Dependably logs a startup warning reminding operators that OCI chunked-upload session affinity is required — see "OCI chunked uploads — session affinity required" under [High-availability deployment](#high-availability-deployment). |
+
+#### Disabling background jobs
+
+`DISABLE_BACKGROUND_JOBS=true` stops every scheduled and queued background job that reaches the
+network or does tenant work: the OSV vulnerability scans (`vuln-scan`, `vuln-rescan`, `sbom-scan`),
+the CISA KEV and FIRST.org EPSS refresh (`threat-feed`), the npm/PyPI/NuGet deprecation refresh
+(`deprecation-refresh`), the healthcheck ping (`healthcheck-pinger`), and the rest of the
+registry (retention, orphan-blob and OCI blob sweeps, usage rollups, stats refresh, and so on).
+An isolated instance that sets it makes no outbound call from a job.
+
+Three local jobs keep running under `DISABLE_BACKGROUND_JOBS=true` and under
+`AIR_GAPPED=true`: `cache-eviction`, which applies the `CACHE_MAX_*` caps to the proxy cache,
+`oci-staging-janitor`, which reclaims abandoned OCI uploads and proxy staging files, and
+`npm-manifest-rescan`, a one-shot pass over stored npm tarballs that flags any with several
+top-level manifests so the install-script and licence gates see them. It ticks on its own short
+schedule (`NPM_MANIFEST_RESCAN_SCHEDULE`) until every stored tarball has been read, then ends. None makes an outbound call.
+Stopping the first two would only leave the cache and the staging volume growing without bound, and
+stopping the rescan would leave an already-stored ambiguous tarball unflagged. Name
+`npm-manifest-rescan` in the list to stop it; it resumes once the name is removed and the server restarts.
+
+`oci-scan-sweep` keeps running under `AIR_GAPPED=true` too, but `DISABLE_BACKGROUND_JOBS=true`
+stops it. It reads and writes the database only, and an air-gapped scanner re-matches images
+against the OSV dumps you sideload, so stopping it would freeze each image at the dumps it was first
+scanned against. A re-extraction it queues that needs an evicted proxied layer is refused without a
+fetch, as every upstream fetch is under air-gap. To stop one of them, name it in the list, for example
+`DISABLE_BACKGROUND_JOBS=cache-eviction`; a named entry stops it whatever else is set. On an edge
+node the switch therefore stops the size gauge and the healthcheck ping and leaves eviction and
+the janitor running.
+
+The job names a list accepts are `blob-size-poller`, `cache-eviction`, `cache-size-alert`,
+`deprecation-refresh`, `healthcheck-pinger`, `license-backfill`, `oci-blob-sweep`,
+`oci-reference-graph-backfill`, `npm-manifest-rescan`, `oci-scan-sweep`, `oci-staging-janitor`, `orphan-reconciler`, `retention`,
+`saml-cert-expiry`, `sbom-scan`, `stats-refresh`, `tenant-count-poller`, `tenant-hard-delete`,
+`threat-feed`, `usage-reconcile-weekly`, `usage-rollup-daily`, `usage-rollup-hourly`,
+`usage-storage-snapshot`, `vuln-rescan`, and `vuln-scan`. Names are matched in any case. The
+startup error for an unrecognized value lists the same names, so the instance itself is the
+authority when this list and a release disagree.
+
+How it differs from `AIR_GAPPED=true`:
+
+- `DISABLE_BACKGROUND_JOBS=true` stops background jobs only. Requests still reach the network
+  where they normally would: a proxy cache miss still fetches from the configured upstream, and the
+  vulnerability scan a publish triggers still queries OSV.dev unless `OSV_MODE=local`.
+- `AIR_GAPPED=true` disables every background job apart from the three housekeeping jobs and
+  `oci-scan-sweep` above, and
+  in addition refuses every request-time
+  upstream fetch with a clear error, never writes the proxy cache, and turns off the package-lookup
+  metadata fetch. Use it when the instance must make no outbound call at all, and pair it with
+  `OSV_MODE=local`.
+
+Neither setting covers deliveries to endpoints you configure: outgoing webhooks, the SIEM
+forwarder, Slack notifications, and the alert email outbox are not background jobs and are not
+gated by `DISABLE_BACKGROUND_JOBS` or `AIR_GAPPED`. Each is governed by its own configuration (the
+`SIEM_*` variables, the instance SMTP and operator Slack settings, and each organization's
+webhook and Slack settings), so on an isolated instance leave them unconfigured or point them at internal endpoints.
+
+`GET /api/v1/instance/background-jobs` reports why each job is off in `disabled_reason`:
+`AIR_GAPPED=true` (never for `oci-scan-sweep`, which air-gap leaves running), `DISABLE_BACKGROUND_JOBS=true` (the whole-set switch, whichever of `true`, `1`
+or `all` was set), `DISABLE_BACKGROUND_JOBS` (the job is named in a list), `DEPLOYMENT_MODE=edge`
+(an edge node's forced disable), or `null` when the job runs. It lists every job name above. The system health report (`GET /api/v1/system/health`) lists a disabled job with status
+`disabled`.
 
 #### `sbom-scan` disables scanning, not SBOM policy re-evaluation
 
@@ -256,11 +320,77 @@ the same on either host, since a pull-through proxy serves the upstream manifest
 | `VULN_SCAN_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled scan to avoid a thundering herd against OSV. Set `0` to disable. |
 | `VULN_RESCAN_AGE_HOURS` | `24` | Re-query OSV for previously-scanned versions older than this |
 | `VULN_SCAN_BATCH_DELAY_MS` | `500` | Delay between OSV `/querybatch` calls |
-| `THREAT_FEED_SCHEDULE` | `0 5 * * *` | Cron for the threat-feed refresh pass (CISA KEV membership + FIRST.org EPSS scores onto `vulnerabilities.is_kev` / `epss_score`, joined via CVE aliases) |
+| `THREAT_FEED_SCHEDULE` | `0 5 * * *` | Cron for the threat-feed refresh pass (CISA KEV membership + FIRST.org EPSS scores onto `vulnerabilities.is_kev` / `epss_score`, joined via CVE aliases; also keeps local copies of the whole KEV catalogue and EPSS file in `kev_catalog` / `epss_scores` for the package lookup) |
 | `THREAT_FEED_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled threat-feed pass. Set `0` to disable. |
+| `THREAT_FEED_FETCH_TIMEOUT_SECONDS` | `300` | Overall time one threat-feed fetch (the KEV catalogue, one EPSS batch, or the EPSS bulk file) may take, headers and body together. A mirror that sends headers and then trickles the body is cut off at this deadline and the fetch counts as failed. Non-numeric or non-positive values fall back to the default. |
 | `KEV_FEED_URL` | CISA catalog URL | Override the KEV catalog JSON endpoint (mirrors, tests) |
 | `EPSS_API_URL` | `https://api.first.org/data/v1/epss` | Override the EPSS API endpoint (mirrors, tests) |
+| `EPSS_BULK_URL` | `https://epss.empiricalsecurity.com/epss_scores-current.csv.gz` | Override the FIRST.org daily EPSS file (gzipped CSV; mirrors, tests). A redirect is followed only within the same host. |
 | `STATS_REFRESH_INTERVAL_SECONDS` | `60` | How often `StatsRefreshService` recomputes the per-org dashboard snapshot (`org_stats_snapshot`). The `/api/v1/stats` endpoint reads this snapshot instead of running live aggregate queries on every page load. Raise it on large multi-tenant instances where the aggregate pass is expensive. |
+| `NPM_MANIFEST_RESCAN_SCHEDULE` | `*/5 * * * *` | Cron schedule (five-field, UTC) on which `npm-manifest-rescan` reads the next bounded batch of stored npm tarballs (at most 2,000 blobs per tick) and flags any with several top-level manifests or an unreadable archive. It also runs once at startup, and it ends for good once the pass over every cached and uploaded tarball has finished, so a large cache is covered in hours rather than months. Raise the interval to spread the blob reads out; an unparseable value stops startup. Name `npm-manifest-rescan` in `DISABLE_BACKGROUND_JOBS` to stop the pass. |
+
+### OCI image scanning
+
+OSV has no advisories for a container image as a whole, so Dependably's own scan never covers OCI. An out-of-process image scanner covers it instead: it reads each image's layers, finds the packages inside, and matches those. With scanning off (the default), OCI images keep the `no_feed` status.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OCI_SCAN_ENABLED` | `false` | Turns on image scanning: pushed and pulled images are queued per org, the scan API under `/api/v1/oci-scan/` answers, and OCI versions take their status from the org's scan results. Off means the API answers 404 and nothing is queued. |
+| `OCI_SCAN_HEARTBEAT_WINDOW` | `00:10:00` | How recently an org's scanner must have called the scan API for that org's unscanned images to read `unscanned` instead of `no_feed`. A scanner that stops calling drops its org back to `no_feed`; images it already scanned keep their status. |
+| `OCI_SCAN_LEASE` | `00:15:00` | How long a claim holds a job. A scanner extends it with heartbeats; when it lapses, another claim may take the job, and the first scanner's result is refused with 409. Heartbeat, result and fail require the claim's `attempt` back as `?attempt=` (a call without it, or with a value below 1, is refused with 422); a superseded attempt is refused with 409 even while the new holder's lease is live. |
+| `OCI_SCAN_MAX_ATTEMPTS` | `5` | Claims a job may use before a failure, or a lease that lapses, parks it as `failed`. A parked image stays `unscanned` until `oci-scan-sweep` queues a fresh job for it, one `OCI_SCAN_RESCAN_AGE_HOURS` window after it was parked. |
+| `OCI_SCAN_SWEEP_SCHEDULE` | `17 * * * *` | Cron for `oci-scan-sweep`, which queues catalogued images that have no job yet, and re-matches or re-extracts scanned images whose last match is older than `OCI_SCAN_RESCAN_AGE_HOURS`. It runs only for orgs whose scanner has called the scan API. It reads and writes the database only, so it runs under `AIR_GAPPED=true`, where an air-gapped scanner re-matches against the OSV dumps you sideload. Edge mode, `DISABLE_BACKGROUND_JOBS=true`, and a `DISABLE_BACKGROUND_JOBS` list naming it all stop it; pushes and pulls still queue images then. |
+| `OCI_SCAN_RESCAN_AGE_HOURS` | `24` | How old, in whole hours, an image's last OSV match may get before `oci-scan-sweep` queues a `rematch` job for it. The scanner re-matches the stored components against OSV without reading a layer, so an advisory published after the scan reaches the image, and one withdrawn leaves it. A result from a scanner that does not record content gaps, or one from an older extractor than the running scanner's, is re-extracted instead. Only orgs whose scanner claims with `?kinds=scan,rematch` get either; an older scanner never opts in, and its images keep their first result. A failed rematch keeps the previous result and is retried, and a parked one is queued again one age window later. The match age is reported as `matchedAt` on OCI versions and lookups, and the instance-wide oldest as the `dependably.oci.scan.oldest_match_age` gauge. Must be an integer of at least 1; any other value stops startup. |
+| `OCI_SCAN_ADVISORY_FETCH_MAX` | `200` | How many advisory ids the instance does not hold yet one scan result may have fetched from the OSV source. Ids beyond it are recorded as a coverage gap and fetched on a later match, so one request cannot spend the instance's OSV rate budget, which every org's vulnerability scan and lookups share. `0` fetches none: only advisories already stored are linked. Must be an integer of at least 0; any other value stops startup. |
+| `OCI_SCAN_RATE_LIMIT_PERMITS` | `240` | Scan API requests per minute per scanner credential, on top of the management API default. |
+
+The scanner authenticates with a tenant API token carrying the `scan:oci` capability: a service token minted with the **OCI image scanner** preset, or an admin's user token. Only admins and owners can mint one. A scanner speaks for one org:
+- It claims that org's queued images, and reads only the manifests and blobs of the image it has leased. These reads are not downloads: they record no activity and no egress.
+- Its results become that org's view of each image. For a proxied image cached once for every tenant, each tenant that pulled it scans it separately, and one tenant's result never changes another's.
+
+A result with coverage gaps and no advisories reads `partial`, never clean. A gap is anything the scanner could not inventory or match, such as an rpm-based image whose distro has no OSV ecosystem. For a pushed image, the result's advisories are also linked to the version, so the existing vulnerability alerts, KEV alerts and webhooks fire as they do for any other package. Advisory records are shared by every org, so the records a scanner posts are never stored. An advisory the instance already holds is linked as stored. Any other advisory is fetched by id from the instance's own OSV source (OSV.dev, or the dumps under `OSV_MODE=local`) and stored from that record, at most `OCI_SCAN_ADVISORY_FETCH_MAX` per result and within a third of the lease (two minutes at most, and at least 35 seconds while the lease leaves room, so a hanging OSV is reported by its own 30-second timeout). An id the source does not know, one it could not answer for, and one past the cap or the time budget is not stored or linked. It is recorded as a coverage gap on the platforms that named it, so the image never reads `clean` for it. `oci-scan-sweep` queues the image again one `OCI_SCAN_RESCAN_AGE_HOURS` window after its last match, as a `rematch` when the org's scanner claims rematch jobs and as a `scan` when it does not, so the source is asked again either way. Records fetched before another fetch fails are kept, and an id the source reported unknown is not asked about again for six hours. If the source answers none of the ids, including when the time budget runs out before it answers any, the result is refused with 503 and its job goes back to the queue after a backoff that doubles up to 15 minutes. These deferrals do not count against `OCI_SCAN_MAX_ATTEMPTS`, so an OSV outage never parks a job. Once a job's first deferral is `OCI_SCAN_RESCAN_AGE_HOURS` old, its result is stored with the gap instead; time a job spent queued before its first claim does not count. A score above the org's tolerance reads `vulnerable`. The package lookup answers an image with the pull gate's own verdict. Under `oci_scan_enforcement=block` it answers `blocked` for an image the pull refuses on its scan, its advisories or a manual block: `unscanned` for an image with no result or a partial result (`no_scan_result`, `scan_incomplete`) unless an operator approved it past that arm, the refusing arm (`vuln_score`, `kev`, `malicious`, ...) for a finding over a tolerance, and `manual` for an administrator's block. A licence the pull refuses reads `warn` in the lookup, not `blocked`. Under `off` and `warn` a pull is never refused for its scan, so the lookup answers `warn` for the same images.
+
+#### Running the scanner
+
+The scanner is the `dependably/oci-scanner` image. It is not published to a public registry: the compose file pulls it from `${DEP_IMAGE_REGISTRY}`, by default the Dependably project's private registry, which needs credentials for that registry (`docker login`). Its source, with its full settings, is in the separate container-scanner repository, which is not public either. Without access to one of them there is no scanner image to run, and OCI image scanning stays off. Dependably needs no scanner to work. With `OCI_SCAN_ENABLED` unset (the default) nothing is queued, OCI images read `no_feed`, and every other ecosystem's screening is unaffected. With it set but no scanner running, images still read `no_feed` and queue for a scanner that never comes, and the enforcement setting below stays at `off`. With docker compose:
+
+1. Set `OCI_SCAN_ENABLED=true` and start Dependably.
+2. In Settings → Service tokens, mint a token with the **OCI image scanner** preset.
+3. Start the scanner beside Dependably, with that token in the environment:
+
+   ```sh
+   OCI_SCAN_ENABLED=true OCI_SCANNER_TOKEN=<token> docker compose --profile oci-scan up -d
+   ```
+
+The `oci-scanner` service shares the `dependably` service's network namespace and calls it on `localhost`. Dependably accepts only the hostnames it serves (the `BASE_URL` host and loopback), and single-org mode resolves loopback to the one org, so no reverse proxy or certificate sits between them. In multi-tenant mode the scanner speaks for one tenant: set `OCI_SCANNER_DEPENDABLY_URL` to that tenant's `https://<slug>.<domain>`, and run one scanner per tenant that wants scanning.
+
+| Variable (compose) | Default | Description |
+|---|---|---|
+| `OCI_SCANNER_TOKEN` | — | The `scan:oci` service token, mounted as a compose secret. |
+| `OCI_SCANNER_TAG` | `0.2.0` | The scanner image tag. Raise it to upgrade the scanner; the default is a release tag, so a scanner upgrade is a deliberate change. Use scanner `0.2.0` or later: `0.1.0` does not send the claim's `attempt`, which heartbeat, result and fail require, so it cannot complete a job. |
+| `OCI_SCANNER_DEPENDABLY_URL` | `http://localhost:8080` | Where the scanner reaches Dependably. |
+| `OCI_SCANNER_OSV_SOURCE` | `remote` | `remote` queries api.osv.dev. `local` reads OSV dumps, for air-gapped installs. The shipped compose file sets neither of the two things `local` needs: add `OSV_LOCAL_PATH` to the scanner's environment and a read-only volume mounting the dump directory at that path, in a compose override. The scanner does not read Dependably's `AIR_GAPPED`, so an air-gapped install sets this to `local` itself. |
+| `OCI_SCANNER_PLATFORMS` | `linux/amd64,linux/arm64` | The platforms of a multi-arch image that are scanned. Platforms left out are recorded as a gap, so the image reads `partial`. |
+
+The scanner runs with a read-only root filesystem, every capability dropped and a 1.5 GiB memory limit. It scans one image at a time, in memory. An image it refuses as hostile (a decompression bomb, path traversal, a digest mismatch) is parked as `failed` with the reason, and stays `unscanned` until the sweep queues it again an age window later.
+
+#### Enforcing scan results on pulls
+
+Each organization chooses whether its scan results gate OCI pulls, in Settings → Gates → **OCI image scan enforcement** (`oci_scan_enforcement` on `PUT /api/v1/proxy-settings`). It is per organization and needs no new environment variable.
+
+- `off` (the default): OCI pulls are answered exactly as before, by the licence gate only.
+- `warn`: images are served, and every refusal `block` would have made is recorded as a `gate_warned` activity row naming the arm. Run this first to see what `block` would refuse.
+- `block`: a manifest pull is refused (403 `DENIED`, `X-Dependably-Block-Reason` naming the arm) when any vulnerability gate the organization already set refuses its findings (malicious, KEV, KEV ransomware, SSVC exploitation, EPSS, EPSS percentile, the CVSS ceiling), or when the organization holds no complete scan result for the image (`unscanned`).
+
+Turning the setting on applies the organization's existing gate modes to images; `block_malicious` defaults to `block`, so malicious-advisory blocking takes effect at once. Under `block`:
+
+- **A first pull is refused as `unscanned`**, because the scan is asynchronous. The pull still caches, catalogues and queues the image (a `HEAD` does too), so a retry after the scan lands is answered from it. A pull by digest is catalogued and queued the same way. A platform manifest of a multi-arch image takes its index's verdict; a platform the scanner skipped (see `OCI_SCANNER_PLATFORMS`) is `unscanned`.
+- **A `partial` result is not clean.** Every advisory it found is enforced, and if none refuses the image it is refused as `unscanned`. The `blocked_unscanned` activity detail records why (`absent`, `partial` or `no_scanner`) and any arms that only warned. An image whose base the scanner cannot match (for example a RHEL UBI rpm image) stays refused until an administrator approves it in the quarantine queue. That approval waives only the `unscanned` arm and sets no manual allow, so a KEV or malicious finding that lands later still refuses the image and reopens its quarantine entry.
+- **A moving tag keeps serving its last digest that passed** when the upstream moves it to an image this organization has not scanned. The new digest is fetched, catalogued and queued without moving the tag, and the next revalidation after its scan passes promotes it. The image's version page shows the hold, and the `dependably.oci.tag_pending_hold_age` gauge reports the oldest hold on the instance. A hold that lasts days usually means the scanner is not running.
+
+Moving off `off` is refused while `OCI_SCAN_ENABLED` is unset, and while it is set but the organization's scanner has never called the scan API, because with no scanner every image would be refused as unscanned. `GET /api/v1/proxy-settings` reports the scanner's last call as `oci_scanner_last_seen_at` (null when none has called, and while scanning is disabled), and the Settings control stays at Off until one has. A scanner that called once and later stops does not reopen this check: the organization keeps its setting and, under `block`, refuses images it holds no complete scan for. If the instance flag is cleared later, a stored `block` keeps refusing every OCI image pull for that organization, and startup logs a warning naming it.
+
+An edge node holds no scan results. The master states each organization's OCI scan enforcement on its manifest responses, to anonymous callers as well, and a response that does not state it tells the edge nothing. For an organization its master last reported at `warn` or `block`, the edge answers every manifest through the master rather than from its own cache, keeps caching layers, and refuses while the master is unreachable. An organization at `off` is answered from the edge cache for five minutes after the master last confirmed it, a confirmation that survives an edge restart, and through the master after that. While the master is unreachable, an organization at `off`, or one whose enforcement the master has not stated yet, is answered from the edge cache, digests included, and its tags are stale-served as usual. Startup on the edge logs a warning naming the organizations at `warn` or `block`. Upgrade the master before its edges: a 0.14.0 master states the enforcement only to token holders and only at `warn` or `block`, so an organization that moves from `block` to `off` on such a master stays recorded as `block` on an upgraded edge, and is refused during an outage, until the master is upgraded.
 
 ### Retention and GC
 
@@ -287,10 +417,10 @@ the same on either host, since a pull-through proxy serves the upstream manifest
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEPRECATION_REFRESH_SCHEDULE` | `0 5 * * *` | Cron schedule for the upstream deprecation refresh pass (npm and PyPI; NuGet/Maven/RPM/OCI are skipped). |
+| `DEPRECATION_REFRESH_SCHEDULE` | `0 5 * * *` | Cron schedule for the upstream deprecation refresh pass (npm, PyPI, NuGet, Maven and Hex; Cargo, Go, RPM and OCI are not refreshed). |
 | `DEPRECATION_REFRESH_JITTER_SECONDS` | `3600` | Random offset (0..N seconds) added to each scheduled deprecation refresh to spread load. Set `0` to disable. |
 | `DEPRECATION_REFRESH_AGE_HOURS` | `24` | Re-fetch upstream deprecation metadata for versions not checked within this many hours. |
-| `DEPRECATION_REFRESH_BATCH_SIZE` | `500` | Maximum number of packages to refresh per pass. |
+| `DEPRECATION_REFRESH_BATCH_SIZE` | `500` | Maximum number of (organization, package) groups to refresh per pass. Each organization that proxies a cached package is a separate group with its own schedule, so an instance where many organizations proxy the same packages may need a larger value to cover every package within `DEPRECATION_REFRESH_AGE_HOURS`. |
 | `DEPRECATION_REFRESH_BATCH_DELAY_MS` | `500` | Delay (ms) between batches within one pass. |
 
 ### License backfill
@@ -797,6 +927,7 @@ All limiters are per-token (download/push), per-source-IP (login/anonymous/metad
 | `TOKEN_CREATE_RATE_LIMIT_PERMITS` | `60` | Fixed-window permits per hour per IP for token-creation endpoints. Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
 | `INVITE_RATE_LIMIT_PERMITS` | `20` | Fixed-window permits per hour per IP for invite and sensitive-config write endpoints (member invites, instance email/Slack config, alert settings). Honoured by both the in-process limiter (standalone) and the Redis-backed limiter (`DEPENDABLY_DEPLOYMENT_MODE=ha`); the window itself (one hour) is not configurable in either mode. |
 | `ANON_RATE_LIMIT_PERMITS` | `120` | Fixed-window permits per minute per IP for unauthenticated probe endpoints (`/health`, `/ready`, `/version`, `/api/v1/bootstrap`, `/api/v1/auth/methods`, `/api/v1/licenses`). |
+| `SECRETS_VERIFY_RATE_LIMIT_PERMITS` | `6` | Sliding-window permits per minute per caller for the stored-secret verification endpoints (`/api/v1/system/secrets/verify`, `/api/v1/instance/secrets/verify`). Queue depth is `0`. Non-positive or non-numeric values fall back to the default. |
 | `IMPORT_RATE_LIMIT_PERMITS` | `5` | Sliding-window permits per minute per token for bulk import requests. Queue depth is `0` (burst is rejected immediately). |
 | `SBOM_UPLOAD_RATE_LIMIT_PERMITS` | `30` | Sliding-window permits per minute per token for the SBOM/VEX/SARIF upload endpoints. Deliberately above `IMPORT_RATE_LIMIT_PERMITS`: a CI run for a mono-repo pushes one document per module per kind and would `429` partway through at the import budget. Queue depth is `0` (burst is rejected immediately, with `Retry-After`). |
 | `RESCAN_RATE_LIMIT_PERMITS` | `20` | Sliding-window permits per minute per caller (token hash → user sub → IP, same precedence as the management default) for the on-demand vulnerability rescan endpoint. The endpoint's own cooldown is per-package, so this bounds a caller fanning out across many distinct packages instead. Queue depth is `0` (burst is rejected immediately). |
@@ -992,6 +1123,97 @@ curl -s -H "Authorization: Bearer dpsys_..." -H "Content-Type: application/json"
 
 ---
 
+## Recovering when no system admin is active
+
+**Multi and header modes.** The API refuses to lock or disable the last active system admin
+(`409`, reason `last_active_admin`), even when two admins act at the same moment, and only an
+admin who is already disabled can be deleted. An instance can still end up with no admin who can
+sign in: a status written straight into the database, a restore from an old backup, or every
+remaining admin losing their password or authenticator.
+
+Nothing in Dependably recreates an admin on an existing instance. The `FIRST_BOOT_SYSTEM_ADMIN_*`
+variables are read only when the database holds no users, system admins or organizations, so
+setting them later does nothing, and there is no command-line tool or environment variable for
+this. Recovery is a direct database edit, which you can make while the server is running.
+
+1. **Back up the database first.**
+2. **Connect to it.** For SQLite, open the file named by `DB_PATH` (default `/data/dependably.db`)
+   with the `sqlite3` command-line tool. The image does not include it, so run it on the host
+   against the mounted volume, or in a throwaway container that mounts the same volume. For
+   Postgres, connect with `psql` as the role in `DB_CONNECTION_STRING`. That role owns the tables
+   and is not subject to row-level security; `DB_ROW_LEVEL_SECURITY_ROLE` is.
+3. **Pick the admin to bring back:**
+
+   ```sql
+   SELECT id, email, account_status, mfa_enabled FROM system_admins ORDER BY created_at;
+   ```
+
+4. **Re-activate them.** This is what the API does on re-activation: it raises `token_version` and
+   replaces `security_stamp`, so no session issued before the change works, and it forgets the
+   admin's remembered devices, so their next sign-in asks for the second factor. Replace the email
+   address in both statements.
+
+   SQLite:
+
+   ```sql
+   BEGIN;
+   UPDATE system_admins
+   SET account_status = 'active',
+       token_version  = token_version + 1,
+       security_stamp = lower(hex(randomblob(16)))
+   WHERE lower(email) = lower('ops@example.com');
+   DELETE FROM mfa_trusted_devices
+   WHERE realm = 'system'
+     AND user_id = (SELECT id FROM system_admins WHERE lower(email) = lower('ops@example.com'));
+   COMMIT;
+   ```
+
+   Postgres:
+
+   ```sql
+   BEGIN;
+   UPDATE system_admins
+   SET account_status = 'active',
+       token_version  = token_version + 1,
+       security_stamp = gen_random_uuid()::text
+   WHERE lower(email) = lower('ops@example.com');
+   DELETE FROM mfa_trusted_devices
+   WHERE realm = 'system'
+     AND user_id = (SELECT id FROM system_admins WHERE lower(email) = lower('ops@example.com'));
+   COMMIT;
+   ```
+
+   The `UPDATE` must report one row. The change takes effect on the next sign-in; no restart is
+   needed, because the server does not cache anything for an admin who is not active.
+
+5. **If nobody knows that admin's password**, set a temporary one in the same session. Generate a
+   bcrypt hash on any machine, for example `htpasswd -nbBC 12 "" 'a-long-temporary-password' | tr -d ':\n'`
+   (from `apache2-utils` or `httpd-tools`), then store it and force a change at the next sign-in.
+   The statement is the same on both engines:
+
+   ```sql
+   UPDATE system_admins
+   SET password_hash = '<bcrypt hash>', must_change_password = 1
+   WHERE lower(email) = lower('ops@example.com');
+   ```
+
+6. **If that admin has also lost their authenticator and recovery codes**, clear their MFA so they
+   can enrol again after signing in. This is the same last resort described for
+   `system_admin_totp_key` under [Verifying stored secrets](#verifying-stored-secrets):
+
+   ```sql
+   UPDATE system_admins
+   SET mfa_enabled = 0, mfa_authenticator_key = NULL, mfa_recovery_codes = NULL
+   WHERE lower(email) = lower('ops@example.com');
+   ```
+
+If sign-in is still refused after this, the email address may be locked out by failed sign-in
+attempts; the lockout lifts after 15 minutes. Once the admin is back in, review the other admins
+from the System console, and check the system audit log for how the instance lost its last active
+admin.
+
+---
+
 ## Usage caps
 
 **Multi mode only**, like the rest of the operator plane. A system admin, or a control plane holding a [system API token](#system-api-tokens), can cap a tenant's usage per meter. Caps are plain quantities in each meter's own unit. Community stores the numbers and enforces them; it does not price anything or decide which meters are billed.
@@ -1047,7 +1269,63 @@ Each org has independent package namespaces, its own member list with roles (`ow
 
 In **single mode** the org is the deployment, so instance-wide configuration (`/api/v1/instance/*` — settings, the SMTP transport, `/metrics` access, background-job status) is gated on `tenant:configure` and is therefore available to `admin` as well as `owner`. Those routes do not exist in multi-tenant mode, where instance configuration is a control-plane concern reached through the `system_admin` realm at `/api/v1/system/*`.
 
-Registry URLs are ecosystem-path-only: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`. Tenancy is host-resolved — in `DEPLOYMENT_MODE=single` (default) the bare host serves the one org; in `DEPLOYMENT_MODE=multi` each org is a subdomain of the apex host (`my-org.apex/simple/` etc.). OCI is at `/v2/` per the Distribution Spec.
+Registry URLs are ecosystem-path-only: `/simple/`, `/npm/`, `/nuget/v3/index.json`, `/maven/`, `/rpm/`. Tenancy is host-resolved — in `DEPLOYMENT_MODE=single` (default) the bare host serves the one org; in `DEPLOYMENT_MODE=multi` each org is a subdomain of the tenant domain, which is the apex host unless `TENANT_DOMAIN` is set (`my-org.tenantdomain/simple/` etc.). OCI is at `/v2/` per the Distribution Spec. A registry request on the apex host itself, or on a subdomain that names no organization, gets `404` (the OCI error envelope with `NAME_UNKNOWN` under `/v2/`); it is never served from another organization, even when it carries a valid token.
+
+### Containing an incident in a tenant
+
+**Multi mode only**, through the system API (or the System console). Suspending a tenant is the
+containment step: it cuts off everyone who can act as the tenant, and the cut-off holds after the
+tenant is restored.
+
+1. **Suspend** the tenant: `PATCH /api/v1/system/tenants/{slug}/status` with
+   `{ "status": "suspended" }`. Deleting it (`DELETE /api/v1/system/tenants/{slug}`) has the same
+   effect on credentials.
+2. **Investigate.** The operator audit log (`GET /api/v1/system/audit`) holds the
+   `tenant.status_changed` (or `tenant.deleted`) entry, whose `revoked` field counts each kind of
+   credential the suspension revoked.
+3. **Restore** the tenant: set the status back to `active` (or `read_only`), or
+   `PATCH /api/v1/system/tenants/{slug}/restore` after a delete.
+4. **Re-issue credentials.** Members sign in again. Tenant admins issue new tokens for CI
+   pipelines, package-manager configuration and edge nodes, and re-send any invites still needed.
+
+What suspending (or deleting) a tenant does, in the same transaction as the status change:
+
+| Credential | What happens | After the restore |
+|---|---|---|
+| Sessions (browser and API JWTs) | Ended | Members sign in again |
+| Remembered devices | Forgotten | The next sign-in asks for the second factor |
+| Personal access tokens and service tokens | Deleted | Gone for good; issue new ones |
+| Unused password-reset and email-change links | Deleted | Request a new link |
+| Pending invites | Deleted | Re-send the invite |
+| Every request to the tenant, sign-in included | Refused with `423` while it is suspended (a deleted tenant answers `404`) | Accepted again |
+| Webhook deliveries | Not delivered while it is suspended | Delivered for new events |
+
+**Edge nodes stop syncing.** An edge's `EDGE_MASTER_TOKEN` is a service token in the tenant it
+pulls from, so the suspension deletes it. After the restore, the edge serves only what it has
+already cached until you mint a new reader service token in that tenant, set it as
+`EDGE_MASTER_TOKEN` on the edge, and restart the edge.
+
+Restoring the tenant runs the same cleanup again, so a tenant locked out some other way (an
+`archived` or `deleting` status, or a direct database edit) does not get its old credentials back
+either. Nothing can be issued while the tenant is suspended, so the restore only ever removes
+credentials from before the suspension. Moving a tenant to or from `read_only` is not a lockout
+and revokes nothing: its members keep signing in and its tokens keep pulling.
+
+What suspension does not cover:
+
+- **Passwords.** A member's password still works after the restore. If one may be compromised,
+  reset it.
+- **Presigned download URLs** already handed out stay valid until they expire, at most
+  `STORAGE_PRESIGNED_READ_TTL_SECONDS` (default `60`, at most `900`). See
+  [Presigned reads](#presigned-reads).
+- **Content already cached on an edge node** stays servable from that edge.
+- **Secrets the tenant holds for other systems**: upstream registry credentials, webhook signing
+  secrets and SAML settings. These are not credentials to Dependably; rotate them at their source
+  if they may have been exposed.
+- **System API tokens** belong to system admins, not to the tenant, and are not affected.
+- **Other replicas** of a multi-replica deployment keep serving the tenant's earlier status from
+  their own caches for up to 5 seconds, and a service token's cached resolution for up to 1
+  second.
 
 ---
 
@@ -1082,6 +1360,19 @@ A NuGet upstream can carry a **symbol-server base URL** (`upstream_registry.symb
 - A nuget.org upstream is **seeded with that endpoint automatically**, both at creation and via a one-shot migration for pre-existing rows. Only the canonical nuget.org API hosts match — a private feed that mirrors nuget.org is not nuget.org, and guessing its symbol host would send debug-id lookups, which carry the PDB names of private code, to a third party.
 - Every other upstream starts **empty, which disables symbol proxying for it**. Set it with `PUT /api/v1/upstream-registries/{id}/symbol-server` (requires `tenant:configure`); sending an empty value clears it again. The URL is validated exactly like an upstream base URL, including the plaintext-`http` opt-in.
 - nuget.org publishes **no `.snupkg` download endpoint** — its service index carries `SymbolPackagePublish`, which is push-only. Symbol resolution against it is therefore SSQP-by-debug-id only, which is what the fall-through implements.
+- The fall-through follows the org's proxy settings like every package route. With proxy passthrough off, the org air-gapped, or the PDB's name (less its `.pdb` extension) matching a reserved NuGet namespace, an SSQP miss answers `404` without asking any symbol server.
+
+### Package lookup without an upstream
+
+`GET /api/v1/lookup` with no `version` resolves the latest version from the org's upstream. When a standing setting rules that out, it answers `422` on `version` with a machine-readable `reason`; retrying does not help, so give a version instead. An upstream that was asked and failed to answer is an outage, not a setting, and answers `503`.
+
+| `reason` | Cause |
+|---|---|
+| `name_reserved` | The name matches one of the org's reserved namespaces, so it is never looked up upstream. |
+| `upstream_not_configured` | The org has no upstream registry for the ecosystem. |
+| `passthrough_off` | The org turned proxy passthrough off, so its upstreams are not consulted. |
+
+An air-gapped org or instance gets the same `422` without a `reason`. With a version given, a lookup in any of these states still answers from the advisory and licence checks, and lists the checks that needed upstream metadata in `unavailableChecks`.
 
 ---
 
@@ -1163,9 +1454,11 @@ See [`DOWNLOAD_RATE_LIMIT_PERMITS`](#rate-limiting), [`PUSH_RATE_LIMIT_PERMITS`]
 
 ### Metadata caches are per-instance, invalidated across replicas over Redis
 
-Ecosystem metadata responses (the npm packument, PyPI simple index, NuGet registration, Maven `maven-metadata.xml`, and RPM repodata documents) are cached in an in-process `MemoryCache` on each instance. The cache itself is not shared across replicas — but the *invalidation* is.
+Ecosystem metadata responses (the npm packument, PyPI simple index, NuGet registration, Maven `maven-metadata.xml`, and RPM repodata documents) are cached in an in-process `MemoryCache` on each instance. The cache itself is not shared across replicas — but the *invalidation* is. The npm packument and NuGet registration documents embed absolute download URLs built from the request's scheme and `Host`, so each is cached once per scheme and host it was requested through (the apex, a `HOST_ROUTING` host, `localhost` from a health check), and a client is always sent its own host's URLs. Invalidating a package clears every host's copy.
 
 When `REDIS_CONNECTION_STRING` is set, a mutation that changes a package's rendered metadata (publish, unpublish, dist-tag change, deprecate, unlist, admin upload, admin delete) publishes the package coordinates — org, ecosystem, and package identity — to the `<REDIS_KEY_PREFIX>metadata-invalidation` pub/sub channel. Every replica subscribes and evicts the matching entries locally, expanding the coordinates into that ecosystem's full cache-key variant set (npm local + proxy; PyPI HTML + JSON; NuGet SemVer1/2 × local/proxy; Maven artifact-level + SNAPSHOT version-level; every RPM repodata document plus the merged tuple). Both the publish path and the receive path run the same expansion, so an invalidation can never be complete on the pushing replica and partial on its peers.
+
+Org-wide changes travel on the same channel. Adding or removing a reserved namespace, saving proxy settings, changing the licence mode, or adding, editing or removing a licence allowlist or blocklist entry publishes an org-wide message that carries only the org id. Each replica that receives it clears, for that org, its cached reserved-namespace list and settings record, then expires every rendered metadata document and every package-lookup outcome it holds. A peer's next request is therefore decided and rendered from the new reservations and policy without waiting out the 60-second reservation, 2-minute lookup, or metadata TTLs. On the two counters below, every measurement carries a `scope` attribute: `scope="org"` for an org-wide message, which has no `ecosystem` attribute, and `scope="ecosystem"` for a message about one ecosystem's metadata, which also carries `ecosystem` (`npm`, `pypi`, `nuget`, `maven` or `rpm`). During a rolling deploy, replicas still on a build without org-wide messages discard them as an unknown kind and converge on those TTLs.
 
 **Because this is a freshness optimisation, it degrades rather than fails.** If Redis is unreachable the broadcast is dropped, logged at warning, and counted on `dependably.metadata.invalidations_published{outcome="server_error"}`; the push still succeeds and peer replicas converge on TTL expiry exactly as they did before the channel existed. `dependably.metadata.invalidations_received` counts messages applied from peers, so a working channel is visible in metrics. A replica that cannot subscribe at startup logs a warning and keeps serving.
 
@@ -1187,6 +1480,101 @@ A distributed-lock backend failure (a Redis connection blip or failover, not a c
 
 ---
 
+## Supported upgrade path
+
+The oldest release supported as an upgrade source is **v0.13.3**. A database created by an earlier release is not exercised against the current schema, and an upgrade straight from one can fail at startup. From anything older, upgrade to v0.13.3 first and let it start and complete its migrations, then upgrade to the release you want. From v0.13.3 or later, upgrade directly. Startup checks this: a database older than v0.13.3 is refused before anything is changed, unless `UPGRADE_FLOOR_OVERRIDE=true` is set.
+
+One exception: a Postgres database created by 0.2.2 to 0.4.4 upgrades **directly** to 0.14.0 or later. Every release from 0.4.5 to v0.13.3 fails to start on such a database (`42703: column "cache_artifact_id" does not exist`), so it cannot stop at v0.13.3. This also applies if a release from 0.4.5 to v0.13.3 has already failed to start on it, and startup recognizes such a database and lets it through the upgrade-floor check. If a 0.14.0 or later boot has already failed partway on it, startup can no longer tell it from an older database and refuses it: set `UPGRADE_FLOOR_OVERRIDE=true` for that one boot, then remove it. Back up the database first.
+
+The release notes under "Action required" in [CHANGELOG.md](CHANGELOG.md) name the floor whenever it moves. During a blue-green cutover the old and new slots share one database, so each release's schema stays readable by the release before it.
+
+## Verifying stored secrets
+
+Dependably encrypts the secrets it stores (Slack webhook URLs, webhook signing secrets, upstream
+registry credentials, TOTP keys, signing keys and the instance secrets) with AES-256-GCM. Up to
+the release that fixed it, the encryption code shared one AES-GCM object between threads without
+a lock. On Linux that object is not thread-safe, so a secret saved while another request was
+encrypting or decrypting at the same moment could be written with a nonce, tag and ciphertext that
+do not belong together. In a stress test about 0.6% of overlapping saves came out this way. Such a
+value can never be decrypted, and nothing reports it until the feature that needs it runs. The
+fault is in the Linux (OpenSSL) implementation of AES-GCM; it does not reproduce on macOS.
+
+**Who should check:** anyone who ran a Linux build (including the container images) of v0.2.2 or
+any later release that predates the fix, and saved or rotated a secret while the server was
+handling traffic. Proxy fetches decrypt upstream credentials on every request, so a busy instance
+was exposed whenever an operator edited a secret. Checking a clean instance costs nothing, so when
+in doubt, check.
+
+### How to check
+
+Every boot runs the check in the background once the server is listening (turn this off with
+`SECRETS_VERIFY_ON_STARTUP=false`). It never delays or stops startup. For each kind of secret that
+fails it logs one warning that starts `Stored secret check:` and names the table and up to 20 row
+ids with their organization; a clean run logs one information line instead. The log never contains
+a secret or its ciphertext.
+
+A feature that needs a broken secret also says so when it runs: the warning or error names the
+same kind, table, row id and organization as the check, so it leads to the same repair below.
+
+To run it on demand and get the full list:
+
+- **Multi-tenant (`DEPLOYMENT_MODE=multi`):** a system admin calls
+  `POST /api/v1/system/secrets/verify` on the apex host.
+- **Single-tenant (default):** an organization admin or owner calls
+  `POST /api/v1/instance/secrets/verify`.
+- **Edge nodes** have no management API; read the startup log. The only secret an edge node stores
+  is its master enrolment token, which `EDGE_MASTER_TOKEN` rewrites on every start.
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $SESSION_JWT" https://registry.example.com/api/v1/system/secrets/verify
+```
+
+Both endpoints write an audit event (`system_admin.protected_secrets_verified` or
+`instance_protected_secrets_verified`) carrying counts only, and allow each caller six calls a
+minute by default (`SECRETS_VERIFY_RATE_LIMIT_PERMITS`). The response lists each kind with how many values were
+`checked`, how many decrypt (`ok`), how many are stored unencrypted (`legacyPlaintext`, which still
+work and are not failures; TOTP keys never count here, see `unexpected_plaintext` below), and how
+many `failed`, followed by `failures`: one entry per broken
+value with its `kind`, `table`, `rowId`, `orgId` (null for instance-level secrets) and `reason`.
+At most 500 failures are listed; `failuresTruncated` says when there are more, and the counts are
+always complete. Run it again after repairing to confirm the list is empty.
+
+| `reason` | Meaning |
+|---|---|
+| `authentication_failed` | The value is encrypted but does not decrypt with this instance's key. Re-enter it as below. |
+| `master_key_missing` | The value is encrypted but `DEPENDABLY_MASTER_KEY` is not set on this instance. Set the key it was encrypted with; nothing needs re-entering. |
+| `malformed` | A DataProtection key ring element is not valid XML or has lost its ciphertext. Treat it like `authentication_failed`. |
+| `unexpected_plaintext` | A TOTP key (`user_totp_key` or `system_admin_totp_key`) is stored as a bare authenticator key instead of ciphertext. Dependably has only ever stored TOTP keys encrypted, so this value was written to the database from outside the application, and sign-in rejects it rather than trusting it. Repair it like `authentication_failed`, and also find out how it was written: whoever wrote it knows the key. |
+
+A kind with `skippedReason` was not checked: `mfa_encryption_key_unavailable` means the key that
+encrypts TOTP keys is missing or broken itself (its own failure is listed), and
+`key_ring_in_redis` means the DataProtection key ring lives in Redis (`REDIS_CONNECTION_STRING` is
+set), where this check does not read.
+
+### What breaks, and how to repair each kind
+
+A broken secret cannot be recovered; the repair is always to store a new one. The broken value
+belongs to the organization in `orgId`, and the steps below are carried out by that
+organization's admins unless noted.
+
+| `kind` (table) | What breaks | Repair |
+|---|---|---|
+| `alert_slack_webhook_url` (`alert_settings`, row id is the org id) | That organization's Slack alerts are not delivered. | Paste the webhook URL again in the organization's Slack alert settings and save (`PUT /api/v1/alert-settings/slack`), then send a test message (`POST /api/v1/alert-settings/slack/test`). |
+| `webhook_secret` (`webhook_subscription`) | That subscription is skipped for every event, and each skip logs a warning naming the subscription and its organization. It is never delivered unsigned. The organization's other webhooks are delivered as usual. | Edit the subscription and set a new signing secret (`PUT /api/v1/webhooks/{id}` with `secret`), then give the receiver the new secret. |
+| `upstream_credential` (`upstream_registry`) | Proxy fetches for that organization and ecosystem fail, for every upstream of the ecosystem, and the error names the upstream row. This is deliberate: the upstreams are tried in priority order, and leaving out a private upstream would let the next one, often a public registry, answer for the names the private one serves. Other ecosystems are not affected. | Upstream credentials cannot be edited in place: in Settings → Proxy → Upstream registries, remove the row and add it again with the credential (`DELETE` then `POST /api/v1/upstream-registries`). Restore its position in the order if it was not last. |
+| `user_totp_key` (`users`, row id is the user id) | Every authenticator code the user enters is rejected as an invalid code, so they cannot finish signing in with TOTP, and each attempt logs a warning naming the user and the reason. This includes a key stored as plaintext (`unexpected_plaintext`), which never verifies. Recovery codes still work. | The user signs in with a recovery code, turns MFA off in their security settings (password plus a recovery code) and enrols again. A user with no recovery codes left needs an operator to set `mfa_enabled` to `0` and clear `mfa_authenticator_key` and `mfa_recovery_codes` on their `users` row, after which they enrol again. |
+| `system_admin_totp_key` (`system_admins`) | The same, for a system admin signing in on the apex host. | The same, through the system admin's own security settings, or on the `system_admins` row as a last resort. |
+| `sbom_signing_key` (`sbom_signing_key`) | SBOM signing fails for that organization. Only the active key is checked; a retired key's private half is never used again. | Rotate the key in Settings (`POST /api/v1/sbom-signing-key/rotate`). Documents signed earlier stay verifiable because the old public key stays published. |
+| `hex_signing_key` (`hex_signing_key`, row id is the org id) | That organization's Hex read plane cannot sign what it serves, so Hex fetches from it fail. | Rotate the key (`POST /api/v1/hex/signing-key/rotate`). Every Hex client must register the repository again with the new public key. |
+| `data_protection_key` (`data_protection_keys`) | Data protected with that key ring element can no longer be read. Only the SAML flow uses the key ring, for short-lived state, so the effect is a SAML sign-in or test that has to be started again. | Delete the row by its `friendly_name` (the row id) and restart. A new key is generated on start. |
+| `smtp_password` (`instance_settings`) | Mail through the instance relay fails to authenticate: alert mail, invitations and password resets. | Enter the relay password again in the instance email settings (`PUT /api/v1/system/email-config`, or `PUT /api/v1/instance/email-config` in single-tenant mode). |
+| `system_slack_webhook_url` (`instance_settings`) | Operator Slack notifications are not delivered. | Enter the URL again in the system Slack settings (`PUT /api/v1/system/slack-config`). |
+| `vuln_tracker_token` (`instance_settings`) | Lookups against the vulnerability tracker fail authentication. | Enter the token again in the vulnerability tracker settings (`PUT /api/v1/system/vuln-tracker-config`, or `/api/v1/instance/vuln-tracker-config` in single-tenant mode). |
+| `jwt_secret` (`instance_settings`) | The next start fails, because the session signing key cannot be loaded. Only a rotation (`POST /api/v1/system/jwt-secret/rotate`) writes this value at runtime, so a running multi-tenant server can be in this state without knowing it. | While the server is still running, rotate again; everyone is signed out. If it no longer starts, stop it, set the row's `value` to a new random string (for example the output of `openssl rand -base64 32`) and start it: startup encrypts the new value, and every session ends. Do not delete the row, which also stops the server from starting. |
+| `mfa_encryption_key` (`instance_settings`) | No TOTP key on the instance can be read, so every user and system admin with MFA is rejected at the second step. | The TOTP keys it protected cannot be recovered. First boot writes it before any traffic, so this is not expected from the race; check for a restore from another instance or a changed master key first. If it is truly lost, delete the row and restart (a new key is generated), then clear the MFA columns of every user and system admin as described for `user_totp_key` so they can enrol again. Recovery codes are keyed on the same value, so they stop working too. |
+
+---
+
 ## Security model
 
 - **OWASP API Security Top 10** alignment: BOLA/IDOR protection, SSRF protection with DNS rebinding re-validation, path traversal rejection, CRLF injection prevention
@@ -1195,7 +1583,7 @@ A distributed-lock backend failure (a Redis connection blip or failover, not a c
 - **Capability enforcement**: tokens carry an explicit capability subset (e.g. `read:artifact`, `publish:npm`), checked at the HTTP handler level; capability mismatch returns 403, not 401 — see [Tokens](#tokens)
 - **Account lockout**: 10 failed login attempts → 15-minute lockout with `Retry-After` header
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy` (management API), `Strict-Transport-Security` (when behind HTTPS proxy)
-- **Trusted proxy / host hardening**: Forwarded-header processing is fail-closed — when `TRUSTED_PROXIES` is unset, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are ignored entirely so caller-supplied values cannot spoof `RemoteIpAddress`, scheme, or host. When `TRUSTED_PROXIES` is set, those headers are processed only from the listed IPs/CIDRs. Host-header filtering is derived at startup from the apex (`APEX_HOST`, or the host portion of `BASE_URL`): when that host is non-localhost, only that host (plus `*.apex` in multi mode) and localhost are accepted; unknown `Host` headers are rejected before tenant resolution, preventing Host injection into SAML SP URLs, absolute links, and CSRF Origin comparisons. When `BASE_URL` is unset or localhost (dev/local), filtering is permissive and a startup warning is logged. **A co-located reverse proxy defeats the `/metrics`, `/version`, and management docs/OpenAPI IP allowlists when `TRUSTED_PROXIES` is unset**: those allowlists default to loopback (`127.0.0.1`, `::1`), and any proxy forwarding to Kestrel over loopback makes every caller it forwards appear as an allowlisted operator — the allowlist fails open, not closed, in that specific topology. A startup warning names this exposure when it applies; the fix is `TRUSTED_PROXIES` set to the proxy's address(es), not a code change to the allowlist itself.
+- **Trusted proxy / host hardening**: Forwarded-header processing is fail-closed — when `TRUSTED_PROXIES` is unset, `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` are ignored entirely so caller-supplied values cannot spoof `RemoteIpAddress`, scheme, or host. When `TRUSTED_PROXIES` is set, those headers are processed only from the listed IPs/CIDRs. Host-header filtering is derived at startup from the apex (`APEX_HOST`, or the host portion of `BASE_URL`): when that host is non-localhost, only that host (plus `*.tenantdomain` in multi mode, where the tenant domain is `TENANT_DOMAIN` when set and the apex otherwise) and localhost are accepted; unknown `Host` headers are rejected before tenant resolution, preventing Host injection into SAML SP URLs, absolute links, and CSRF Origin comparisons. When `BASE_URL` is unset or localhost (dev/local), filtering fails closed to loopback hosts (plus `*.localhost` and a set `*.TENANT_DOMAIN` in multi mode) and a startup warning is logged. **A co-located reverse proxy defeats the `/metrics`, `/version`, and management docs/OpenAPI IP allowlists when `TRUSTED_PROXIES` is unset**: those allowlists default to loopback (`127.0.0.1`, `::1`), and any proxy forwarding to Kestrel over loopback makes every caller it forwards appear as an allowlisted operator — the allowlist fails open, not closed, in that specific topology. A startup warning names this exposure when it applies; the fix is `TRUSTED_PROXIES` set to the proxy's address(es), not a code change to the allowlist itself.
 - **Schema**: idempotent `CREATE TABLE IF NOT EXISTS` applied on startup; one-shot data migrations are recorded in the `_applied_migrations` ledger (see [src/Dependably.Core/Infrastructure/schema/schema-migrations.md](src/Dependably.Core/Infrastructure/schema/schema-migrations.md))
 
 ---
@@ -1223,14 +1611,13 @@ Full i18n architecture: see [i18n/README.md](i18n/README.md).
 
 See [CLAUDE.md](CLAUDE.md) for a full breakdown of the project structure, key architectural rules, and tech stack decisions.
 
-Architecture decision records live in the spec repo,
-[dependably-community.spec](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec),
-under `specs/adr/`, alongside the standing architecture specs. Design intent is
-deliberately kept out of this repo: it changes on a different clock from the
-code, and it is indexed for retrieval as one corpus. Key ADRs:
+Architecture decision records and the standing architecture specs live in a separate spec
+repository, which is private. Design intent is kept out of this repo because it changes on a
+different clock from the code and is indexed for retrieval as one corpus. The decisions most often
+referred to:
 
-- [ADR-auth-identity-hybrid](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-auth-identity-hybrid.md) — why the auth layer uses Identity Core for MFA/credential primitives but keeps bespoke first-factor login, lockout, JWT sessions, and per-request session invalidation.
-- [ADR-envelope-encryption-db-secrets](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-envelope-encryption-db-secrets.md) — envelope-encrypting DB-resident secrets under an operator-held master key.
-- [ADR-terraform-provider-network-mirror](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-terraform-provider-network-mirror.md) — why Terraform providers are served as a network mirror, not a provider registry.
-- [ARCH-personal-data-inventory](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/architecture/ARCH-personal-data-inventory.md) — what an instance holds about identifiable people, the retention horizons that bound it, and the gates that keep the inventory from rotting.
-- [ADR-sqlite-to-postgres-migration](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community.spec/-/blob/main/specs/adr/ADR-sqlite-to-postgres-migration.md) — why the migrator derives its plan from the database rather than a list in code, and aborts rather than coercing.
+- ADR-auth-identity-hybrid — why the auth layer uses Identity Core for MFA/credential primitives but keeps bespoke first-factor login, lockout, JWT sessions, and per-request session invalidation.
+- ADR-envelope-encryption-db-secrets — envelope-encrypting DB-resident secrets under an operator-held master key.
+- ADR-terraform-provider-network-mirror — why Terraform providers are served as a network mirror, not a provider registry.
+- ARCH-personal-data-inventory — what an instance holds about identifiable people, the retention horizons that bound it, and the gates that keep the inventory from rotting.
+- ADR-sqlite-to-postgres-migration — why the migrator derives its plan from the database rather than a list in code, and aborts rather than coercing.

@@ -13,14 +13,13 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.10" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.13" />
     <PackageReference Include="JunitXml.TestLogger" Version="3.1.12" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.7.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="NJsonSchema" Version="10.9.0" />
     <PackageReference Include="NSubstitute" Version="5.3.0" />
     <PackageReference Include="WireMock.Net" Version="2.6.0" />
-    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
     <PackageReference Include="Scriban.Signed" Version="7.2.5" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />

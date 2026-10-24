@@ -109,6 +109,78 @@ public sealed class MfaSecretProtectorTests
             protector.Unprotect("not-valid-base64!!!"));
     }
 
+    // ── concurrency ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// One protector, many threads — the shape production has, since this type backs the
+    /// singleton <see cref="EnvelopeProtector"/> that every request and every per-org delivery
+    /// worker decrypts through. Each thread decrypts its own org's stored secret and round-trips
+    /// fresh values, and every call must return exactly its own plaintext.
+    ///
+    /// On Linux an unsynchronized shared <see cref="AesGcm"/> fails this on nearly every run
+    /// (overlapping calls share one OpenSSL cipher context: authentication failures, wrong
+    /// plaintexts, undecryptable ciphertext). It cannot fail on macOS, whose implementation is
+    /// stateless per call, so a red run here is a Linux CI signal. Dedicated threads released by
+    /// a barrier keep the overlap independent of thread-pool scheduling.
+    /// </summary>
+    [Fact]
+    public void ProtectAndUnprotect_ConcurrentCallersOnOneInstance_EveryCallRoundTrips()
+    {
+        using var protector = NewProtector();
+        const int threadCount = 8;
+        const int iterations = 2_000;
+
+        string[] plaintexts = Enumerable.Range(0, threadCount)
+            .Select(i => $"https://hooks.slack.com/services/org{i}/secret")
+            .ToArray();
+        string[] stored = plaintexts.Select(protector.Protect).ToArray();
+
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        using var start = new Barrier(threadCount);
+
+        var threads = Enumerable.Range(0, threadCount).Select(t => new Thread(() =>
+        {
+            start.SignalAndWait();
+            for (int i = 0; i < iterations; i++)
+            {
+                try
+                {
+                    string decrypted = protector.Unprotect(stored[t]);
+                    if (decrypted != plaintexts[t])
+                    {
+                        failures.Enqueue($"thread {t}: decrypted a wrong plaintext");
+                    }
+
+                    string fresh = $"org{t}-value-{i}";
+                    if (protector.Unprotect(protector.Protect(fresh)) != fresh)
+                    {
+                        failures.Enqueue($"thread {t}: round-trip returned a wrong plaintext");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Caught broadly on purpose: an unsynchronized Encrypt throws a raw
+                    // CryptographicException, and anything escaping a dedicated thread would
+                    // abort the whole test host instead of failing this test.
+                    failures.Enqueue($"thread {t}: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        })).ToArray();
+
+        foreach (var thread in threads)
+        {
+            thread.Start();
+        }
+
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        Assert.True(failures.IsEmpty,
+            $"{failures.Count} concurrent call(s) failed; first: {failures.FirstOrDefault()}");
+    }
+
     // ── constructor guard ─────────────────────────────────────────────────────
 
     [Theory]

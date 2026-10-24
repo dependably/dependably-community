@@ -588,6 +588,16 @@
         }
       }
     },
+    "/api/v1/instance/secrets/verify": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
     "/api/v1/instance/settings": {
       "operations": {
         "get": {
@@ -888,6 +898,121 @@
         }
       }
     },
+    "/api/v1/oci-scan/claim": {
+      "operations": {
+        "post": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/blobs/{digest}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "digest",
+            "jobId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/fail": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "jobId"
+          ],
+          "responseCodes": [
+            "200",
+            "409",
+            "422"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/heartbeat": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "jobId"
+          ],
+          "responseCodes": [
+            "200",
+            "409",
+            "422"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/inventory": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "jobId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/manifests/{digest}": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "digest",
+            "jobId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/matches": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "jobId"
+          ],
+          "responseCodes": [
+            "204"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/reextract": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "jobId"
+          ],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/oci-scan/{jobId}/result": {
+      "operations": {
+        "post": {
+          "requiredParams": [
+            "jobId"
+          ],
+          "responseCodes": [
+            "204",
+            "409",
+            "422",
+            "503"
+          ]
+        }
+      }
+    },
     "/api/v1/packages": {
       "operations": {
         "get": {
@@ -907,6 +1032,21 @@
           ],
           "responseCodes": [
             "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/packages/oci/{name}/{digest}/scan": {
+      "operations": {
+        "get": {
+          "requiredParams": [
+            "digest",
+            "name"
+          ],
+          "responseCodes": [
+            "200",
+            "404",
+            "422"
           ]
         }
       }
@@ -1894,6 +2034,16 @@
     "/api/v1/system/observability": {
       "operations": {
         "get": {
+          "requiredParams": [],
+          "responseCodes": [
+            "200"
+          ]
+        }
+      }
+    },
+    "/api/v1/system/secrets/verify": {
+      "operations": {
+        "post": {
           "requiredParams": [],
           "responseCodes": [
             "200"

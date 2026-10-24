@@ -116,7 +116,14 @@ public sealed record UpdateProxySettingsRequest(
     /// CISA D2 SBOM author-signature admission gate: 'off' | 'warn' | 'block'. Absent = leave
     /// the stored value unchanged. See <c>OrgSettings.VerifySbomSignatures</c>.
     /// </summary>
-    string? VerifySbomSignatures = null)
+    string? VerifySbomSignatures = null,
+    /// <summary>
+    /// OCI pull gate over the org's own image scan results: 'off' | 'warn' | 'block'. Absent =
+    /// leave the stored value unchanged. Moving off 'off' is refused while the instance has
+    /// image scanning disabled (<c>OCI_SCAN_ENABLED</c>), because every image would then be
+    /// unscanned. See <c>OrgSettings.OciScanEnforcement</c>.
+    /// </summary>
+    string? OciScanEnforcement = null)
 {
     public Optional<int?> MinReleaseAgeHours { get; init; }
     public Optional<double?> MaxEpssTolerance { get; init; }
@@ -219,4 +226,8 @@ public sealed record OrgControllerServices(
     MetadataInvalidationCoordinator Invalidation,
     CacheArtifactRepository CacheArtifacts,
     TenantArtifactAccessRepository TenantAccess,
-    TimeProvider Time);
+    TimeProvider Time,
+    // OCI image scanning: each org's own scan facts and scanner liveness drive an OCI version's
+    // status. Absent where scanning is not wired, which leaves OCI at its standing no_feed.
+    Dependably.Infrastructure.OciScan.IOciScanCoverage? OciCoverage = null,
+    Dependably.Infrastructure.OciScan.OciScanRepository? OciScans = null);

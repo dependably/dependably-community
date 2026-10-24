@@ -14,10 +14,13 @@ public abstract class OrgScopedControllerBase : ControllerBase
 {
     /// <summary>
     /// Reads the resolved tenant id from <c>HttpContext.Items[TenantContext.HttpItemsKey]</c>.
-    /// Only valid after <c>OrgAccessGuard.AuthorizeCapAsync</c> has returned null.
+    /// Only valid once a tenant is known to be resolved: after <c>OrgAccessGuard.AuthorizeCapAsync</c>
+    /// has returned null on the management plane, or on any protocol controller, which
+    /// <c>TenantStatusEnforcementMiddleware</c> never lets a request without a tenant reach.
+    /// Throws rather than returning null if that ordering is ever broken
+    /// (<see cref="TenantContextHttpExtensions.RequireTenantId"/>).
     /// </summary>
-    protected string CurrentTenantId() =>
-        ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+    protected string CurrentTenantId() => HttpContext.RequireTenantId();
 
     protected string? GetUserId() =>
         User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value

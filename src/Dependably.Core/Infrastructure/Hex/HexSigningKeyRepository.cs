@@ -92,7 +92,8 @@ public sealed class HexSigningKeyRepository
         }
 
         var rsa = RSA.Create();
-        rsa.ImportFromPem(_envelope.Unprotect(row.PrivateKey));
+        rsa.ImportFromPem(_envelope.Unprotect(row.PrivateKey, new ProtectedSecretRow(
+            ProtectedSecretKinds.HexSigningKey, "hex_signing_key", row.OrgId, row.OrgId)));
         return new HexSigningKey(row.OrgId, rsa, row.PublicKeyPem, row.Fingerprint,
             DateTimeOffset.Parse(row.CreatedAt, null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal));
     }

@@ -1,9 +1,9 @@
-using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using Dapper;
+using Dependably.Api;
 using Dependably.Infrastructure;
+using Dependably.Infrastructure.Caching;
 using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Protocol;
 
@@ -41,126 +41,176 @@ namespace Dependably.Protocol;
 /// namespace is flat and lower-case by rule), the same shape as npm and cargo.</item>
 /// </list>
 ///
-/// Reads are served from a short-TTL per-org cache (same shape as
-/// <see cref="BlocklistRepository"/>) so the hot proxy paths cost one dictionary hit;
-/// mutations invalidate the org's entry. A fill that raced a concurrent mutation is guarded by
-/// the same per-org generation token as <see cref="BlocklistRepository"/>, so a namespace just
+/// Reads are served from a short-TTL per-org cache (<see cref="ReservedNamespaceListCache"/>,
+/// same shape as <see cref="BlocklistRepository"/>) so the hot proxy paths cost one dictionary
+/// hit; mutations invalidate the org's entry. A fill that raced a concurrent mutation is guarded
+/// by the same per-org generation token as <see cref="BlocklistRepository"/>, so a namespace just
 /// reserved can never be masked by a stale cached list for a full TTL.
+///
+/// A mutation also expires every answer derived from the old list: the org's rendered-metadata
+/// epoch (<see cref="OrgCacheEpochStore"/>) and its package-lookup outcomes
+/// (<see cref="PackageLookupCache"/>). A pattern covers names that cannot be enumerated (a
+/// group-level <c>com.acme</c> spans every <c>com.acme.*</c> coordinate), so per-key eviction
+/// cannot reach them; one org-wide call does, and it runs in both directions — a newly reserved
+/// name stops serving upstream-merged documents, and a lifted reservation stops serving the
+/// local-only ones. The call is <see cref="MetadataInvalidationCoordinator.InvalidateOrg"/>,
+/// which also broadcasts the change, so in a multi-replica deployment every replica clears its
+/// list, epoch and lookup outcomes for the org within one pub/sub round trip; a lost broadcast
+/// leaves a peer on its TTLs.
 /// </summary>
 public sealed partial class ReservedNamespaceService
 {
     public static readonly IReadOnlyList<string> SupportedEcosystems = ["npm", "pypi", "nuget", "maven", "cargo", "golang", "apk", "terraform", "hex"];
 
     private readonly IMetadataStore _db;
-    private readonly IMemoryCache _cache;
     private readonly TimeProvider _time;
-    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
+    private readonly ReservedNamespaceListCache _listCache;
+    private readonly MetadataInvalidationCoordinator? _invalidation;
+    private readonly OrgWideCacheEviction _localEviction;
 
-    // Per-org generation token, bound to each cache entry as an expiration trigger so a fill
-    // that raced a concurrent Add/Delete cannot persist the stale list past the mutation.
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> _fillGuards =
-        new(StringComparer.Ordinal);
-
-    public ReservedNamespaceService(IMetadataStore db, IMemoryCache cache, TimeProvider time)
+    /// <param name="db">Metadata store holding <c>reserved_namespace</c>.</param>
+    /// <param name="cache">Backs the list cache when <paramref name="listCache"/> is not supplied.</param>
+    /// <param name="time">Clock for <see cref="ReservedNamespaceEntry.CreatedAt"/>.</param>
+    /// <param name="cacheEpoch">The rendered-metadata epoch a mutation expires when no coordinator is supplied.</param>
+    /// <param name="lookupCache">The lookup outcomes a mutation expires when no coordinator is supplied.</param>
+    /// <param name="listCache">
+    /// The shared list cache. The host registers one singleton for this service and for
+    /// <see cref="OrgWideCacheEviction"/>, so a received org-wide invalidation clears the list
+    /// this service reads.
+    /// </param>
+    /// <param name="invalidation">
+    /// The coordinator that expires and broadcasts an org-wide change. Without one (a test
+    /// composing the service by hand) a mutation runs the same <see cref="OrgWideCacheEviction"/>
+    /// over the stores passed here and broadcasts nothing.
+    /// </param>
+    // Dependency-injection constructor; every parameter after the first three is optional so a
+    // test can compose the service from only the stores it asserts on.
+#pragma warning disable S107
+    public ReservedNamespaceService(
+        IMetadataStore db,
+        IMemoryCache cache,
+        TimeProvider time,
+        OrgCacheEpochStore? cacheEpoch = null,
+        PackageLookupCache? lookupCache = null,
+        ReservedNamespaceListCache? listCache = null,
+        MetadataInvalidationCoordinator? invalidation = null)
+#pragma warning restore S107
     {
         _db = db;
-        _cache = cache;
         _time = time;
+        _listCache = listCache ?? new ReservedNamespaceListCache(cache);
+        _invalidation = invalidation;
+        _localEviction = new OrgWideCacheEviction(_listCache, orgs: null, cacheEpoch, lookupCache);
     }
-
-    private static string CacheKey(string orgId) => $"reserved-namespace:{orgId}";
-
-    private CancellationTokenSource GuardFor(string orgId) =>
-        _fillGuards.GetOrAdd(orgId, static _ => new CancellationTokenSource());
 
     // Test seam (InternalsVisibleTo Dependably.Tests): the live generation-guard count, asserted
     // to drain when a cached entry expires or is evicted so the map cannot grow unbounded.
-    internal int FillGuardCount => _fillGuards.Count;
+    internal int FillGuardCount => _listCache.FillGuardCount;
 
-    // Evicts the cached list and cancels the current generation token so an in-flight fill that
-    // read the pre-mutation list cannot cache it.
-    private void InvalidateCache(string orgId)
+    // Expires the cached list and every answer derived from it (rendered metadata, lookup
+    // outcomes) for the org, on this replica and, through the coordinator, on every peer.
+    private void InvalidateOrgCaches(string orgId)
     {
-        _cache.Remove(CacheKey(orgId));
-        if (_fillGuards.TryRemove(orgId, out var retired))
+        if (_invalidation is not null)
         {
-            retired.Cancel();
+            _invalidation.InvalidateOrg(orgId);
+        }
+        else
+        {
+            _localEviction.Evict(orgId);
         }
     }
 
-    public async Task<IReadOnlyList<ReservedNamespaceEntry>> ListAsync(
-        string orgId, CancellationToken ct = default)
+    public Task<IReadOnlyList<ReservedNamespaceEntry>> ListAsync(
+        string orgId, CancellationToken ct = default) =>
+        _listCache.GetOrReadAsync(orgId, readCt => ReadListAsync(orgId, readCt), ct);
+
+    private async Task<IReadOnlyList<ReservedNamespaceEntry>> ReadListAsync(string orgId, CancellationToken ct)
     {
-        if (_cache.TryGetValue(CacheKey(orgId), out IReadOnlyList<ReservedNamespaceEntry>? cached) && cached is not null)
-        {
-            return cached;
-        }
+        await using var conn = await _db.OpenAsync(ct);
+        var rows = await conn.QueryAsync<ReservedNamespaceEntry>(
+            """
+            SELECT id, org_id AS OrgId, ecosystem, pattern,
+                   created_by AS CreatedBy, created_at AS CreatedAt
+            FROM reserved_namespace WHERE org_id = @orgId
+            ORDER BY ecosystem, pattern
+            """,
+            new { orgId });
+        return rows.ToList();
+    }
 
-        // Snapshot the generation source BEFORE the read so a fill racing a concurrent mutation
-        // binds an already-cancelled expiration token and never persists the stale list.
-        var guardSource = GuardFor(orgId);
+    /// <summary>
+    /// Adds a reservation and returns the stored entry — the existing one when the org already
+    /// reserves the same (ecosystem, pattern). See <see cref="TryAddAsync"/> for a caller that
+    /// needs to tell the two apart.
+    /// </summary>
+    public async Task<ReservedNamespaceEntry> AddAsync(
+        string orgId, string ecosystem, string pattern, string? createdBy, CancellationToken ct = default) =>
+        (await TryAddAsync(orgId, ecosystem, pattern, createdBy, ct)).Entry;
 
-        // From here on guardSource MUST end up either tied to a cache entry (TieToEntryLifetime,
-        // below) or explicitly retired in the finally. The map is process-lifetime (this service
-        // is registered Singleton), so a DB open/read that throws before a cache entry is installed
-        // to own the guard's lifetime would otherwise leak it for the rest of the process.
-        bool tied = false;
-        try
+    /// <summary>
+    /// Adds a reservation. <c>Created</c> is <see langword="false"/> when the org already reserves
+    /// the same (ecosystem, pattern): nothing is written, no cache is invalidated, and
+    /// <c>Entry</c> is the row already stored, so its id is one a later delete actually removes.
+    /// </summary>
+    public async Task<(ReservedNamespaceEntry Entry, bool Created)> TryAddAsync(
+        string orgId, string ecosystem, string pattern, string? createdBy, CancellationToken ct = default)
+    {
+        // A conflicting row deleted between the insert and the read leaves nothing reserved, so
+        // the add is retried rather than reporting a row that no longer exists. Bounded: only an
+        // add racing a delete of the same pattern on every attempt gets that far.
+        const int maxAttempts = 3;
+        for (int attempt = 1; ; attempt++)
         {
-            await using var conn = await _db.OpenAsync(ct);
-            var rows = await conn.QueryAsync<ReservedNamespaceEntry>(
-                """
-                SELECT id, org_id AS OrgId, ecosystem, pattern,
-                       created_by AS CreatedBy, created_at AS CreatedAt
-                FROM reserved_namespace WHERE org_id = @orgId
-                ORDER BY ecosystem, pattern
-                """,
-                new { orgId });
-            var list = (IReadOnlyList<ReservedNamespaceEntry>)rows.ToList();
-            var options = new MemoryCacheEntryOptions
+            var (entry, created) = await InsertOrReadAsync(orgId, ecosystem, pattern, createdBy, ct);
+            if (entry is not null)
             {
-                AbsoluteExpirationRelativeToNow = CacheTtl,
-                Size = 1,
-            };
-            options.AddExpirationToken(new CancellationChangeToken(guardSource.Token));
-            // Tie the generation's lifetime to this entry so an org whose cache entry expires
-            // without a mutation does not leave its guard in the map forever.
-            CacheFillGuard.TieToEntryLifetime(options, _fillGuards, orgId, guardSource);
-            _cache.Set(CacheKey(orgId), list, options);
-            tied = true;
-            return list;
-        }
-        finally
-        {
-            if (!tied)
+                return (entry, created);
+            }
+
+            if (attempt == maxAttempts)
             {
-                CacheFillGuard.RetireUnbound(_fillGuards, orgId, guardSource);
+                throw new InvalidOperationException(
+                    "The reserved namespace was removed concurrently on every attempt to add it.");
             }
         }
     }
 
-    public async Task<ReservedNamespaceEntry> AddAsync(
-        string orgId, string ecosystem, string pattern, string? createdBy, CancellationToken ct = default)
+    private async Task<(ReservedNamespaceEntry? Entry, bool Created)> InsertOrReadAsync(
+        string orgId, string ecosystem, string pattern, string? createdBy, CancellationToken ct)
     {
         string id = Guid.NewGuid().ToString("N");
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        int inserted = await conn.ExecuteAsync(
             """
             INSERT INTO reserved_namespace (id, org_id, ecosystem, pattern, created_by)
             VALUES (@id, @orgId, @ecosystem, @pattern, @createdBy)
             ON CONFLICT DO NOTHING
             """,
             new { id, orgId, ecosystem, pattern, createdBy });
-        InvalidateCache(orgId);
-        return new ReservedNamespaceEntry
+        if (inserted > 0)
         {
-            Id = id,
-            OrgId = orgId,
-            Ecosystem = ecosystem,
-            Pattern = pattern,
-            CreatedBy = createdBy,
-            CreatedAt = _time.GetUtcNow(),
-        };
+            InvalidateOrgCaches(orgId);
+            return (new ReservedNamespaceEntry
+            {
+                Id = id,
+                OrgId = orgId,
+                Ecosystem = ecosystem,
+                Pattern = pattern,
+                CreatedBy = createdBy,
+                CreatedAt = _time.GetUtcNow(),
+            }, true);
+        }
+
+        var existing = await conn.QuerySingleOrDefaultAsync<ReservedNamespaceEntry>(
+            """
+            SELECT id, org_id AS OrgId, ecosystem, pattern,
+                   created_by AS CreatedBy, created_at AS CreatedAt
+            FROM reserved_namespace
+            WHERE org_id = @orgId AND ecosystem = @ecosystem AND pattern = @pattern
+            """,
+            new { orgId, ecosystem, pattern });
+        return (existing, false);
     }
 
     /// <summary>
@@ -176,7 +226,7 @@ public sealed partial class ReservedNamespaceService
             new { id = entryId, orgId });
         if (rows > 0)
         {
-            InvalidateCache(orgId);
+            InvalidateOrgCaches(orgId);
         }
 
         return rows;
@@ -202,6 +252,83 @@ public sealed partial class ReservedNamespaceService
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Whether a reserved name stands behind an upstream Maven metadata URL for
+    /// <paramref name="orgId"/>, and so whether that URL may be fetched from upstream at all. Every
+    /// path that fetches Maven metadata from upstream decides it here, before the request, so a
+    /// reserved name is never disclosed to upstream and no upstream answer for it feeds the
+    /// served metadata, version tracking, or a package lookup.
+    ///
+    /// <c>g/a/maven-metadata.xml</c> has two readings: the artifact-level document for coordinate
+    /// <c>g:a</c>, and the group-level document for group <c>g.a</c> (the plugin-prefix document
+    /// Maven reads to resolve a short plugin prefix). Both readings share one upstream URL, so
+    /// fetching it consults upstream about both names, and the URL is reserved when either is.
+    /// The artifact reading is checked on its groupId, the same name the artifact download's guard
+    /// checks; the group-level reading is checked on <c>g.a</c>.
+    ///
+    /// Version-level SNAPSHOT metadata (<c>g/a/v/maven-metadata.xml</c>,
+    /// <paramref name="versionLevel"/> true) has no group-level reading, so only the groupId
+    /// applies there.
+    ///
+    /// The decision covers upstream only: hosted and cached versions of <c>g:a</c> still serve
+    /// from the local catalogue. The group-level document itself carries no version: every
+    /// version a client resolves through it is decided by the artifact-level metadata and the
+    /// artifact fetch, as for any other coordinate.
+    /// </summary>
+    public async Task<bool> IsMavenMetadataPathReservedAsync(
+        string orgId, string groupId, string artifactId, bool versionLevel, CancellationToken ct = default)
+        => await IsReservedAsync(orgId, "maven", groupId, ct)
+            || (!versionLevel && await IsReservedAsync(orgId, "maven", $"{groupId}.{artifactId}", ct));
+
+    /// <summary>
+    /// Whether <paramref name="purlName"/> is reserved for <paramref name="orgId"/> in
+    /// <paramref name="ecosystem"/>, and so whether any upstream registry may be asked about it at
+    /// all. Every server-side path that consults upstream about a package by its stored purl name
+    /// (the upstream-latest resolve behind the first-fetch seed, a package lookup, the daily
+    /// deprecation refresh) decides it here, before its first request, so a reserved name is never
+    /// disclosed to upstream and no upstream answer for it is recorded or served.
+    ///
+    /// The name is matched in the form each protocol handler's own reserved check uses, so the
+    /// decision is the one a client request for the same name already gets:
+    /// <list type="bullet">
+    /// <item>npm — the unescaped package name (<c>@scope/pkg</c>); a purl name stored with its scope
+    /// percent-encoded is unescaped first, as the packument URL is.</item>
+    /// <item>maven — <c>groupId:artifactId</c>, decided by
+    /// <see cref="IsMavenMetadataPathReservedAsync"/> on both readings of its metadata URL.</item>
+    /// <item>golang — the module path. A name carrying Go proxy bang-encoding
+    /// (<c>github.com/!burnt!sushi</c>, which a package lookup accepts as typed) is decoded first,
+    /// because the upstream URL built from it names the decoded module. A name whose <c>!</c>
+    /// sequences are not valid bang-encoding is treated as reserved: it does not name a module
+    /// this decision can match, so it never reaches upstream unchecked.</item>
+    /// <item>pypi, nuget, cargo, hex — the purl name as stored (PEP 503-normalized for PyPI);
+    /// <see cref="Matches"/> applies each ecosystem's own normalization and case rule.</item>
+    /// </list>
+    ///
+    /// The decision covers upstream only: hosted and already-cached versions of a reserved name
+    /// still serve from the local catalogue.
+    /// </summary>
+    public Task<bool> IsUpstreamNameReservedAsync(
+        string orgId, string ecosystem, string purlName, CancellationToken ct = default)
+    {
+        switch (ecosystem)
+        {
+            case "npm":
+                return IsReservedAsync(orgId, "npm", PurlNormalizer.NpmPackageName(purlName), ct);
+            case "maven":
+                int sep = purlName.IndexOf(':');
+                return sep > 0 && sep < purlName.Length - 1
+                    ? IsMavenMetadataPathReservedAsync(
+                        orgId, purlName[..sep], purlName[(sep + 1)..], versionLevel: false, ct)
+                    : IsReservedAsync(orgId, "maven", purlName, ct);
+            case "golang":
+                return GoController.TryDecodeBangEncoding(purlName, out string module)
+                    ? IsReservedAsync(orgId, "golang", module, ct)
+                    : Task.FromResult(true);
+            default:
+                return IsReservedAsync(orgId, ecosystem, purlName, ct);
+        }
     }
 
     /// <summary>Pure pattern match — see class doc for the per-ecosystem rules.</summary>

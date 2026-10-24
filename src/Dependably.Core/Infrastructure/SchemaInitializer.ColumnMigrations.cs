@@ -549,6 +549,114 @@ public sealed partial class SchemaInitializer
             WHERE content_hash IS NULL
             """);
 
+    // Seeds tenant_artifact_access.refresh_checked_at from the shared
+    // cache_artifact.deprecation_checked_at the refresh pass ordered by before the per-tenant
+    // stamp existed. Every tenant inherits the shared value, so the upgrade changes no group's
+    // position in the queue; the stamps only diverge per tenant from the next pass on. A row whose
+    // shared stamp is NULL stays NULL, which the pass already reads as never processed.
+    //
+    // tenant_artifact_access holds a row per (org, proxied artifact), so on a large instance one
+    // UPDATE over the whole table outlives the client's command timeout, rolls back, and fails
+    // startup on every boot after. The backfill therefore walks the primary key in bounded batches,
+    // each its own statement and so its own commit, sized by WriteLockBudget from how long the
+    // previous batch held the write lock and separated by a pause of the same length so a
+    // concurrent writer is never starved. It is idempotent (only NULL stamps are written) and
+    // resumable: a run that stops part-way leaves the batches it committed in place, RunOnceAsync
+    // records nothing, and the next boot walks the key again and finds those rows already stamped.
+    // It runs with transactional: false, since one enclosing transaction would hold every batch's
+    // locks until the end, exactly as the single UPDATE did.
+    private Task BackfillTenantArtifactAccessRefreshCheckedAtAsync(DbConnection conn) =>
+        BackfillTenantArtifactAccessRefreshCheckedAtAsync(
+            conn,
+            RefreshStampBackfillFixedRows is int rows
+                ? new WriteLockBudget(rows, rows, rows)
+                : new WriteLockBudget(
+                    RefreshStampBackfillInitialRows, RefreshStampBackfillMinRows, RefreshStampBackfillMaxRows),
+            RefreshStampBackfillAfterBatch);
+
+    // Test seams read by the registered migration: production leaves both unset and runs the
+    // adaptive budget with no callback; a test fixes the batch size and observes or stops each batch.
+    internal int? RefreshStampBackfillFixedRows { get; init; }
+
+    internal Func<int, Task>? RefreshStampBackfillAfterBatch { get; init; }
+
+    private const int RefreshStampBackfillInitialRows = 1_000;
+    private const int RefreshStampBackfillMinRows = 100;
+    private const int RefreshStampBackfillMaxRows = 10_000;
+
+    private static readonly TimeSpan MinRefreshStampBackfillPause = TimeSpan.FromMilliseconds(1);
+
+    // The batch loop, with the budget and a per-batch callback injectable so a test can fix the
+    // batch size and stop a run part-way. Returns the number of batches walked.
+    internal async Task<int> BackfillTenantArtifactAccessRefreshCheckedAtAsync(
+        DbConnection conn, WriteLockBudget budget, Func<int, Task>? afterBatch = null)
+    {
+        string afterOrg = "";
+        string afterArtifact = "";
+        int batches = 0;
+        int stamped = 0;
+        var pause = TimeSpan.Zero;
+        while (true)
+        {
+            if (pause > TimeSpan.Zero)
+            {
+                await Task.Delay(pause, _time, CancellationToken.None);
+            }
+
+            int limit = budget.Rows;
+            // xtenant: one-shot backfill across every tenant on the instance; walks the primary key.
+            var keys = (await conn.QueryAsync<(string OrgId, string CacheArtifactId)>(
+                """
+                SELECT org_id, cache_artifact_id FROM tenant_artifact_access
+                WHERE (org_id, cache_artifact_id) > (@afterOrg, @afterArtifact)
+                ORDER BY org_id, cache_artifact_id
+                LIMIT @limit
+                """,
+                new { afterOrg, afterArtifact, limit })).ToList();
+            if (keys.Count == 0)
+            {
+                break;
+            }
+
+            var (lastOrg, lastArtifact) = keys[^1];
+            long start = _time.GetTimestamp();
+            // xtenant: one-shot backfill across every tenant on the instance, one key range at a time.
+            stamped += await conn.ExecuteAsync(
+                """
+                UPDATE tenant_artifact_access
+                SET refresh_checked_at = (SELECT ca.deprecation_checked_at FROM cache_artifact ca
+                                          WHERE ca.id = tenant_artifact_access.cache_artifact_id)
+                WHERE refresh_checked_at IS NULL
+                  AND (org_id, cache_artifact_id) > (@afterOrg, @afterArtifact)
+                  AND (org_id, cache_artifact_id) <= (@lastOrg, @lastArtifact)
+                  AND EXISTS (SELECT 1 FROM cache_artifact ca
+                              WHERE ca.id = tenant_artifact_access.cache_artifact_id
+                                AND ca.deprecation_checked_at IS NOT NULL)
+                """,
+                new { afterOrg, afterArtifact, lastOrg, lastArtifact });
+            var held = _time.GetElapsedTime(start);
+            budget.Record(held);
+            batches++;
+
+            if (afterBatch is not null)
+            {
+                await afterBatch(batches);
+            }
+
+            if (keys.Count < limit)
+            {
+                break;
+            }
+
+            (afterOrg, afterArtifact) = (lastOrg, lastArtifact);
+            pause = held < MinRefreshStampBackfillPause ? MinRefreshStampBackfillPause : held;
+        }
+
+        _logger.LogInformation(
+            "Tenant refresh stamps backfilled on {Rows} rows in {Batches} batches.", stamped, batches);
+        return batches;
+    }
+
     // Converges first_seen_at on package_version_vulns and sbom_component_vulns rows that carry
     // no value, using each row's existing checked_at as the best available approximation of
     // first observation — no earlier instant was ever recorded for a link written before a
@@ -934,7 +1042,14 @@ public sealed partial class SchemaInitializer
             // ALTER; the recreate-table reshape handles that provider.
             "ALTER TABLE nuget_symbol_index ADD COLUMN cache_artifact_id TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE",
             "ALTER TABLE nuget_symbol_index ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'package_version'",
+            // These three indexes live here rather than in the schema files, for fresh installs as
+            // well: a database created before these columns existed runs the schema files against
+            // its older table shape, where an index naming either column fails the boot. On an
+            // upgraded database AddSymbolIndexOwnerInvariantAsync later drops and recreates the two
+            // keys, so their definitions here must stay identical to the ones it writes.
             "CREATE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca ON nuget_symbol_index (cache_artifact_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_pv_key ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, package_version_id) WHERE owner_kind = 'package_version'",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_nuget_symbol_index_ca_key ON nuget_symbol_index (org_id, ssqp_key, pdb_filename, cache_artifact_id) WHERE owner_kind = 'cache_artifact'",
             // Tri-state same-version-push org policy. 'block' (default) = always reject duplicates;
             // 'exception' = blocked by default but per-package grant allowed;
             // 'allow' = allowed by default but per-package block allowed.
@@ -1081,6 +1196,14 @@ public sealed partial class SchemaInitializer
             // which the serve projections resolve by falling back to the shared row.
             "ALTER TABLE tenant_artifact_access ADD COLUMN content_hash TEXT",
             "ALTER TABLE tenant_artifact_access ADD COLUMN blob_key TEXT",
+            // Per-tenant deprecation-refresh stamp: the pass selects and orders groups by it so a
+            // shared cache_artifact stamp written for one tenant cannot defer another tenant's
+            // group. Nullable; seeded once from the shared stamp by
+            // backfill_tenant_artifact_access_refresh_checked_at, and a row written by a preceding
+            // release during a blue-green cutover stays NULL, which reads as "never processed" and
+            // is refreshed on the next pass. The canonical-UTC CHECK reaches fresh installs from
+            // the CREATE TABLE blocks; upgraded DBs rely on the canonical UtcTimestamp writer.
+            "ALTER TABLE tenant_artifact_access ADD COLUMN refresh_checked_at TEXT",
             // Actor display name denormalized at write time — see the column comment in
             // Schema.sql. Service actors only; a user actor stays NULL so no email is
             // stored past the fixed column lists the erasure and retention sweeps null.
@@ -1142,6 +1265,11 @@ public sealed partial class SchemaInitializer
             "ALTER TABLE vulnerabilities ADD COLUMN kev_required_action TEXT",
             "ALTER TABLE vulnerabilities ADD COLUMN kev_cwes TEXT",
             "ALTER TABLE vulnerabilities ADD COLUMN kev_notes TEXT",
+            // The aliases value vulnerability_aliases last reflected for the row. NULL on every
+            // existing row, which reads as "not yet indexed" wherever aliases is non-NULL, so the
+            // per-boot reconcile sweep (VulnerabilityAliasIndex.ReconcileAsync) derives the side
+            // table for the whole backlog without a ledger entry.
+            "ALTER TABLE vulnerabilities ADD COLUMN aliases_indexed TEXT",
             // Presentation metadata the CycloneDX component entry already carried and ingest
             // previously discarded: what the component is, who wrote it, and where it lives.
             // All nullable and display-only — no gate reads them. Existing rows stay NULL until
@@ -1185,6 +1313,17 @@ public sealed partial class SchemaInitializer
             // exactly that reason), and this table is already the version-precise link between one
             // owner and one advisory — see Schema.sql for the full rationale.
             "ALTER TABLE package_version_vulns ADD COLUMN mal_still_live_for_version INTEGER NOT NULL DEFAULT 0",
+            // Alias-donor values resolved onto the link (see Schema.sql). Added without the
+            // alias_resolved_at CHECK (SQLite ALTER cannot add one); every existing row reads NULL,
+            // which is "unresolved", and the sweep fills it.
+            "ALTER TABLE package_version_vulns ADD COLUMN alias_severity TEXT",
+            "ALTER TABLE package_version_vulns ADD COLUMN alias_cvss_score DOUBLE PRECISION",
+            "ALTER TABLE package_version_vulns ADD COLUMN alias_summary TEXT",
+            "ALTER TABLE package_version_vulns ADD COLUMN alias_resolved_at TEXT",
+            // The advisory-side half: the donor-relevant fields as one string and when they last
+            // changed (see Schema.sql). NULL on existing rows; the sweep records the basis.
+            "ALTER TABLE vulnerabilities ADD COLUMN donor_basis TEXT",
+            "ALTER TABLE vulnerabilities ADD COLUMN donor_changed_at TEXT",
             "ALTER TABLE vulnerabilities ADD COLUMN exploit_code_exists INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE vulnerabilities ADD COLUMN exploit_code_max_weight INTEGER",
             "ALTER TABLE vulnerabilities ADD COLUMN exploit_code_sources TEXT",
@@ -1298,6 +1437,36 @@ public sealed partial class SchemaInitializer
             // that predates this column, same as a document this build never re-parsed) until
             // their document re-uploads, which the SbomIngestVersion bump forces exactly once.
             "ALTER TABLE project_documents ADD COLUMN tool_version_explicit_unknown INTEGER NOT NULL DEFAULT 0",
+            // OCI image re-match. A component's own reachability verdict, stored at scan time so a
+            // rematch can copy it onto an advisory it finds; the content-gap subset of a platform's
+            // gaps, which a rematch keeps; when OSV was last matched; and whether the org's scanner
+            // claims rematch jobs. All nullable: NULL is a row or scanner that predates them. The
+            // reachability CHECK reaches a fresh install from the schema files; an upgraded
+            // Postgres gets it from the column-constraint retrofit (added NOT VALID, then
+            // validated), and an upgraded SQLite database, which cannot add a CHECK, relies on
+            // the result writer, which binds only the closed vocabulary or NULL.
+            "ALTER TABLE oci_image_components ADD COLUMN reachability_status TEXT",
+            "ALTER TABLE oci_image_components ADD COLUMN not_observed_basis TEXT",
+            "ALTER TABLE oci_image_components ADD COLUMN confidence TEXT",
+            "ALTER TABLE oci_scan_coverage ADD COLUMN content_gaps_json TEXT",
+            "ALTER TABLE oci_scan_coverage ADD COLUMN matched_at TEXT",
+            "ALTER TABLE oci_scanners ADD COLUMN accepts_rematch INTEGER",
+            // Per-tenant OCI pull gate over the org's own image scan results: 'off' (default) /
+            // 'warn' / 'block'. Defaults off, so an upgraded deployment answers every OCI pull
+            // exactly as before. Added without a CHECK (SQLite ALTER can't add one); upgraded
+            // SQLite relies on controller validation, Postgres gets it from the constraint retrofit.
+            "ALTER TABLE org_settings ADD COLUMN oci_scan_enforcement TEXT NOT NULL DEFAULT 'off'",
+            // Which manifest each platform's scan result describes, so the OCI pull gate can tell a
+            // scanned platform from a skipped one. Nullable: a row written before the column existed
+            // is filled by the oci-scan-sweep backfill, and until then the reference graph decides.
+            "ALTER TABLE oci_scan_coverage ADD COLUMN manifest_digest TEXT",
+            // Claims of an OCI scan job whose result was refused because the advisory source was
+            // unreachable: kept apart from attempts so an outage never spends the attempt budget.
+            "ALTER TABLE oci_scan_jobs ADD COLUMN deferrals INTEGER NOT NULL DEFAULT 0",
+            // When an OCI scan job was first deferred: the deferral window runs from it. Nullable:
+            // NULL is a job that has not deferred yet, or one that deferred before the column
+            // existed, which then starts its window at its next deferral.
+            "ALTER TABLE oci_scan_jobs ADD COLUMN first_deferred_at TEXT",
     };
 
     private async Task RunAdditiveMigrationsAsync(DbConnection conn)
@@ -1358,6 +1527,13 @@ public sealed partial class SchemaInitializer
         await conn.ExecuteAsync(
             "CREATE INDEX IF NOT EXISTS idx_tenant_artifact_access_blob_key "
             + "ON tenant_artifact_access (blob_key)");
+
+        // The rematch sweep's scan of an org's coverage by last match. Declared here only, for the
+        // same reason as the index above: matched_at is added by the ALTER pass, so a CREATE INDEX
+        // in the schema files would run against the pre-ALTER table on an upgrading database.
+        await conn.ExecuteAsync(
+            "CREATE INDEX IF NOT EXISTS idx_oci_scan_coverage_org_matched "
+            + "ON oci_scan_coverage (org_id, matched_at)");
 
         // Cargo sparse registry index metadata. CREATE TABLE syntax is provider-specific
         // (SQLite uses AUTOINCREMENT; Postgres uses BIGSERIAL), so this migration runs

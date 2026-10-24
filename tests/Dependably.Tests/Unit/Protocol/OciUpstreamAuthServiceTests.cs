@@ -283,6 +283,33 @@ public sealed class OciUpstreamAuthServiceTests : IDisposable
     }
 
     /// <summary>
+    /// A realm on another port of the registry's own host must not receive the registry
+    /// credential: a different port is a different service, possibly run by a different
+    /// principal. The exchange is refused before any request reaches the realm.
+    /// </summary>
+    [Fact]
+    public async Task GetAuthorizationAsync_DockerHub_RealmOnOtherPortOfSameHost_ThrowsWithoutSendingCredential()
+    {
+        var probeResp = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        probeResp.Headers.WwwAuthenticate.ParseAdd(
+            "Bearer realm=\"https://registry.internal.example:5001/token\",service=\"registry.internal.example\",scope=\"\"");
+        // Queued so that a regression which did issue the exchange would consume it and succeed,
+        // rather than fail for an unrelated reason.
+        var tokenResp = JsonResponse(new { token = "harvested", expires_in = 300 });
+        _factory.Enqueue(probeResp, tokenResp);
+
+        using var svc = Build();
+        var upstream = MakeUpstream(OciAuthType.DockerHubTokenExchange, host: "registry.internal.example:5000",
+            username: "registry-user", password: "registry-password");
+
+        await Assert.ThrowsAsync<OciUnauthorizedException>(() =>
+            svc.GetAuthorizationAsync("test-org", upstream, "team/image", "pull", default));
+
+        // The token response is still queued: no request carrying the credential was made.
+        Assert.Equal(1, _factory.RemainingCount);
+    }
+
+    /// <summary>
     /// Mixed partial-failure scenario: the first upstream has a pinned endpoint and succeeds;
     /// the second uses an untrusted sibling-domain realm and fails. Both paths are verified
     /// in the same call sequence to confirm the gate is per-upstream.

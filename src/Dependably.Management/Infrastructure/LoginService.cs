@@ -373,6 +373,19 @@ public sealed class LoginService
             return new SecondFactorResult(null, false, "Account locked due to too many failed attempts.", retryAfter);
         }
 
+        // The challenge snapshots the user id, tenant and token version at the first factor. A
+        // user locked, disabled or re-activated since then (each bumps the version), or whose
+        // role or credentials changed, gets the same answer as an invalid code: nothing is minted
+        // or remembered, no login is recorded, and the response does not reveal the status.
+        // Checked before the code so a recovery code is not spent on a challenge that cannot
+        // succeed, and not counted against the lockout budget because it is not a guess.
+        if (!await _orgs.IsUserActiveAtVersionAsync(userId, tenantId, tokenVersion, ct))
+        {
+            await RecordStaleChallengeAsync(
+                new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), sourceIp, ct);
+            return new SecondFactorResult(null, false, "Invalid credentials.", null);
+        }
+
         bool totpOk = await _mfa.VerifyTotpAsync(userId, code, ct);
         bool recoveryOk = false;
         if (!totpOk)
@@ -383,9 +396,6 @@ public sealed class LoginService
         if (!totpOk && !recoveryOk)
         {
             await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "tenant", tenantId), sourceIp, "mfa_invalid", ct);
-            await _audit.LogAsync(
-                Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
-                orgId: tenantId, sourceIp: sourceIp, ct: ct);
             return new SecondFactorResult(null, false, "Invalid credentials.", null);
         }
 
@@ -681,6 +691,19 @@ public sealed class LoginService
             return new SecondFactorResult(null, false, "Account locked due to too many failed attempts.", retryAfter);
         }
 
+        // The challenge snapshots the admin id and token version at the first factor. An admin
+        // locked, disabled or re-activated since then (each bumps the version), or whose
+        // credentials changed, gets the same answer as an invalid code: nothing is minted or
+        // remembered, no login is recorded, and the response does not reveal the status. Checked
+        // before the code so a recovery code is not spent on a challenge that cannot succeed, and
+        // not counted against the lockout budget because it is not a guess.
+        if (!await _systemAdmins.IsActiveAtVersionAsync(adminId, tokenVersion, ct))
+        {
+            await RecordStaleChallengeAsync(
+                new LoginFailureTarget(lockoutKey, emailHash, "system", null), sourceIp, ct);
+            return new SecondFactorResult(null, false, "Invalid credentials.", null);
+        }
+
         bool totpOk = await _systemMfa.VerifyTotpAsync(adminId, code, ct);
         bool recoveryOk = false;
         if (!totpOk)
@@ -691,9 +714,6 @@ public sealed class LoginService
         if (!totpOk && !recoveryOk)
         {
             await RecordFailureAsync(new LoginFailureTarget(lockoutKey, emailHash, "system", null), sourceIp, "mfa_invalid", ct);
-            await _audit.LogSystemAsync(
-                Dependably.Infrastructure.Audit.Events.AuthEvents.TypeLoginFailure,
-                sourceIp: sourceIp, ct: ct);
             return new SecondFactorResult(null, false, "Invalid credentials.", null);
         }
 
@@ -1239,12 +1259,30 @@ public sealed class LoginService
     private async Task RecordFailureAsync(
         LoginFailureTarget target, string? sourceIp, string reason, CancellationToken ct)
     {
-        var (lockoutKey, emailHash, realm, orgIdForActivity) = target;
         // lockoutKey is realm+tenant scoped; emailHash is the unsalted audit pseudonym. The
         // store computes the increment and the lock decision atomically, so this call is safe
         // under concurrent failures for the same account — it never reads a stale count.
         await _lockout.RecordFailureAsync(
-            lockoutKey, MaxFailedAttempts, TimeSpan.FromMinutes(LockoutMinutes), ct);
+            target.LockoutKey, MaxFailedAttempts, TimeSpan.FromMinutes(LockoutMinutes), ct);
+        await WriteFailureRecordsAsync(target, sourceIp, reason, ct);
+    }
+
+    /// <summary>
+    /// Records a second-factor attempt refused because the challenge no longer matches the
+    /// account: the account was locked, disabled or re-activated, or its role or credentials
+    /// changed, after the first factor. It is audited and emitted like any other login failure,
+    /// with the reason <c>stale_challenge</c> so operators can tell it from a wrong code, but it
+    /// is not charged against the lockout budget, because it is not a guess.
+    /// </summary>
+    private Task RecordStaleChallengeAsync(LoginFailureTarget target, string? sourceIp, CancellationToken ct) =>
+        WriteFailureRecordsAsync(target, sourceIp, "stale_challenge", ct);
+
+    // Writes a login failure's audit row, the LoginFailure event and (tenant realm) the activity
+    // row. Charging the lockout budget is the caller's decision.
+    private async Task WriteFailureRecordsAsync(
+        LoginFailureTarget target, string? sourceIp, string reason, CancellationToken ct)
+    {
+        var (_, emailHash, realm, orgIdForActivity) = target;
         string failureDetail = System.Text.Json.JsonSerializer.Serialize(new { reason, realm }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail);
         // Scope the audit row to the realm that rejected the login: a system/master failure is
         // visible only on the operator audit list (scope='system'); a tenant failure is pinned to

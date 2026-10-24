@@ -397,11 +397,67 @@ public sealed class CoreStartupService : IHostedService
         await LogTrustedProxiesWarningAsync(ct);
         LogTrustedProxiesBreadthAndResolvedSet();
         LogApexHostWarning();
+        await LogApexLabelCollisionWarningAsync(ct);
         LogReplicaAffinityWarning();
         LogHaLocalStorageWarning();
         LogStagingFloorWarning();
         LogLegacySmtpWarning();
         LogRowLevelSecurityOffWarning();
+        await LogOciScanEnforcementWithoutScanningWarningAsync(ct);
+    }
+
+    // An org that opted into the OCI pull gate keeps its stored posture when the instance later
+    // turns image scanning off: the explicit opt-in fails closed rather than silently reverting
+    // to the licence-only gate. Every image is then unscanned for that org, so the operator is
+    // told which orgs refuse (or warn on) every OCI image pull.
+    private async Task LogOciScanEnforcementWithoutScanningWarningAsync(CancellationToken ct)
+    {
+        if (_edge.IsEdge)
+        {
+            await LogEdgeOciScanPostureWarningAsync(ct);
+            return;
+        }
+
+        if (Dependably.Infrastructure.OciScan.OciScanOptions.FromConfiguration(_config).Enabled)
+        {
+            return;
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: instance-wide startup diagnostic naming every org whose stored OCI posture no
+        // scanner can satisfy; reads only the org id and the posture.
+        var affected = await conn.QueryAsync<(string OrgId, string Posture)>(
+            "SELECT org_id AS OrgId, oci_scan_enforcement AS Posture FROM org_settings "
+            + "WHERE oci_scan_enforcement IN ('warn', 'block') ORDER BY org_id");
+        foreach (var (orgId, posture) in affected)
+        {
+            _logger.LogWarning(
+                "Org {OrgId} has oci_scan_enforcement={Posture} but OCI_SCAN_ENABLED is not set, so no image "
+                + "can be scanned: {Consequence}. Enable OCI_SCAN_ENABLED or set the org's OCI scan enforcement to off.",
+                orgId, posture,
+                posture == "block"
+                    ? "every OCI image pull for this org will be refused as unscanned"
+                    : "every OCI image pull for this org will be recorded as a warning");
+        }
+    }
+
+    // An edge forwards every manifest of an org its master gates to the master and does not
+    // stale-serve one, so a master outage refuses those orgs' image pulls. The operator is told
+    // which orgs that is, as last reported by the master.
+    private async Task LogEdgeOciScanPostureWarningAsync(CancellationToken ct)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: instance-wide edge startup diagnostic over the per-org posture the master reported.
+        var gated = await conn.QueryAsync<(string OrgId, string Posture)>(
+            "SELECT org_id AS OrgId, posture AS Posture FROM edge_oci_scan_postures "
+            + "WHERE posture IN ('warn', 'block') ORDER BY org_id");
+        foreach (var (orgId, posture) in gated)
+        {
+            _logger.LogWarning(
+                "Org {OrgId} has OCI scan enforcement {Posture} on the master: this edge answers its image manifests "
+                + "only through the master, so a master outage refuses that org's image pulls.",
+                orgId, posture);
+        }
     }
 
     // Multi-tenant Postgres enforces row-level security unless told not to; an explicit off leaves
@@ -656,6 +712,39 @@ public sealed class CoreStartupService : IHostedService
     internal static bool IsHeaderTenancyMode(string? deploymentMode) =>
         string.Equals(deploymentMode?.Trim(), "header", StringComparison.OrdinalIgnoreCase);
 
+    // In multi mode, the system-admin host is never a tenant, so a live org whose slug equals the
+    // label of the apex directly below the tenant domain (master.example.com under example.com)
+    // is unreachable by subdomain. Name it so the operator can rename it instead of discovering a
+    // tenant that silently 404s.
+    private async Task LogApexLabelCollisionWarningAsync(CancellationToken ct)
+    {
+        if (!string.Equals(_config["DEPLOYMENT_MODE"]?.Trim(), "multi", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        string? label = BaseUrlHostHelper.ApexReservedLabel(
+            BaseUrlHostHelper.ResolveApexHost(_config),
+            BaseUrlHostHelper.ResolveTenantDomain(_config));
+        if (label is null)
+        {
+            return;
+        }
+
+        await using var conn = await _db.OpenAsync(ct);
+        string? orgId = await conn.QuerySingleOrDefaultAsync<string?>(
+            "SELECT id FROM orgs WHERE slug = @label AND deleted_at IS NULL LIMIT 1",
+            new { label });
+        if (orgId is not null)
+        {
+            _logger.LogWarning(
+                "Org {OrgId} has slug {Slug}, which is the system-admin host label under the tenant " +
+                "domain. Its subdomain is unreachable because that host resolves to the system " +
+                "surface. Rename the org's slug or move APEX_HOST.",
+                orgId, label);
+        }
+    }
+
     private void LogApexHostWarning()
     {
         if (BaseUrlHostHelper.ResolveUsableApexHost(_config) is null)
@@ -663,7 +752,8 @@ public sealed class CoreStartupService : IHostedService
             _logger.LogWarning(
                 "No apex host is configured: APEX_HOST is unset and BASE_URL is not set or contains " +
                 "a localhost host (or APEX_HOST itself names one). Host header " +
-                "filtering falls back to loopback hostnames only (localhost/127.0.0.1/[::1]); any " +
+                "filtering falls back to loopback hostnames only (localhost/127.0.0.1/[::1]), plus " +
+                "*.localhost and, in multi mode with TENANT_DOMAIN set, *.TENANT_DOMAIN; any " +
                 "request arriving through a reverse proxy under a real domain is rejected (400) " +
                 "until an apex is configured. Set BASE_URL to your public domain " +
                 "(e.g. https://repo.example.com) so that domain's Host headers are accepted and " +

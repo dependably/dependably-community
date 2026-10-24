@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dapper;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure.Identity;
 
@@ -20,12 +21,18 @@ internal sealed class SystemAdminUserStore :
     private readonly IMetadataStore _db;
     private readonly IMfaSecretProtector _protector;
     private readonly IRecoveryCodeHasher _recoveryCodeHasher;
+    private readonly ILogger<SystemAdminUserStore> _logger;
 
-    public SystemAdminUserStore(IMetadataStore db, IMfaSecretProtector protector, IRecoveryCodeHasher recoveryCodeHasher)
+    public SystemAdminUserStore(
+        IMetadataStore db,
+        IMfaSecretProtector protector,
+        IRecoveryCodeHasher recoveryCodeHasher,
+        ILogger<SystemAdminUserStore>? logger = null)
     {
         _db = db;
         _protector = protector;
         _recoveryCodeHasher = recoveryCodeHasher;
+        _logger = logger ?? NullLogger<SystemAdminUserStore>.Instance;
     }
 
     // ── IUserStore ────────────────────────────────────────────────────────────
@@ -247,20 +254,34 @@ internal sealed class SystemAdminUserStore :
 
     // ── IUserAuthenticatorKeyStore ────────────────────────────────────────────
 
+    /// <summary>
+    /// The plaintext TOTP key, decrypted from the stored value. Every stored value is treated as
+    /// ciphertext: this store only ever writes ciphertext, so a plaintext key in the column came
+    /// from outside the application and is not trusted. A value that does not decrypt returns
+    /// null with a warning naming the system admin and the reason (<see cref="TotpKeyShape"/>): the
+    /// account has no usable key, so no code verifies, and the stored value is never offered to
+    /// the token provider as if it were a key.
+    /// </summary>
     public Task<string?> GetAuthenticatorKeyAsync(SystemAdminUser user, CancellationToken cancellationToken)
     {
-        if (user.AuthenticatorKey is null)
+        string? stored = user.AuthenticatorKey;
+        if (stored is null)
         {
             return Task.FromResult<string?>(null);
         }
 
         try
         {
-            return Task.FromResult<string?>(_protector.Unprotect(user.AuthenticatorKey));
+            return Task.FromResult<string?>(_protector.Unprotect(stored));
         }
         catch (MfaSecretProtectionException)
         {
-            return Task.FromResult<string?>(user.AuthenticatorKey);
+            _logger.LogWarning(
+                "Stored secret {Kind} in {Table} row {RowId} (org {OrgId}) does not decrypt: {Reason}. "
+                + "TOTP verification fails for this account until it enrols again; recovery codes still work.",
+                ProtectedSecretKinds.SystemAdminTotpKey, "system_admins", user.Id, null,
+                TotpKeyShape.FailureReason(stored));
+            return Task.FromResult<string?>(null);
         }
     }
 

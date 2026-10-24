@@ -398,6 +398,144 @@ public sealed class PostgresSchemaApplyTests
         Assert.Equal(AllReadModelViews, views);
     }
 
+    /// <summary>
+    /// The upgrade boot of a blue-green cutover: a one-time migration is pending, the previous
+    /// release is still reading through the views, and the migration only rewrites rows. The views
+    /// must come through it untouched — same OIDs — because a drop leaves every one of the old
+    /// slot's reads through them failing with 42P01 until the apply finishes.
+    /// </summary>
+    [Fact]
+    public async Task PendingDataOnlyMigration_LeavesTheViewsInPlace()
+    {
+        await using var pg = await LivePostgresReset.FreshAsync(ConnectionString);
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+        var before = await ViewOidsAsync(pg.Store);
+        Assert.Equal(AllReadModelViews, new SortedSet<string>(before.Keys, StringComparer.Ordinal));
+
+        await using (var conn = await pg.Store.OpenAsync())
+        {
+            int removed = await conn.ExecuteAsync(
+                "DELETE FROM _applied_migrations WHERE name = @name",
+                new { name = Unit.Infrastructure.TenantRefreshStampBackfillTests.Migration });
+            Assert.Equal(1, removed);
+        }
+
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        Assert.Equal(before, await ViewOidsAsync(pg.Store));
+    }
+
+    /// <summary>
+    /// The refresh-stamp backfill's batch walk uses row-value comparisons over the composite primary
+    /// key; this runs it on the engine where a collation or row-comparison difference would show,
+    /// with a batch boundary inside each org and a run stopped part-way and then finished by a boot.
+    /// </summary>
+    [Fact]
+    public async Task RefreshStampBackfill_OnLivePostgres_BatchesAndResumes()
+    {
+        await using var pg = await InitializedPostgresAsync();
+        var initializer = new SchemaInitializer(pg.Store);
+        await using (var conn = await pg.Store.OpenAsync())
+        {
+            await Unit.Infrastructure.RefreshStampSeed.SeedAsync(conn);
+            await conn.ExecuteAsync(
+                "DELETE FROM _applied_migrations WHERE name = @name",
+                new { name = Unit.Infrastructure.TenantRefreshStampBackfillTests.Migration });
+
+            var ex = await Record.ExceptionAsync(() => initializer.RunOnceAsync(
+                conn, Unit.Infrastructure.TenantRefreshStampBackfillTests.Migration,
+                c => initializer.BackfillTenantArtifactAccessRefreshCheckedAtAsync(
+                    c, new WriteLockBudget(2, 2, 2),
+                    batch => batch == 2 ? throw new InvalidOperationException("stopped") : Task.CompletedTask),
+                transactional: false));
+            Assert.IsType<InvalidOperationException>(ex);
+
+            var partial = await Unit.Infrastructure.RefreshStampSeed.StampsAsync(conn);
+            Assert.Equal(Unit.Infrastructure.RefreshStampSeed.Expected.Take(4).ToList(), partial.Take(4).ToList());
+            Assert.Equal(Unit.Infrastructure.RefreshStampSeed.Seeded.Skip(4).ToList(), partial.Skip(4).ToList());
+        }
+
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        await using (var conn = await pg.Store.OpenAsync())
+        {
+            Assert.Equal(
+                Unit.Infrastructure.RefreshStampSeed.Expected,
+                await Unit.Infrastructure.RefreshStampSeed.StampsAsync(conn));
+            long recorded = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM _applied_migrations WHERE name = @name",
+                new { name = Unit.Infrastructure.TenantRefreshStampBackfillTests.Migration });
+            Assert.Equal(1, recorded);
+        }
+    }
+
+    /// <summary>
+    /// oci_scan_coverage.matched_at is an indexed temporal column, so it is byte-ordered under
+    /// COLLATE "C" like every other one — on a fresh install from the schema file, and on a database
+    /// whose column was created under the default collation, which the next boot re-collates.
+    /// </summary>
+    [Fact]
+    public async Task OciScanCoverageMatchedAt_IsCollateC_AndADefaultCollatedColumnConverges()
+    {
+        await using var pg = await InitializedPostgresAsync();
+        Assert.Equal("C", await MatchedAtCollationAsync(pg.Store));
+
+        await using (var conn = await pg.Store.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "ALTER TABLE oci_scan_coverage ALTER COLUMN matched_at TYPE TEXT COLLATE \"default\"");
+        }
+
+        Assert.Equal("default", await MatchedAtCollationAsync(pg.Store));
+
+        await new SchemaInitializer(pg.Store).InitializeAsync();
+
+        Assert.Equal("C", await MatchedAtCollationAsync(pg.Store));
+    }
+
+    private static async Task<string?> MatchedAtCollationAsync(NpgsqlMetadataStore store)
+    {
+        await using var conn = await store.OpenAsync();
+        return await conn.QueryFirstOrDefaultAsync<string?>(
+            """
+            SELECT co.collname
+            FROM pg_attribute a
+            JOIN pg_class t ON t.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_collation co ON co.oid = a.attcollation
+            WHERE n.nspname = current_schema() AND t.relname = 'oci_scan_coverage' AND a.attname = 'matched_at'
+            """);
+    }
+
+    /// <summary>
+    /// The Postgres half of OciScanCascadeIndexTests: the RI trigger's child lookup carries no
+    /// owner_kind predicate, so only a non-partial index whose first key is the foreign-key column
+    /// serves it.
+    /// </summary>
+    [Fact]
+    public async Task OciScanCascadingForeignKeys_LeadAFullIndex_OnLivePostgres()
+    {
+        await using var pg = await InitializedPostgresAsync();
+        await using var conn = await pg.Store.OpenAsync();
+        var missing = (await conn.QueryAsync<string>(
+            """
+            SELECT t.relname || '.' || a.attname
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+            WHERE c.contype = 'f' AND c.confdeltype = 'c' AND n.nspname = current_schema()
+              AND t.relname IN ('oci_scan_jobs', 'oci_scan_coverage', 'oci_image_components', 'oci_component_vulns')
+              AND NOT EXISTS (
+                  SELECT 1 FROM pg_index i
+                  WHERE i.indrelid = c.conrelid AND i.indpred IS NULL AND i.indkey[0] = c.conkey[1])
+            ORDER BY 1
+            """)).ToList();
+
+        Assert.True(missing.Count == 0,
+            "Cascading foreign keys with no full index leading on them: " + string.Join(", ", missing));
+    }
+
     private static readonly SortedSet<string> AllReadModelViews = new(StringComparer.Ordinal)
     {
         "artifact_inventory", "artifact_license", "org_billable_storage_bytes", "org_storage_bytes",

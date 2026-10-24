@@ -22,7 +22,7 @@ public sealed class EdgeBackgroundJobAllowlistTests
     [
         "vuln-scan", "vuln-rescan", "threat-feed", "deprecation-refresh", "retention",
         "orphan-reconciler", "tenant-hard-delete", "tenant-count-poller", "stats-refresh",
-        "saml-cert-expiry",
+        "saml-cert-expiry", "oci-scan-sweep",
     ];
 
     private static AirGapMode Build(string? deploymentMode = null, string? disableJobs = null, string? airGapped = null) =>
@@ -60,6 +60,38 @@ public sealed class EdgeBackgroundJobAllowlistTests
         Assert.False(mode.IsJobDisabled("oci-staging-janitor"));
         Assert.False(mode.IsJobDisabled("blob-size-poller"));
         Assert.False(mode.IsJobDisabled("healthcheck-pinger"));
+    }
+
+    [Fact]
+    public void Edge_WholeSetSwitchKeepsOnlyTheHousekeepingJobs()
+    {
+        // DISABLE_BACKGROUND_JOBS=true on an edge node also stops the size gauge and the
+        // healthcheck ping, but leaves cache eviction and the staging janitor running: they make
+        // no outbound call, and a cache node without eviction grows its cache without bound.
+        var mode = Build(deploymentMode: "edge", disableJobs: "true");
+
+        foreach (string job in EdgeAllowed.Concat(EdgeDisabled))
+        {
+            bool housekeeping = job is "cache-eviction" or "oci-staging-janitor";
+            Assert.True(housekeeping != mode.IsJobDisabled(job),
+                $"edge + DISABLE_BACKGROUND_JOBS=true: '{job}' disabled={mode.IsJobDisabled(job)}");
+        }
+    }
+
+    [Fact]
+    public void Edge_OffValueLeavesTheAllowlistRunning()
+    {
+        var mode = Build(deploymentMode: "edge", disableJobs: "false");
+
+        foreach (string job in EdgeAllowed)
+        {
+            Assert.False(mode.IsJobDisabled(job), $"edge + DISABLE_BACKGROUND_JOBS=false must run '{job}'");
+        }
+
+        foreach (string job in EdgeDisabled)
+        {
+            Assert.True(mode.IsJobDisabled(job), $"edge still force-disables '{job}'");
+        }
     }
 
     [Fact]

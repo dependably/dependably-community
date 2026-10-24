@@ -1674,6 +1674,164 @@ public sealed class OciControllerProxyTests : IAsyncLifetime
         var tags = tagsProperty!.GetValue(obj) as IEnumerable<string>;
         Assert.Contains("air-local", tags!);
     }
+
+    // ── Org upstream posture: passthrough off / org air-gapped ─────────────────
+
+    private async Task SetUpstreamPostureAsync(bool passthrough, bool airGapped)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "UPDATE org_settings SET proxy_passthrough_enabled = @passthrough, air_gapped = @airGapped WHERE org_id = @orgId",
+            new { passthrough = passthrough ? 1 : 0, airGapped = airGapped ? 1 : 0, orgId = _orgId });
+    }
+
+    private static string ErrorMessage(IActionResult result) =>
+        Assert.Single(Assert.IsType<OciErrorResponse>(Assert.IsType<ObjectResult>(result).Value).Errors).Message;
+
+    /// <summary>
+    /// Either org posture that turns upstream fetching off answers a manifest miss as 404 without
+    /// contacting the upstream: NeverCallFactory throws on any request, which the controller would
+    /// report as 502, so a 404 is only reachable by refusing before the fetch.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task GetManifest_Miss_WithUpstreamOffForTheOrg_Returns404_WithoutAnUpstreamCall(
+        bool passthrough, bool airGapped)
+    {
+        await SetUpstreamPostureAsync(passthrough, airGapped);
+        var ctl = BuildController(BuildResolver(new NeverCallFactory()));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.Equal(404, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.Contains("Proxy passthrough is off for this organization", ErrorMessage(result), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HeadManifest_Miss_WithPassthroughOff_Returns404_WithoutAnUpstreamCall()
+    {
+        await SetUpstreamPostureAsync(passthrough: false, airGapped: false);
+        var ctl = BuildController(BuildResolver(new NeverCallFactory()));
+
+        var result = await ctl.Head("library/ubuntu/manifests/latest", default);
+
+        Assert.Equal(404, Assert.IsType<ObjectResult>(result).StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task GetBlob_Miss_WithUpstreamOffForTheOrg_Returns404_WithoutAnUpstreamCall(
+        bool passthrough, bool airGapped)
+    {
+        await SetUpstreamPostureAsync(passthrough, airGapped);
+        var ctl = BuildController(BuildResolver(new NeverCallFactory()));
+        string digest = "sha256:" + Sha256Hex(RandomBytes());
+
+        var result = await ctl.Get($"library/ubuntu/blobs/{digest}", default);
+
+        Assert.Equal(404, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.Contains("Proxy passthrough is off for this organization", ErrorMessage(result), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HeadBlob_Miss_WithPassthroughOff_Returns404_WithoutAnUpstreamCall()
+    {
+        await SetUpstreamPostureAsync(passthrough: false, airGapped: false);
+        var ctl = BuildController(BuildResolver(new NeverCallFactory()));
+        string digest = "sha256:" + Sha256Hex(RandomBytes());
+
+        var result = await ctl.Head($"library/ubuntu/blobs/{digest}", default);
+
+        Assert.Equal(404, Assert.IsType<ObjectResult>(result).StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task ListTags_WithUpstreamOffForTheOrg_ReturnsLocalTagsOnly(bool passthrough, bool airGapped)
+    {
+        await SetUpstreamPostureAsync(passthrough, airGapped);
+        await SeedManifestAsync(Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"local\":1}"), tag: "held-locally");
+        // A failed upstream listing also degrades to the local tags, so the request count, not
+        // the listing, is what shows the upstream was never asked.
+        var upstream = new RepeatFactory(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"name\":\"library/ubuntu\",\"tags\":[\"upstream-only\"]}"),
+        });
+        var ctl = BuildController(BuildResolver(upstream));
+
+        var result = await ctl.Get("library/ubuntu/tags/list", default);
+
+        object obj = Assert.IsType<JsonResult>(result).Value!;
+        var tags = (IEnumerable<string>)obj.GetType().GetProperty("tags")!.GetValue(obj)!;
+        Assert.Equal(["held-locally"], tags);
+        Assert.Equal(0, upstream.CallCount);
+    }
+
+    /// <summary>
+    /// A held tag past <c>Oci:ManifestTagTtl</c> would normally be revalidated upstream. With
+    /// upstream fetching off there is nothing to revalidate against, so the held digest is served
+    /// as a cache hit rather than reported as a miss.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task GetManifest_HeldTagPastTtl_WithUpstreamOffForTheOrg_ServesTheHeldDigest_WithoutAnUpstreamCall(
+        bool passthrough, bool airGapped)
+    {
+        var clock = TestTime.Frozen();
+        await SetUpstreamPostureAsync(passthrough, airGapped);
+        string held = await SeedManifestAsync(
+            Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"held\"}"),
+            tag: "latest", lastRevalidated: clock.GetUtcNow().AddMinutes(-10));
+        var ctl = BuildController(BuildResolver(new NeverCallFactory(), time: clock));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("HIT", ctl.Response.Headers["X-Cache"].ToString());
+        Assert.Equal(held, ctl.Response.Headers["Docker-Content-Digest"].ToString());
+    }
+
+    /// <summary>
+    /// The twin of the posture tests: with passthrough on, the same miss reaches the upstream, so
+    /// the refusals above come from the posture and not from the test's wiring.
+    /// </summary>
+    [Fact]
+    public async Task GetManifest_Miss_WithPassthroughOn_FetchesUpstream()
+    {
+        await SetUpstreamPostureAsync(passthrough: true, airGapped: false);
+        byte[] upstreamBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"upstream\"}");
+        var ctl = BuildController(BuildResolver(new RepeatFactory(_ => UpstreamManifestResponse(upstreamBytes))));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("MISS", ctl.Response.Headers["X-Cache"].ToString());
+    }
+
+    /// <summary>
+    /// An org with no settings row keeps the default, passthrough on, as every other proxied
+    /// ecosystem does.
+    /// </summary>
+    [Fact]
+    public async Task GetManifest_Miss_WithNoSettingsRow_FetchesUpstream()
+    {
+        await using (var conn = await _db.OpenAsync())
+        {
+            await conn.ExecuteAsync("DELETE FROM org_settings WHERE org_id = @orgId", new { orgId = _orgId });
+        }
+
+        byte[] upstreamBytes = Encoding.UTF8.GetBytes("{\"schemaVersion\":2,\"gen\":\"no-row\"}");
+        var ctl = BuildController(BuildResolver(new RepeatFactory(_ => UpstreamManifestResponse(upstreamBytes))));
+
+        var result = await ctl.Get("library/ubuntu/manifests/latest", default);
+
+        Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("MISS", ctl.Response.Headers["X-Cache"].ToString());
+    }
 }
 
 /// <summary>Unlimited disk stub for tests — floor check always passes.</summary>

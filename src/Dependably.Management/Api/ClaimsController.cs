@@ -191,7 +191,7 @@ public sealed class ClaimsController : ControllerBase
             return Error;
         }
 
-        var rows = await _claims.ListAsync(OrgId!, ecosystem, state, search,
+        var rows = await _claims.ListAsync(OrgId, ecosystem, state, search,
             limit: Math.Clamp(limit, 1, 500), ct);
         return Ok(new { items = rows.Select(ToDto), total = rows.Count });
     }
@@ -213,7 +213,7 @@ public sealed class ClaimsController : ControllerBase
 
         string canonicalEcosystem = ecosystem.ToLowerInvariant();
         string canonicalName = PurlNormalizer.CanonicalName(canonicalEcosystem, name);
-        var eff = await _resolver.ResolveAsync(OrgId!, canonicalEcosystem, canonicalName, ct);
+        var eff = await _resolver.ResolveAsync(OrgId, canonicalEcosystem, canonicalName, ct);
         return Ok(new
         {
             ecosystem = canonicalEcosystem,
@@ -237,7 +237,7 @@ public sealed class ClaimsController : ControllerBase
             return Error;
         }
 
-        var (validationError, ecosystem, name, validation) = await ValidateCreateRequestAsync(req, OrgId!, ct);
+        var (validationError, ecosystem, name, validation) = await ValidateCreateRequestAsync(req, OrgId, ct);
         if (validationError is not null)
         {
             return validationError;
@@ -247,7 +247,7 @@ public sealed class ClaimsController : ControllerBase
         {
             ClaimId = Guid.NewGuid().ToString("D"),
             HistoryId = Guid.NewGuid().ToString("D"),
-            OrgId = OrgId!,
+            OrgId = OrgId,
             Ecosystem = ecosystem,
             Name = name,
             PriorState = null,
@@ -277,7 +277,7 @@ public sealed class ClaimsController : ControllerBase
         }
 
         int purgedCount = validation.PurgesProxy
-            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
+            ? await PurgeProxyArtefactsAsync(OrgId, ecosystem, name, ct)
             : 0;
         if (purgedCount > 0)
         {
@@ -299,7 +299,7 @@ public sealed class ClaimsController : ControllerBase
             Dependably.Infrastructure.Audit.Events.ClaimEvents.TypeCreate,
             OrgId, "user", ActorId, "accepted", createPayload, ct);
 
-        var created = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
+        var created = await _claims.GetAsync(OrgId, ecosystem, name, ct);
         return Created($"/api/v1/admin/claims/{ecosystem}/{name}", new
         {
             claim = ToDto(created!),
@@ -380,7 +380,7 @@ public sealed class ClaimsController : ControllerBase
         ecosystem = ecosystem.ToLowerInvariant();
         name = PurlNormalizer.CanonicalName(ecosystem, name);
 
-        var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
+        var existing = await _claims.GetAsync(OrgId, ecosystem, name, ct);
         if (existing is null)
         {
             return NotFound();
@@ -396,7 +396,7 @@ public sealed class ClaimsController : ControllerBase
         {
             ClaimId = existing.Id,
             HistoryId = Guid.NewGuid().ToString("D"),
-            OrgId = OrgId!,
+            OrgId = OrgId,
             Ecosystem = ecosystem,
             Name = name,
             PriorState = existing.State,
@@ -411,7 +411,7 @@ public sealed class ClaimsController : ControllerBase
         await _claims.ApplyTransitionAsync(tx, ct);
 
         int purgedCount = validation.PurgesProxy
-            ? await PurgeProxyArtefactsAsync(OrgId!, ecosystem, name, ct)
+            ? await PurgeProxyArtefactsAsync(OrgId, ecosystem, name, ct)
             : 0;
         if (purgedCount > 0)
         {
@@ -429,7 +429,7 @@ public sealed class ClaimsController : ControllerBase
             Dependably.Infrastructure.Audit.Events.ClaimEvents.TypeTransition,
             OrgId, "user", ActorId, "accepted", transitionPayload, ct);
 
-        var updated = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
+        var updated = await _claims.GetAsync(OrgId, ecosystem, name, ct);
         return Ok(new { claim = ToDto(updated!), purgesProxy = validation.PurgesProxy, purgedCount });
     }
 
@@ -450,13 +450,13 @@ public sealed class ClaimsController : ControllerBase
         ecosystem = ecosystem.ToLowerInvariant();
         name = PurlNormalizer.CanonicalName(ecosystem, name);
 
-        var existing = await _claims.GetAsync(OrgId!, ecosystem, name, ct);
+        var existing = await _claims.GetAsync(OrgId, ecosystem, name, ct);
         if (existing is null)
         {
             return NotFound();
         }
 
-        int localCount = await _claims.CountLocalVersionsAsync(OrgId!, ecosystem, name, ct);
+        int localCount = await _claims.CountLocalVersionsAsync(OrgId, ecosystem, name, ct);
         var validation = ClaimStateMachine.ValidateRelease(existing.State, localCount);
         if (!validation.Allowed)
         {
@@ -472,7 +472,7 @@ public sealed class ClaimsController : ControllerBase
         {
             ClaimId = existing.Id,
             HistoryId = Guid.NewGuid().ToString("D"),
-            OrgId = OrgId!,
+            OrgId = OrgId,
             Ecosystem = ecosystem,
             Name = name,
             PriorState = existing.State,
@@ -500,18 +500,17 @@ public sealed class ClaimsController : ControllerBase
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    private async Task<(IActionResult? Error, string? OrgId, string? ActorId)> AuthorizeAsync(CancellationToken ct)
+    private async Task<(IActionResult? Error, string OrgId, string? ActorId)> AuthorizeAsync(CancellationToken ct)
     {
         var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.ClaimManage, ct);
         if (deny is not null)
         {
-            return (deny, null, null);
+            return (deny, null!, null);
         }
 
-        var ctx = (TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!;
         string? actorId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                    ?? User.FindFirst("sub")?.Value;
-        return (null, ctx.TenantId, actorId);
+        return (null, HttpContext.RequireTenantId(), actorId);
     }
 
     private static object ToDto(NameClaim c) => new

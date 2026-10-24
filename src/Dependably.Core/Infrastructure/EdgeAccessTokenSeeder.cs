@@ -62,6 +62,8 @@ public static class EdgeAccessTokenSeeder
         }
 
         string tokenHash = TokenRepository.HashToken(accessToken.Trim());
+        // mint-ok: boot-time seed of the edge node's own local database from operator config; the
+        // edge has no tenant lifecycle plane, so there is no suspension for this row to outlive.
         await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO service_tokens (id, org_id, name, token_hash, capabilities, description)

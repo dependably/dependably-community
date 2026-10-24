@@ -21,8 +21,13 @@ namespace Dependably.Tests.Compliance;
 /// have existed in the PREVIOUS release's <c>CREATE TABLE</c> block, because that is what every
 /// live database booting this build was created or migrated to. A column introduced in this release
 /// gets its index created next to its <c>ALTER</c> in <c>RunAdditiveMigrationsAsync</c> instead —
-/// which also covers fresh installs, since that pass runs unconditionally. The declaration may move
-/// into the schema files one release later.</para>
+/// which also covers fresh installs, since that pass runs unconditionally.</para>
+///
+/// <para>The previous release is not the only shape a booting database can have: one created by an
+/// older release and upgraded straight to this build still has that release's tables when the
+/// schema files run. The second check therefore repeats the analysis against every release
+/// from <c>OldestUpgradeSource</c> on, so an index stays in the additive pass for as long
+/// as any supported upgrade source lacks its column.</para>
 ///
 /// <para><c>CREATE TABLE</c> and <c>CREATE INDEX</c> are the only statement kinds these files
 /// contain, and a no-op <c>CREATE TABLE</c> references nothing, so indexes are the whole exposure.
@@ -66,10 +71,12 @@ public sealed partial class SchemaUpgradeOrderComplianceTests
         var violations = new List<string>();
         Analyze(
             violations, "Schema.sql",
-            File.ReadAllText(SchemaTestPaths.SqliteSchema(src)), resolution.Baseline.SqliteSql);
+            File.ReadAllText(SchemaTestPaths.SqliteSchema(src)), resolution.Baseline.SqliteSql,
+            "the previous release's");
         Analyze(
             violations, "Schema.pg.sql",
-            File.ReadAllText(SchemaTestPaths.PostgresSchema(src)), resolution.Baseline.PostgresSql);
+            File.ReadAllText(SchemaTestPaths.PostgresSchema(src)), resolution.Baseline.PostgresSql,
+            "the previous release's");
 
         if (violations.Count == 0)
         {
@@ -86,10 +93,69 @@ public sealed partial class SchemaUpgradeOrderComplianceTests
             + $"{resolution.Baseline.Tag} did not have, so they resolve against the pre-ALTER table "
             + "shape on every upgrade boot. Declare the index in "
             + "SchemaInitializer.RunAdditiveMigrationsAsync next to the ALTER that adds the column "
-            + "instead; move it into the schema files a release later. See test output.");
+            + "instead, and keep it there while any supported upgrade source lacks the column. See test output.");
     }
 
-    private static void Analyze(List<string> violations, string file, string currentSql, string baselineSql)
+    // The oldest release a live database may have been created by, and so the oldest table shape
+    // this build must boot against. The previous-release check above only covers a database that has
+    // stepped through every release in turn; this one covers a database created by any release from
+    // here on and upgraded straight to this build. There are no production databases from before
+    // v0.13.3, so older releases are not supported upgrade sources. Raising this is a deliberate
+    // decision about which deployed databases must keep working, never a routine bump.
+    private const string OldestUpgradeSource = "v0.13.3";
+
+    [Fact]
+    public void NoSchemaFileIndex_NamesAColumnThatAnySupportedUpgradeSourceLacked()
+    {
+        var resolutions = SchemaBaselineResolver.ResolveReleasesFrom(OldestUpgradeSource);
+        bool required = string.Equals(
+            Environment.GetEnvironmentVariable(RequireBaselineVariable), "true", StringComparison.OrdinalIgnoreCase);
+
+        string src = SchemaTestPaths.SourceRoot();
+        string currentSqlite = File.ReadAllText(SchemaTestPaths.SqliteSchema(src));
+        string currentPostgres = File.ReadAllText(SchemaTestPaths.PostgresSchema(src));
+        var violations = new List<string>();
+        var unreadable = new List<string>();
+
+        foreach (var resolution in resolutions)
+        {
+            if (resolution.Baseline is null)
+            {
+                _output.WriteLine(resolution.Log);
+                if (!SchemaBaselineResolver.IsTolerable(resolution, required))
+                {
+                    unreadable.Add(resolution.Absence.ToString());
+                }
+
+                continue;
+            }
+
+            string label = $"{resolution.Baseline.Tag}'s";
+            Analyze(violations, "Schema.sql", currentSqlite, resolution.Baseline.SqliteSql, label);
+            Analyze(violations, "Schema.pg.sql", currentPostgres, resolution.Baseline.PostgresSql, label);
+        }
+
+        Assert.True(
+            unreadable.Count == 0,
+            $"{RequireBaselineVariable} is set, but {unreadable.Count} release schema(s) from {OldestUpgradeSource} "
+            + $"on could not be resolved ({string.Join(", ", unreadable)}) — the gate compared nothing for them. "
+            + "See test output for the resolution log.");
+
+        foreach (string v in violations)
+        {
+            _output.WriteLine(v);
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            $"{violations.Count} index declaration(s) in the schema files name a column that a release from "
+            + $"{OldestUpgradeSource} on did not have, so a database created by that release fails its upgrade "
+            + "boot. Declare the index in SchemaInitializer.RunAdditiveMigrationsAsync next to the ALTER that "
+            + "adds the column, and keep it there. See test output.");
+    }
+
+    private static void Analyze(
+        List<string> violations, string file, string currentSql, string baselineSql, string baselineLabel)
     {
         var currentTables = SchemaSqlParser.ParseTables(currentSql);
         var baselineTables = SchemaSqlParser.ParseTables(baselineSql);
@@ -121,8 +187,8 @@ public sealed partial class SchemaUpgradeOrderComplianceTests
                 if (current.Contains(token) && !baseline.Contains(token))
                 {
                     violations.Add(
-                        $"{file}: index `{name}` ON {index.Table} names column `{token}`, which the "
-                        + "previous release's CREATE TABLE block does not declare");
+                        $"{file}: index `{name}` ON {index.Table} names column `{token}`, which "
+                        + $"{baselineLabel} CREATE TABLE block does not declare");
                 }
             }
         }

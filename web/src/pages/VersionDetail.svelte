@@ -8,6 +8,7 @@
   import { bootstrapInfo, navigate, user } from '../lib/store.js'
   import { overflowCount } from '../lib/blastRadius.js'
   import { reportPageLoad } from '../lib/pageLoad.js'
+  import { showsLinkedFindings, worstOciSecurity } from '../lib/ociScan.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import { registryOrigin } from '../lib/installCommand.js'
   import { ECO_LABEL } from '../lib/ecosystems.js'
@@ -102,8 +103,48 @@
   $: stateVersion = resolveStateVersion(pkg, versions)
   $: stateRows = rowsForVersion(versions, stateVersion)
   $: worstSeverity = worstSeverityFor(stateRows, vulnsByPurl)
+  // An OCI image's findings come from the org's scan result, not from linked advisories.
+  $: ociSecurity = worstOciSecurity(stateRows)
   $: licenseState = licenseStateFor(stateRows, licenseBlocklist, licenseConditional)
   $: versionsBehind = versionsBehindFor(stateRows)
+
+  // The Security pillar. A severity chip when there is a finding, the clean tone only for a
+  // result that covers the whole image, and a muted state-specific line for everything else.
+  function securityPillarFor(oci, severity) {
+    const chip = (sev, text, title) => ({
+      sev: sev === 'UNKNOWN' ? 'unknown' : sev.toLowerCase(),
+      text: sev === 'UNKNOWN' ? $t('dashboard.unscored') : text,
+      tone: '',
+      title
+    })
+    if (oci && oci.kind === 'vulnerable') {
+      return chip(oci.severity, oci.severity,
+        $t('versionDetail.detail.ociFindings', { values: { count: oci.count } })
+          + (oci.gapCount > 0 ? ' ' + $t('versionDetail.detail.ociGapsNote', { values: { count: oci.gapCount } }) : ''))
+    }
+    // A linked advisory is a known finding. A partial, unscanned or no-scanner state never hides
+    // it: the state goes in the tooltip instead.
+    if (severity && showsLinkedFindings(oci, 1)) {
+      const state = oci.kind === 'partial'
+        ? $t('versionDetail.detail.ociPartial', { values: { count: oci.gapCount } })
+        : oci.kind === 'unscanned' ? $t('versionDetail.detail.ociUnscanned') : $t('versionDetail.detail.ociNoFeed')
+      return chip(severity, severity, state)
+    }
+    if (oci && oci.kind === 'partial') {
+      return { sev: null, text: $t('versionDetail.status.partial'), tone: 'muted',
+        title: $t('versionDetail.detail.ociPartial', { values: { count: oci.gapCount } }) }
+    }
+    if (oci && oci.kind === 'unscanned') {
+      return { sev: null, text: $t('versionDetail.status.unscanned'), tone: 'muted',
+        title: $t('versionDetail.detail.ociUnscanned') }
+    }
+    if (oci && oci.kind === 'no_feed') {
+      return { sev: null, text: $t('versionDetail.pillars.noScanner'), tone: 'muted',
+        title: $t('versionDetail.detail.ociNoFeed') }
+    }
+    if (severity) return chip(severity, severity)
+    return { sev: null, text: $t('versionDetail.pillars.noAdvisories'), tone: 'clean' }
+  }
 
   // Descriptors for the shared strip. Reactive rather than const so the labels follow a locale
   // change, and so every pillar re-reads its source the moment that source resolves.
@@ -113,11 +154,7 @@
       label: $t('versionDetail.pillars.security'),
       // UNKNOWN is the packageRisk vocabulary for "advisories exist but none carries a score";
       // it renders as the unscored chip rather than as a severity nobody assigned.
-      sev: worstSeverity ? (worstSeverity === 'UNKNOWN' ? 'unknown' : worstSeverity.toLowerCase()) : null,
-      text: worstSeverity
-        ? (worstSeverity === 'UNKNOWN' ? $t('dashboard.unscored') : worstSeverity)
-        : $t('versionDetail.pillars.noAdvisories'),
-      tone: worstSeverity ? '' : 'clean',
+      ...securityPillarFor(ociSecurity, worstSeverity),
     },
     {
       key: 'license',

@@ -5,6 +5,7 @@ using Dependably.Infrastructure.Observability;
 using Dependably.Storage;
 using Dependably.Tests.Infrastructure;
 using Dependably.Tests.Infrastructure.Seeding;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -291,6 +292,26 @@ public sealed class HealthServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task GetReportAsync_JobWhoseLatestRunWasDegraded_IsDegraded_AndDegradesTheRollup()
+    {
+        // A threat-feed run that kept its previous data (rejected feed) is neither a success nor a
+        // failure: it must not read "ok", however recent, and it must show in the rollup.
+        var clock = TestTime.Frozen(Now);
+        const string jobName = "threat-feed";
+
+        await RecordJobRunAsync(jobName, "success", Now.AddHours(-26));
+        await RecordJobRunAsync(jobName, "degraded", Now.AddMinutes(-2));
+
+        var svc = BuildService(clock);
+        var report = await svc.GetReportAsync(CancellationToken.None);
+
+        var job = report.Jobs.Single(j => j.Name == jobName);
+        Assert.Equal("degraded", job.Status);
+        Assert.Equal("degraded", job.LastOutcome);
+        Assert.Equal("degraded", report.Overall);
+    }
+
+    [Fact]
     public async Task GetReportAsync_JobWithOldSuccessTimestamp_IsStale()
     {
         // A job whose last-success DB row is 48 hours old exceeds the 36 h threshold.
@@ -428,6 +449,54 @@ public sealed class HealthServiceTests : IAsyncLifetime
 
         Assert.All(report.Jobs, j => Assert.Equal("disabled", j.Status));
     }
+
+    // The real AirGapMode, not a substitute: the health report must agree with what the two
+    // housekeeping jobs actually do. The whole-set switch and AIR_GAPPED leave them running (and
+    // their passes run), so they must not read "disabled"; every other job must.
+    [Theory]
+    [InlineData("DISABLE_BACKGROUND_JOBS", "true")]
+    [InlineData("AIR_GAPPED", "true")]
+    public async Task GetReportAsync_WholeSetSwitch_HousekeepingJobsNotReportedDisabled(string key, string value)
+    {
+        var clock = TestTime.Frozen(Now);
+        var svc = BuildServiceWith(clock, new Dictionary<string, string?> { [key] = value });
+        var report = await svc.GetReportAsync(CancellationToken.None);
+
+        foreach (var job in report.Jobs)
+        {
+            // oci-scan-sweep is database-only, so air-gap alone leaves it running; the whole-set
+            // switch still stops it.
+            bool exempt = job.Name is "cache-eviction" or "oci-staging-janitor"
+                || (key == "AIR_GAPPED" && job.Name == "oci-scan-sweep");
+            Assert.True(exempt != (job.Status == "disabled"), $"{key}={value}: '{job.Name}' reported '{job.Status}'");
+        }
+    }
+
+    [Fact]
+    public async Task GetReportAsync_HousekeepingJobNamedInList_ReportedDisabled()
+    {
+        var clock = TestTime.Frozen(Now);
+        var svc = BuildServiceWith(clock, new Dictionary<string, string?>
+        {
+            ["DISABLE_BACKGROUND_JOBS"] = "cache-eviction,oci-staging-janitor",
+        });
+        var report = await svc.GetReportAsync(CancellationToken.None);
+
+        Assert.Equal("disabled", report.Jobs.Single(j => j.Name == "cache-eviction").Status);
+        Assert.Equal("disabled", report.Jobs.Single(j => j.Name == "oci-staging-janitor").Status);
+        Assert.NotEqual("disabled", report.Jobs.Single(j => j.Name == "retention").Status);
+    }
+
+    private HealthService BuildServiceWith(FakeTimeProvider clock, IDictionary<string, string?> config) =>
+        new(
+            _readiness,
+            _jobRuns,
+            new MetricsSnapshotProvider(clock),
+            new AirGapMode(new ConfigurationBuilder().AddInMemoryCollection(config).Build()),
+            _statsSnapshots,
+            _orgs,
+            _trustAnchors,
+            clock);
 
     // ── Mixed partial-failure (house rule for batch/fan-out) ─────────────────────
 

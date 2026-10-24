@@ -61,6 +61,32 @@ public sealed class OciReferenceGraph
     }
 
     /// <summary>
+    /// True when <paramref name="digest"/> is a platform child of an image index this org holds in
+    /// <paramref name="repository"/>, hosted or proxied: the same owner lookup the OCI pull gate
+    /// resolves through. Such a digest is not an image of its own; it inherits the index's verdict.
+    /// </summary>
+    public static async Task<bool> IsPlatformOfHeldImageAsync(
+        System.Data.Common.DbConnection conn, string orgId, string repository, string digest)
+    {
+        return await conn.ExecuteScalarAsync<bool>(
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM oci_manifest_blobs g
+                WHERE g.org_id = @orgId AND g.blob_digest = @digest AND g.manifest_digest <> @digest
+                  AND (EXISTS(
+                          SELECT 1 FROM package_versions pv JOIN packages p ON p.id = pv.package_id
+                          WHERE p.org_id = @orgId AND p.ecosystem = 'oci' AND p.purl_name = @repository
+                            AND pv.version = g.manifest_digest)
+                       OR EXISTS(
+                          SELECT 1 FROM tenant_artifact_access taa
+                          JOIN cache_artifact ca ON ca.id = taa.cache_artifact_id
+                          WHERE taa.org_id = @orgId AND ca.ecosystem = 'oci' AND ca.filename = 'manifest'
+                            AND ca.name = @repository AND ca.version = g.manifest_digest)))
+            """,
+            new { orgId, digest, repository });
+    }
+
+    /// <summary>
     /// True when this org's graph knows what <paramref name="manifestDigest"/> references. False
     /// means the manifest predates the graph and has not been backfilled — its closure is unknown,
     /// and it must not be evicted.

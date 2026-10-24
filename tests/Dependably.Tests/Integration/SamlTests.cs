@@ -211,7 +211,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task LoginSaml_NewUser_ProvisionsMemberAndIssuesJwt()
     {
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
 
         var result = await login.LoginSamlAsync(
@@ -246,7 +247,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task LoginSaml_ExistingAdminFormsUser_BlockedWithoutOptIn_AllowedWithOptIn()
     {
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string email = $"admin-{Guid.NewGuid():N}@example.com";
         string userId = await _factory.CreateUser(email, "doesntmatter12", role: "admin");
@@ -289,7 +291,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task LoginSaml_ExistingPasswordBackedAccount_NeverAutoLinked_EvenWithOptIn()
     {
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string email = $"member-pw-{Guid.NewGuid():N}@example.com";
         await _factory.CreateUser(email, "doesntmatter12", role: "member");
@@ -313,7 +316,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task LoginSaml_ReturningSamlUser_UpdatesEmailAndKeepsRole()
     {
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
 
         // First login: provision via JIT
@@ -334,7 +338,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task LoginSaml_DifferentIdpSameEmail_DoesNotCollide()
     {
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string sharedEmail = $"shared-{Guid.NewGuid():N}@example.com";
 
@@ -359,7 +364,8 @@ public sealed class SamlTests : IClassFixture<DependablyFactory>, IAsyncLifetime
     [Fact]
     public async Task LoginSaml_DisabledAccount_Returns401()
     {
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string email = $"locked-{Guid.NewGuid():N}@example.com";
         string userId = await _factory.CreateUser(email, "doesntmatter12", role: "member");

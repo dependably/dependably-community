@@ -229,16 +229,16 @@ internal static class NuGetRegistrationHelpers
         return BlockGateService.Evaluate(facts, gate.Policy, gate.Now).Servable;
     }
 
-    // True when candidateUrl is absolute and its host matches one of the org's configured upstream
-    // URLs. A null configuredUpstreams means the caller supplied no pin information, which only
-    // happens on paths that never emit to a client. A supplied-but-empty set pins nothing, so
-    // every absolute URL fails the check — fail-closed by construction.
+    // True when candidateUrl is absolute and on the origin (scheme, host and port) of one of the
+    // org's configured upstream URLs. A null configuredUpstreams means the caller supplied no pin
+    // information, which only happens on paths that never emit to a client. A supplied-but-empty
+    // set pins nothing, so every absolute URL fails the check — fail-closed by construction.
     private static bool IsPinnedToConfiguredUpstream(
         string? candidateUrl, IReadOnlyCollection<string>? configuredUpstreams)
     {
         return configuredUpstreams is null
             || (candidateUrl is { Length: > 0 }
-                && configuredUpstreams.Any(u => Dependably.Security.UpstreamHostPin.IsSameHost(u, candidateUrl)));
+                && configuredUpstreams.Any(u => Dependably.Security.UpstreamHostPin.IsSameOrigin(u, candidateUrl)));
     }
 
     // A local anchor for an inline page, shaped like the one BuildLocalPage mints. The lower/upper

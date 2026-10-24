@@ -303,6 +303,6 @@ public sealed class NpmDistTagsHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string fullName, CancellationToken ct)
     {
-        return await inventory.ListServeableVersionsAsync(orgId, packageId, "npm", fullName, ct);
+        return await inventory.ListServeableVersionsAsync(orgId, packageId, "npm", fullName, ct: ct);
     }
 }

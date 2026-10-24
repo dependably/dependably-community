@@ -9,7 +9,9 @@ namespace Dependably.Api;
 /// Public, unauthenticated bootstrap endpoint. The frontend calls this on mount to learn:
 ///   - which deployment mode the server is in (single | multi)
 ///   - whether the current request lives at apex (system surface) or a tenant subdomain
-///   - the apex hostname (for clients that need to construct cross-host URLs in multi mode)
+///   - the apex hostname and the tenant domain tenants resolve under (for clients that need to
+///     construct cross-host URLs or derive the tenant slug in multi mode; the tenant domain
+///     equals the apex unless TENANT_DOMAIN is set)
 ///
 /// Single-mode response includes <c>tenantSlug</c> (only one tenant; not sensitive). Multi-mode
 /// responses *omit* <c>tenantSlug</c> on tenant subdomain hits — the slug is in the URL the
@@ -21,7 +23,7 @@ namespace Dependably.Api;
 /// </summary>
 [ApiController]
 // authz-ok: the SPA's pre-login bootstrap probe — it must answer before any credential
-// exists. Returns deployment mode and apex host only; the tenant slug is withheld on
+// exists. Returns deployment mode and the apex and tenant-domain hosts only; the tenant slug is withheld on
 // multi-mode tenant hits so it is not an existence oracle.
 [AllowAnonymous]
 [EnableRateLimiting("anon")]
@@ -54,12 +56,18 @@ public sealed class BootstrapController : ControllerBase
         if (mode == "multi")
         {
             string? apexHost = ResolveApexHost(_config);
+            // TENANT_DOMAIN is a multi-mode setting; header mode reports the apex as the tenant
+            // parent so a stray value cannot change the SPA's host-derived slug.
+            string? tenantDomain = IsMultiDeployment(_config)
+                ? BaseUrlHostHelper.ResolveTenantDomain(_config)
+                : apexHost;
             if (ctx is not null && ctx.IsApex)
             {
                 return Ok(new
                 {
                     mode = "multi",
                     apexHost,
+                    tenantDomain,
                     isApex = true,
                     airGapped,
                     insecureHttp,
@@ -72,6 +80,7 @@ public sealed class BootstrapController : ControllerBase
             {
                 mode = "multi",
                 apexHost,
+                tenantDomain,
                 isApex = false,
                 airGapped,
                 insecureHttp,
@@ -96,6 +105,9 @@ public sealed class BootstrapController : ControllerBase
         string raw = (config["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
         return raw is "multi" or "header" ? "multi" : "single";
     }
+
+    private static bool IsMultiDeployment(IConfiguration config)
+        => string.Equals((config["DEPLOYMENT_MODE"] ?? "single").Trim(), "multi", StringComparison.OrdinalIgnoreCase);
 
     internal static string? ResolveApexHost(IConfiguration config)
         => BaseUrlHostHelper.ResolveApexHost(config);

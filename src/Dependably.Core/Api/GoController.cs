@@ -46,7 +46,25 @@ public sealed class GoController : OrgScopedControllerBase
     /// Sequences <c>!{char}</c> where <c>char</c> is a lowercase ASCII letter are replaced
     /// with the corresponding uppercase letter. All other characters are passed through unchanged.
     /// </summary>
-    internal static string DecodeBangEncoding(string s)
+    internal static string DecodeBangEncoding(string s) => DecodeBang(s, strict: false)!;
+
+    /// <summary>
+    /// Strict form of <see cref="DecodeBangEncoding"/>: false when any <c>!</c> is not followed
+    /// by a lowercase ASCII letter (<c>!!</c>, <c>!A</c>, <c>!1</c>, a trailing <c>!</c>), which no
+    /// module path encodes to. On success <paramref name="decoded"/> is the module path an upstream
+    /// proxy reads from <see cref="EncodeBangEncoding"/> of the same input; on failure it is the
+    /// input unchanged and must not be trusted as a module path.
+    /// </summary>
+    internal static bool TryDecodeBangEncoding(string s, out string decoded)
+    {
+        string? result = DecodeBang(s, strict: true);
+        decoded = result ?? s;
+        return result is not null;
+    }
+
+    // One decoder for both forms: lenient passes a malformed '!' sequence through unchanged,
+    // strict reports it by returning null.
+    private static string? DecodeBang(string s, bool strict)
     {
         if (!s.Contains('!'))
         {
@@ -60,6 +78,10 @@ public sealed class GoController : OrgScopedControllerBase
             {
                 sb.Append(char.ToUpperInvariant(s[i + 1]));
                 i++;
+            }
+            else if (s[i] == '!' && strict)
+            {
+                return null;
             }
             else
             {
@@ -150,20 +172,29 @@ public sealed class GoController : OrgScopedControllerBase
             ? EgressKind.Artifact
             : EgressKind.Metadata);
 
+        // Module paths and versions are decoded strictly. A '!' that is not followed by a
+        // lowercase letter is no module's escape, so the decoded text names no module the
+        // reservation check can match: lenient decoding turns "!internal!/tool" into
+        // "Internal!/tool", which no reservation on "Internal" covers, and would forward it
+        // upstream with the reserved prefix in its path. Such a path answers 404, as an unknown
+        // module does, and is never forwarded.
+
         // @latest: {module}/@latest
         if (path.EndsWith("/@latest", StringComparison.OrdinalIgnoreCase))
         {
             string encodedModule = path[..^"/@latest".Length];
-            string module = DecodeBangEncoding(encodedModule);
-            return await ServeLatestAsync(orgId, module, settings, ct);
+            return TryDecodeBangEncoding(encodedModule, out string module)
+                ? await ServeLatestAsync(orgId, module, settings, ct)
+                : NotFound();
         }
 
         // @v/list: {module}/@v/list
         if (path.EndsWith("/@v/list", StringComparison.OrdinalIgnoreCase))
         {
             string encodedModule = path[..^"/@v/list".Length];
-            string module = DecodeBangEncoding(encodedModule);
-            return await ServeVersionListAsync(orgId, module, settings, ct);
+            return TryDecodeBangEncoding(encodedModule, out string module)
+                ? await ServeVersionListAsync(orgId, module, settings, ct)
+                : NotFound();
         }
 
         // @v/{version}.{ext}: find the last /@v/ segment
@@ -175,7 +206,10 @@ public sealed class GoController : OrgScopedControllerBase
 
         string encodedModulePart = path[..atVIdx];
         string versionFile = path[(atVIdx + "/@v/".Length)..];
-        string modulePath = DecodeBangEncoding(encodedModulePart);
+        if (!TryDecodeBangEncoding(encodedModulePart, out string modulePath))
+        {
+            return NotFound();
+        }
 
         // versionFile is "{encoded-version}.{ext}"
         int dotIdx = versionFile.LastIndexOf('.');
@@ -186,10 +220,10 @@ public sealed class GoController : OrgScopedControllerBase
 
         string encodedVersion = versionFile[..dotIdx];
         string ext = versionFile[(dotIdx + 1)..].ToLowerInvariant();
-        string version = DecodeBangEncoding(encodedVersion);
+        bool versionDecoded = TryDecodeBangEncoding(encodedVersion, out string version);
 
-        return !IsValidGoExt(ext)
-            ? BadRequest($"Unsupported Go module proxy extension: {ext}")
+        return !IsValidGoExt(ext) ? BadRequest($"Unsupported Go module proxy extension: {ext}")
+            : !versionDecoded ? NotFound()
             : await ServeArtifactAsync(orgId, modulePath, version, ext, settings, token, ct);
     }
 
@@ -198,7 +232,8 @@ public sealed class GoController : OrgScopedControllerBase
     /// <summary>
     /// Serves the Go checksum-database passthrough surface (GOPROXY spec, "Serving modules
     /// privately"). <paramref name="rest"/> is the path after <c>sumdb/</c>:
-    /// <c>{sumdb-name}/supported</c> or <c>{sumdb-name}/{lookup|tile|latest...}</c>.
+    /// <c>{sumdb-name}/supported</c> or <c>{sumdb-name}/{lookup|tile|latest...}</c>; any other
+    /// path under the configured name is refused (<see cref="GoSumDbPath"/>).
     ///
     /// Only the single operator-configured sumdb (<c>Go:SumDb</c>, default
     /// <c>sum.golang.org</c>) is proxied — a request naming any other sumdb returns 404 so the
@@ -250,6 +285,18 @@ public sealed class GoController : OrgScopedControllerBase
             }
         }
 
+        // Only the paths the sumdb protocol defines are forwarded. A lookup names a module, so it
+        // gets the same reservation decision as the module routes: a reserved module path is never
+        // sent to the checksum database. latest and canonical tile paths carry no module name and
+        // pass through. Any other shape answers 404 without an upstream request, since the
+        // reservation check cannot see a module name in a path it does not understand.
+        var kind = GoSumDbPath.Classify(sumDbPath);
+        if (kind == GoSumDbPathKind.Unknown
+            || (kind == GoSumDbPathKind.Lookup && await IsSumDbLookupRefusedAsync(orgId, sumDbPath, ct)))
+        {
+            return NotFound();
+        }
+
         string upstreamUrl = $"{upstreamBase}/{sumDbPath}";
         try
         {
@@ -282,6 +329,36 @@ public sealed class GoController : OrgScopedControllerBase
                 sumDbPath, orgId, ex.GetType().Name);
             return StatusCode(StatusCodes.Status502BadGateway, "Upstream sumdb fetch failed.");
         }
+    }
+
+    /// <summary>
+    /// Whether a sumdb <c>lookup/{module}@{version}</c> path must not reach the checksum
+    /// database. The module path is everything before the last <c>@</c>, still in Go proxy
+    /// bang-encoding (<c>module.EscapePath</c>), and the decision is
+    /// <see cref="ReservedNamespaceService.IsUpstreamNameReservedAsync"/>: it strictly decodes the
+    /// path and matches it as the module routes do, and treats an invalid <c>!</c> sequence as
+    /// reserved. A lookup with no <c>@</c>, an empty side, or an <c>@</c> left in the module part
+    /// is refused too: no module path contains <c>@</c>, so such a path names no module the
+    /// reservation check could clear, and the checksum database rejects it anyway.
+    /// </summary>
+    private async Task<bool> IsSumDbLookupRefusedAsync(string orgId, string sumDbPath, CancellationToken ct)
+    {
+        const string lookupPrefix = "lookup/";
+        if (!sumDbPath.StartsWith(lookupPrefix, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        string moduleAtVersion = sumDbPath[lookupPrefix.Length..];
+        int at = moduleAtVersion.LastIndexOf('@');
+        if (at <= 0 || at == moduleAtVersion.Length - 1)
+        {
+            return true;
+        }
+
+        string encodedModule = moduleAtVersion[..at];
+        return encodedModule.Contains('@')
+            || await _svc.Reserved.IsUpstreamNameReservedAsync(orgId, "golang", encodedModule, ct);
     }
 
     /// <summary>
@@ -643,7 +720,7 @@ public sealed class GoController : OrgScopedControllerBase
         var proxyRows = await _svc.CacheArtifacts.ListServeFactsForNameAsync(orgId, "golang", module, ct);
         if (proxyRows.Count > 0)
         {
-            var known = candidates.Select(v => v.Version).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var known = candidates.Select(v => v.Version).ToHashSet(VersionIdentity.Comparer("golang"));
             var signals = await _svc.Vulns.GetGateSignalsBatchForCacheArtifactsAsync(
                 proxyRows.Select(r => r.Id).ToList(), ct);
             candidates.AddRange(proxyRows
@@ -669,7 +746,7 @@ public sealed class GoController : OrgScopedControllerBase
     private async Task<HashSet<string>> BlockedModuleVersionsAsync(
         string orgId, string module, OrgSettings settings, CancellationToken ct)
     {
-        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var blocked = new HashSet<string>(VersionIdentity.Comparer("golang"));
         var now = _svc.Time.GetUtcNow();
 
         var pkg = await _svc.Packages.GetByPurlNameAsync(orgId, "golang", module, ct);

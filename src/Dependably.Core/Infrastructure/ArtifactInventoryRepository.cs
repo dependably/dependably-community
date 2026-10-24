@@ -1,5 +1,7 @@
 using Dapper;
 
+using Dependably.Protocol;
+
 namespace Dependably.Infrastructure;
 
 /// <summary>
@@ -51,7 +53,14 @@ public sealed class ArtifactInventoryRepository
     ///
     /// A proxied version whose version string already exists on the uploaded plane is dropped: an
     /// org that pushes a private override of a name it also proxies serves its own artifact, and the
-    /// name must not list the version twice.
+    /// name must not list the version twice. "Already exists" follows the ecosystem's version
+    /// identity (<see cref="VersionIdentity"/>): case-insensitive for NuGet and PyPI, exact for the
+    /// rest, where a case-distinct proxied version is a different version and stays listed.
+    ///
+    /// <paramref name="includeShadowed"/> keeps the proxied rows an uploaded version shadows. A
+    /// listing never wants them, but a file-level index that gates each file does: a shadowed
+    /// row is hidden from the version list, never released from its block state or its claim on
+    /// its file name.
     ///
     /// It merges in C# rather than reading <c>artifact_inventory</c> on purpose. A PackageVersion
     /// carries per-plane facts the view does not project — the vulnerability gate signals behind
@@ -61,7 +70,8 @@ public sealed class ArtifactInventoryRepository
     /// actually need.
     /// </summary>
     public async Task<IReadOnlyList<PackageVersion>> ListServeableVersionsAsync(
-        string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct = default)
+        string orgId, string packageId, string ecosystem, string purlName, bool includeShadowed = false,
+        CancellationToken ct = default)
     {
         var uploadedVersions = await _packages.GetVersionsAsync(packageId, ct);
         var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, purlName, ct);
@@ -73,7 +83,7 @@ public sealed class ArtifactInventoryRepository
 
         var uploadedVersionSet = uploadedVersions
             .Select(v => v.Version)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .ToHashSet(VersionIdentity.Comparer(ecosystem));
 
         // Loaded once for the whole page: the synthetic rows carry IsMalicious from these.
         var proxyIds = proxyEntries.Select(e => e.Id).ToList();
@@ -82,8 +92,13 @@ public sealed class ArtifactInventoryRepository
             : new Dictionary<string, VulnGateSignals>();
 
         var synthetic = proxyEntries
-            .Where(e => !uploadedVersionSet.Contains(e.Version))
-            .Select(e => e.ToPackageVersionSynthetic(proxySignals))
+            .Where(e => includeShadowed || !uploadedVersionSet.Contains(e.Version))
+            .Select(e =>
+            {
+                var version = e.ToPackageVersionSynthetic(proxySignals);
+                version.PackageId = packageId;
+                return version;
+            })
             .ToList();
 
         if (synthetic.Count == 0)
@@ -157,7 +172,7 @@ public sealed class ArtifactInventoryRepository
     {
         bool hasDuplicateProxyVersion = versions
             .Where(v => v.Origin == "proxy")
-            .GroupBy(v => v.Version, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(v => v.Version, VersionIdentity.Comparer("nuget"))
             .Any(g => g.Count() > 1);
         if (!hasDuplicateProxyVersion)
         {
@@ -168,7 +183,7 @@ public sealed class ArtifactInventoryRepository
         result.AddRange(versions.Where(v => v.Origin != "proxy"));
         result.AddRange(versions
             .Where(v => v.Origin == "proxy")
-            .GroupBy(v => v.Version, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(v => v.Version, VersionIdentity.Comparer("nuget"))
             .Select(PreferNupkgRow));
         return result;
     }

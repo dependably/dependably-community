@@ -79,30 +79,42 @@ public sealed class InstanceLockTests : IAsyncLifetime
             new { hb = heartbeat.UtcDateTime.ToUtcIso() });
     }
 
-    // Drives a pending acquisition that is waiting out a fresh foreign holder: steps the fake clock
-    // forward (which fires the wait loop's poll timer) and optionally beats the foreign heartbeat in
-    // between, since a beating holder is exactly what tells a live peer from an orphaned row. Gives
-    // each step a moment of real time for the loop's continuation to read the row, and stops as soon
-    // as the acquisition settles.
-    private static async Task DriveAsync(
+    // Drives a pending acquisition that is waiting out a fresh foreign holder, one poll at a time:
+    // waits until the wait loop has armed its next poll timer, optionally beats the foreign
+    // heartbeat (a live peer's refresh tick, which is what tells it from an orphaned row), then
+    // advances the fake clock by exactly one poll interval so that timer fires. Advancing only once
+    // a timer is armed means no advance is ever lost to a loop that had not reached its wait yet,
+    // however slowly the host schedules it. Returns the number of polls fired before the
+    // acquisition settled.
+    private static async Task<int> DriveAsync(
         Task acquisition,
-        FakeTimeProvider clock,
+        TimerSignallingClock clock,
+        TimeSpan pollInterval,
         Func<Task>? beat = null,
-        int maxSteps = 40)
+        int maxPolls = 40)
     {
-        for (int step = 0; step < maxSteps && !acquisition.IsCompleted; step++)
+        int polls = 0;
+        while (polls < maxPolls)
         {
-            clock.Advance(TimeSpan.FromSeconds(5));
+            // A guard against a hung loop, not a measurement: an armed timer or a settled
+            // acquisition normally arrives within milliseconds.
+            var armed = clock.NextTimerArmedAsync().WaitAsync(TimeSpan.FromMinutes(1));
+            if (await Task.WhenAny(acquisition, armed) == acquisition)
+            {
+                break;
+            }
+
+            await armed;
             if (beat is not null)
             {
                 await beat();
             }
 
-            for (int spin = 0; spin < 10 && !acquisition.IsCompleted; spin++)
-            {
-                await Task.Delay(2);
-            }
+            clock.Advance(pollInterval);
+            polls++;
         }
+
+        return polls;
     }
 
     [Fact]
@@ -121,17 +133,19 @@ public sealed class InstanceLockTests : IAsyncLifetime
     [Fact]
     public async Task Acquire_WhenForeignHeartbeatFreshAndBeating_ThrowsNamingTheLivePeer()
     {
-        var clock = TestTime.Frozen();
+        var clock = new TimerSignallingClock(TestTime.KnownNow);
         // Foreign heartbeat 30s ago, well inside the 90s window.
         await SeedForeignHolderAsync("foreign-instance-abc", clock.GetUtcNow().AddSeconds(-30));
 
         var guard = NewLock(clock, staleSeconds: 90);
         var acquisition = guard.TryAcquireAsync();
 
-        // The holder keeps beating as the clock advances: it is live, and this node must refuse.
-        await DriveAsync(acquisition, clock, beat: () => BeatForeignHolderAsync(clock.GetUtcNow()));
+        // The holder beats before the first poll: it is live, and this node refuses on that poll.
+        int polls = await DriveAsync(
+            acquisition, clock, guard.PollInterval, beat: () => BeatForeignHolderAsync(clock.GetUtcNow()));
 
         Assert.True(acquisition.IsCompleted, "acquisition never settled while the peer was beating");
+        Assert.Equal(1, polls);
         var ex = await Assert.ThrowsAsync<InstanceLockHeldException>(() => acquisition);
         Assert.Contains("foreign-instance-abc", ex.Message, StringComparison.Ordinal);
         Assert.Contains("other-host", ex.Message, StringComparison.Ordinal);
@@ -144,21 +158,28 @@ public sealed class InstanceLockTests : IAsyncLifetime
     [Fact]
     public async Task Acquire_WhenForeignHeartbeatFreshButFrozen_WaitsOutTheWindowAndTakesOver()
     {
-        var clock = TestTime.Frozen();
+        var clock = new TimerSignallingClock(TestTime.KnownNow);
+        var start = clock.GetUtcNow();
         // The redeploy case: the predecessor was SIGKILLed 10s ago, so its heartbeat is still well
         // inside the 90s window but nothing is beating it. Failing fast here is what crash-loops a
         // replacement container for the whole window.
-        await SeedForeignHolderAsync("killed-predecessor", clock.GetUtcNow().AddSeconds(-10));
+        await SeedForeignHolderAsync("killed-predecessor", start.AddSeconds(-10));
 
         var guard = NewLock(clock, staleSeconds: 90);
         var acquisition = guard.TryAcquireAsync();
 
-        await DriveAsync(acquisition, clock);
+        int polls = await DriveAsync(acquisition, clock, guard.PollInterval);
 
         Assert.True(acquisition.IsCompleted, "acquisition never settled against a frozen heartbeat");
         await acquisition; // must not throw
         var row = await ReadRowAsync();
         Assert.Equal(guard.InstanceId, row!.Value.InstanceId);
+
+        // The heartbeat reaches the 90s window 80s into the wait. With a 5s poll that is the 16th
+        // poll: the lock is taken over on the first poll that sees it stale, not before, not later.
+        Assert.Equal(TimeSpan.FromSeconds(5), guard.PollInterval);
+        Assert.Equal(16, polls);
+        Assert.Equal(start.AddSeconds(80), clock.GetUtcNow());
     }
 
     [Fact]

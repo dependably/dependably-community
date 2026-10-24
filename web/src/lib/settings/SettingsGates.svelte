@@ -50,6 +50,11 @@
   $: if (settings && !settings.versionOverwritePolicy) {
     settings.versionOverwritePolicy = 'block'
   }
+
+  // The server refuses a move off 'off' until the instance scans images and this org's scanner
+  // has called the scan API at least once; a stored non-off value stays selectable so it can be
+  // turned back off.
+  $: ociScanUsable = proxySettings.oci_scan_enabled && !!proxySettings.oci_scanner_last_seen_at
 </script>
 
 <div class="card card-narrow">
@@ -126,6 +131,23 @@
       <option value="block">{$t('settings.proxy.blockSsvcExploitationBlock')}</option>
     </select>
   </div>
+  <div class="form-row">
+    <label class="label-row" for="oci-scan-enforcement">{$t('settings.proxy.ociScanEnforcement')} <InfoTip text={$t('settings.proxy.ociScanEnforcementHint')} /></label>
+    <select
+      id="oci-scan-enforcement"
+      bind:value={proxySettings.oci_scan_enforcement}
+      disabled={!ociScanUsable && proxySettings.oci_scan_enforcement === 'off'}
+    >
+      <option value="off">{$t('settings.proxy.ociScanEnforcementOff')}</option>
+      <option value="warn">{$t('settings.proxy.ociScanEnforcementWarn')}</option>
+      <option value="block">{$t('settings.proxy.ociScanEnforcementBlock')}</option>
+    </select>
+  </div>
+  {#if !proxySettings.oci_scan_enabled}
+    <p class="form-hint">{$t('settings.proxy.ociScanEnforcementDisabled')}</p>
+  {:else if !proxySettings.oci_scanner_last_seen_at}
+    <p class="form-hint">{$t('settings.proxy.ociScanEnforcementNoScanner')}</p>
+  {/if}
   <div class="form-row">
     <label class="label-row">{$t('settings.proxy.osvTolerance')} <InfoTip text={$t('settings.proxy.osvToleranceHint')} /></label>
     <input

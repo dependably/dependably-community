@@ -79,6 +79,11 @@ public sealed partial class OciUpstreamResolver
     private readonly OciReferenceGraph _referenceGraph;
     private readonly CacheAccessRecorder _cacheRecorder;
     private readonly CacheArtifactRepository _cacheArtifacts;
+    private readonly Dependably.Infrastructure.OciScan.OciScanEnqueuer? _scanEnqueuer;
+    private readonly OciPullGateResolver? _pullGate;
+    private readonly OrgRepository _orgs;
+    private readonly QuarantineRepository _quarantine;
+    private readonly Dependably.Infrastructure.Edge.EdgeOciScanPostureStore? _edgePostures;
     private readonly ILogger<OciUpstreamResolver> _logger;
     private readonly TimeProvider _time;
 
@@ -159,7 +164,18 @@ public sealed partial class OciUpstreamResolver
         CacheArtifactRepository cacheArtifacts,
         ILogger<OciUpstreamResolver> logger,
         TimeProvider time,
-        Dependably.Infrastructure.Identity.EnvelopeProtector envelope)
+        Dependably.Infrastructure.Identity.EnvelopeProtector envelope,
+        // Queues a pulled image for the pulling org's scanner; absent where scanning is not wired.
+        Dependably.Infrastructure.OciScan.OciScanEnqueuer? scanEnqueuer = null,
+        // The OCI pull gate's facts read, which the moving-tag promotion gate consults under scan
+        // enforcement; absent where scanning is not wired, which leaves promotion age-only.
+        OciPullGateResolver? pullGate = null,
+        // On an edge node: records the OCI scan posture the master reports on manifest responses.
+        // Absent (every non-edge deployment) records nothing.
+        Dependably.Infrastructure.Edge.EdgeOciScanPostureStore? edgePostures = null,
+        IEdgeMode? edge = null,
+        OrgRepository? orgs = null,
+        QuarantineRepository? quarantine = null)
     {
         _http = http;
         _auth = auth;
@@ -180,6 +196,12 @@ public sealed partial class OciUpstreamResolver
         _cacheArtifacts = cacheArtifacts;
         _logger = logger;
         _time = time;
+        _scanEnqueuer = scanEnqueuer;
+        _pullGate = pullGate;
+        // DI supplies the singletons (cached settings read); a hand-built resolver gets uncached ones.
+        _orgs = orgs ?? new OrgRepository(db);
+        _quarantine = quarantine ?? new QuarantineRepository(db, time);
+        _edgePostures = edge?.IsEdge == true ? edgePostures : null;
     }
 
     /// <summary>
@@ -215,6 +237,34 @@ public sealed partial class OciUpstreamResolver
     }
 
     /// <summary>
+    /// True when nothing may be fetched from an upstream for <paramref name="orgId"/>: the
+    /// instance is air-gapped, or the org's proxy passthrough is off or the org is air-gapped
+    /// (<see cref="OrgSettings.ProxyPassthroughEffective"/>, which carries both). An org with no
+    /// settings row keeps the default, passthrough on, as on every other proxied ecosystem.
+    /// </summary>
+    public async Task<bool> IsUpstreamOffAsync(string orgId, CancellationToken ct) =>
+        _airGap.IsEnabled
+        || await _orgs.GetSettingsAsync(orgId, ct) is { ProxyPassthroughEffective: false };
+
+    // Each public fetch except the edge's through-master reads calls this first, before routing,
+    // the token exchange or any request, so an org with upstream fetching off never sends a
+    // repository name anywhere. An edge's own org_settings are not the master's. The instance
+    // switch keeps AirGappedException and the answers built on it; the org posture raises its
+    // own exception so the answer names the org setting rather than AIR_GAPPED.
+    private async Task ThrowIfUpstreamOffAsync(string orgId, string resource, CancellationToken ct)
+    {
+        if (_airGap.IsEnabled)
+        {
+            throw new AirGappedException(resource);
+        }
+
+        if (await _orgs.GetSettingsAsync(orgId, ct) is { ProxyPassthroughEffective: false })
+        {
+            throw new OciPassthroughOffException(resource);
+        }
+    }
+
+    /// <summary>
     /// Whether an upstream declaring <paramref name="prefixes"/> claims
     /// <paramref name="repository"/>. An empty-string prefix is the catch-all.
     /// </summary>
@@ -235,7 +285,8 @@ public sealed partial class OciUpstreamResolver
     /// Checks the local cache first (same TTL logic as <see cref="FetchManifestAsync"/>).
     /// Falls back to an upstream HEAD on a cache-miss. Returns <c>null</c> when no upstream
     /// matches, the upstream returns 404, or the upstream does not supply the required headers.
-    /// Throws <see cref="AirGappedException"/> in air-gap mode.
+    /// Throws <see cref="AirGappedException"/> in air-gap mode, and
+    /// <see cref="OciPassthroughOffException"/> when the org has upstream fetching off.
     /// </summary>
     public async Task<OciManifestMetadata?> FetchManifestMetadataAsync(
         string orgId,
@@ -244,10 +295,7 @@ public sealed partial class OciUpstreamResolver
         bool isDigest,
         CancellationToken ct)
     {
-        if (_airGap.IsEnabled)
-        {
-            throw new AirGappedException($"oci-manifest::{repository}/{reference}");
-        }
+        await ThrowIfUpstreamOffAsync(orgId, $"oci-manifest::{repository}/{reference}", ct);
 
         // Check the local cache before hitting upstream — a cached manifest already has
         // all the metadata we need without any network round-trip.
@@ -317,7 +365,8 @@ public sealed partial class OciUpstreamResolver
         }
 
         int? minAgeHours = await GetMinReleaseAgeHoursAsync(orgId, ct);
-        if (IsPromotionAllowed(row, observedDigest, minAgeHours))
+        if (IsPromotionAllowed(row, observedDigest, minAgeHours)
+            && await IsScanPromotionAllowedAsync(orgId, repository, observedDigest, ct))
         {
             // Promotable, but a HEAD cannot repoint. Record the pending observation WITHOUT
             // refreshing the stamp, so the next GET-by-tag revalidates, fetches the body, and
@@ -330,6 +379,7 @@ public sealed partial class OciUpstreamResolver
         // Held by the promotion gate: the tag still resolves to the accepted digest, on HEAD
         // exactly as it would on GET — a probing client must not be told the tag moved.
         await HoldPendingDigestAsync(orgId, repository, tag, observedDigest, refreshStamp: true, ct);
+        await AcquireHeldDigestAsync(upstream, orgId, repository, observedDigest, ct);
         return await TryGetCachedManifestMetadataByDigestAsync(orgId, row.Digest, ct)
             ?? await FetchManifestMetadataFromUpstreamAsync(orgId, upstream, repository, row.Digest, ct);
     }
@@ -420,7 +470,8 @@ public sealed partial class OciUpstreamResolver
     /// is refreshed.
     ///
     /// Returns null when no upstream matches or the upstream returns 404.
-    /// Throws <see cref="AirGappedException"/> in air-gap mode.
+    /// Throws <see cref="AirGappedException"/> in air-gap mode, and
+    /// <see cref="OciPassthroughOffException"/> when the org has upstream fetching off.
     /// </summary>
     public async Task<OciManifestResult?> FetchManifestAsync(
         string orgId,
@@ -429,10 +480,7 @@ public sealed partial class OciUpstreamResolver
         bool isDigest,
         CancellationToken ct)
     {
-        if (_airGap.IsEnabled)
-        {
-            throw new AirGappedException($"oci-manifest::{repository}/{reference}");
-        }
+        await ThrowIfUpstreamOffAsync(orgId, $"oci-manifest::{repository}/{reference}", ct);
 
         // For digest references, the cache is authoritative (content-addressed).
         if (isDigest)
@@ -474,18 +522,19 @@ public sealed partial class OciUpstreamResolver
     /// type from the upstream response headers when the blob exists, or <c>null</c> when
     /// no upstream matches or the upstream returns 404.
     /// Used by the blob HEAD handler on a cache-miss to avoid downloading the full layer blob.
-    /// Throws <see cref="AirGappedException"/> in air-gap mode.
+    /// Throws <see cref="AirGappedException"/> in air-gap mode, and
+    /// <see cref="OciPassthroughOffException"/> when the org has upstream fetching off.
+    /// <paramref name="throughMaster"/> skips the org's cached answer, for an edge whose master
+    /// must decide a held manifest.
     /// </summary>
     public async Task<OciBlobMetadata?> FetchBlobMetadataAsync(
         string orgId,
         string repository,
         string digest,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool throughMaster = false)
     {
-        if (_airGap.IsEnabled)
-        {
-            throw new AirGappedException($"oci-blob::{repository}/{digest}");
-        }
+        await ThrowIfUpstreamOffAsync(orgId, $"oci-blob::{repository}/{digest}", ct);
 
         string[] parts = digest.Split(':', DigestSplitParts);
         if (parts.Length != 2)
@@ -499,7 +548,7 @@ public sealed partial class OciUpstreamResolver
         // existence oracle over org-agnostic storage. Scoping to (digest, org_id) confines the
         // answer to blobs the caller's own org has actually fetched; anything else falls through
         // to a real, org-scoped upstream HEAD.
-        var cached = await TryGetCachedBlobMetadataByDigestAsync(orgId, digest, ct);
+        var cached = throughMaster ? null : await TryGetCachedBlobMetadataByDigestAsync(orgId, digest, ct);
         if (cached is not null)
         {
             return cached;
@@ -539,7 +588,7 @@ public sealed partial class OciUpstreamResolver
         }
 
         string mediaType = resp.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-        return new OciBlobMetadata(mediaType);
+        return new OciBlobMetadata(mediaType, resp.Content.Headers.ContentLength);
     }
 
     // Returns blob HEAD metadata only when the org owns an oci_blobs row for the digest AND the
@@ -587,20 +636,23 @@ public sealed partial class OciUpstreamResolver
     /// already in flight cannot be mirrored (the bytes are past), so it waits and is served from
     /// the cache exactly as before; its sink is never touched.
     ///
+    /// <paramref name="throughMaster"/> skips the shared-store hit and fetches from upstream, for
+    /// an edge reading manifest bytes through its master's pull gate: the master decides, not the
+    /// edge's warm copy.
+    ///
     /// Returns null when no upstream matches or the upstream returns 404.
-    /// Throws <see cref="AirGappedException"/> in air-gap mode.
+    /// Throws <see cref="AirGappedException"/> in air-gap mode, and
+    /// <see cref="OciPassthroughOffException"/> when the org has upstream fetching off.
     /// </summary>
     public async Task<OciBlobServeResult?> FetchBlobAsync(
         string orgId,
         string repository,
         string digest,
         CancellationToken ct,
-        OciBlobStreamSink? sink = null)
+        OciBlobStreamSink? sink = null,
+        bool throughMaster = false)
     {
-        if (_airGap.IsEnabled)
-        {
-            throw new AirGappedException($"oci-blob::{repository}/{digest}");
-        }
+        await ThrowIfUpstreamOffAsync(orgId, $"oci-blob::{repository}/{digest}", ct);
 
         string[] parts = digest.Split(':', DigestSplitParts);
         if (parts.Length != 2)
@@ -622,7 +674,7 @@ public sealed partial class OciUpstreamResolver
         // caching, rather than trusting that any configured upstream proves entitlement). That
         // fallthrough is a real fetch even under concurrency: the single-flight entry below is
         // keyed per org, so it can never be satisfied by another org's in-flight pull.
-        var existing = await _blobs.Cache.GetAsync(blobKey, ct);
+        var existing = throughMaster ? null : await _blobs.Cache.GetAsync(blobKey, ct);
         if (existing is not null)
         {
             if (await CanServeSharedBlobAsync(orgId, digest, ct))
@@ -729,14 +781,12 @@ public sealed partial class OciUpstreamResolver
     /// Returns the list of tags for <paramref name="repository"/> from upstream.
     /// Returns null when no upstream matches, the upstream returns 404, or the response is
     /// malformed.
-    /// Throws <see cref="AirGappedException"/> in air-gap mode.
+    /// Throws <see cref="AirGappedException"/> in air-gap mode, and
+    /// <see cref="OciPassthroughOffException"/> when the org has upstream fetching off.
     /// </summary>
     public async Task<List<string>?> FetchTagsAsync(string orgId, string repository, CancellationToken ct)
     {
-        if (_airGap.IsEnabled)
-        {
-            throw new AirGappedException($"oci-tags::{repository}");
-        }
+        await ThrowIfUpstreamOffAsync(orgId, $"oci-tags::{repository}", ct);
 
         var upstream = await MatchUpstreamAsync(orgId, repository, ct);
         if (upstream is null)
@@ -809,6 +859,7 @@ public sealed partial class OciUpstreamResolver
             }
 
             var resp = await client.SendAsync(req, completionOption, ct);
+            await ObserveMasterVerdictAsync(_edgePostures, orgId, resp, ct);
 
             if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == UpstreamFirstAttempt)
             {
@@ -843,6 +894,59 @@ public sealed partial class OciUpstreamResolver
         }
 
         return new UpstreamSendResult(UpstreamSendStatus.NotFound, null, null);
+    }
+
+    /// <summary>
+    /// On an edge node, reads the master's OCI pull-gate answer off an upstream response. A
+    /// response records the org's posture only when it states one in
+    /// <see cref="Dependably.Infrastructure.Edge.EdgeOciScanPostureStore.Header"/>; a response
+    /// without the header (a master that predates it) says nothing about the org, manifest
+    /// responses included, so the edge never reads silence as <c>off</c>. A refusal naming its arm (<see cref="Dependably.Api.BlockRefusalResult.ReasonHeader"/>) is raised
+    /// as <see cref="OciUpstreamRefusedException"/>, so the edge answers with the master's verdict
+    /// rather than reading the refusal as a miss. A no-op everywhere but an edge.
+    /// </summary>
+    internal static async Task ObserveMasterVerdictAsync(
+        Dependably.Infrastructure.Edge.EdgeOciScanPostureStore? edgePostures,
+        string orgId, HttpResponseMessage resp, CancellationToken ct)
+    {
+        if (edgePostures is null)
+        {
+            return;
+        }
+
+        if (resp.Headers.TryGetValues(Dependably.Infrastructure.Edge.EdgeOciScanPostureStore.Header, out var values)
+            && values.FirstOrDefault() is { } posture)
+        {
+            await edgePostures.RecordAsync(orgId, posture, ct);
+        }
+
+        if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden
+            && resp.Headers.TryGetValues(Dependably.Api.BlockRefusalResult.ReasonHeader, out var reasons)
+            && reasons.FirstOrDefault() is { Length: > 0 } reason)
+        {
+            resp.Dispose();
+            throw new OciUpstreamRefusedException(reason);
+        }
+    }
+
+    /// <summary>
+    /// On an edge node, a manifest fetched straight from the master with no local cache consulted,
+    /// so the master's pull gate decides it: used for every manifest of an org whose master
+    /// posture is not <c>off</c>. The bytes are cached as on any fetch, but never answered from.
+    /// </summary>
+    public async Task<OciManifestResult?> FetchManifestThroughMasterAsync(
+        string orgId, string repository, string reference, CancellationToken ct)
+    {
+        var upstream = await MatchUpstreamAsync(orgId, repository, ct);
+        return upstream is null ? null : await FetchAndCacheManifestAsync(upstream, orgId, repository, reference, ct);
+    }
+
+    /// <summary>The HEAD form of <see cref="FetchManifestThroughMasterAsync"/>.</summary>
+    public async Task<OciManifestMetadata?> FetchManifestMetadataThroughMasterAsync(
+        string orgId, string repository, string reference, CancellationToken ct)
+    {
+        var upstream = await MatchUpstreamAsync(orgId, repository, ct);
+        return upstream is null ? null : await FetchManifestMetadataFromUpstreamAsync(orgId, upstream, repository, reference, ct);
     }
 
     // Boundary wrapper over SendUpstreamCoreAsync: Success returns the response (caller owns
@@ -996,6 +1100,38 @@ public sealed class OciUpstreamUnavailableException : Exception
     public System.Net.HttpStatusCode? UpstreamStatus { get; }
 }
 
+/// <summary>
+/// The org has upstream fetching off — proxy passthrough disabled, or the org air-gapped — so the
+/// resolver refused before contacting any upstream. The controller answers it as a local miss
+/// (404, or a local-only tag list), the same way it answers the instance <c>AIR_GAPPED</c>
+/// switch: the content will not appear however long the client waits.
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Not binary-serialized across AppDomain boundaries.")]
+public sealed class OciPassthroughOffException : Exception
+{
+    public OciPassthroughOffException(string resource)
+        : base($"Upstream fetch refused: proxy passthrough is off for this organization (resource: {resource}).")
+        => Resource = resource;
+
+    public string Resource { get; }
+}
+
+/// <summary>
+/// An edge node's master refused the request by policy and named the arm. Raised only on an edge,
+/// so the edge answers with the master's verdict (403, the same reason) instead of a miss.
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Not binary-serialized across AppDomain boundaries.")]
+public sealed class OciUpstreamRefusedException : Exception
+{
+    public OciUpstreamRefusedException(string reason)
+        : base($"The master refused the request by policy ({reason}).") => Reason = reason;
+
+    /// <summary>The master's <c>X-Dependably-Block-Reason</c> token.</summary>
+    public string Reason { get; }
+}
+
 /// <summary>Resolved manifest with its content stream, media type, digest, and byte count.</summary>
 public sealed record OciManifestResult(Stream Content, string MediaType, string Digest, long SizeBytes);
 
@@ -1034,7 +1170,16 @@ public sealed record OciBlobResult(Stream Content, string MediaType);
 public sealed record OciBlobStreamSink(
     Func<string, long?, CancellationToken, Task<Stream>> BeginAsync,
     Func<Task> AbortAsync,
-    Action AllowSynchronousWrites);
+    Action AllowSynchronousWrites)
+{
+    /// <summary>
+    /// Whether to mirror a blob of the given upstream media type and declared length (null when
+    /// none was declared) at all. Null mirrors everything. A declined blob is cached exactly as
+    /// before and returned to the caller unstreamed, so the caller can decide on the bytes before
+    /// any of them is sent.
+    /// </summary>
+    public Func<string, long?, bool>? Mirrors { get; init; }
+}
 
 /// <summary>
 /// How a blob pull was answered. <see cref="Streamed"/> means the bytes already went to the
@@ -1048,12 +1193,14 @@ public sealed record OciBlobServeResult(OciBlobResult? Blob, bool Streamed)
 }
 
 /// <summary>
-/// Blob header metadata returned by a HEAD-only upstream fetch: media type only.
-/// The digest and size are already known from the request (digest is the request parameter;
-/// size is not needed for OCI blob HEAD — <c>Content-Length</c> is set from the DB row or
-/// omitted on a cache-miss HEAD where the blob has not yet been fetched).
+/// Blob header metadata returned by a HEAD-only fetch: the media type, and the size the upstream
+/// declared in <c>Content-Length</c>. The digest is the request parameter. Under scan enforcement
+/// the size decides whether a blob-route HEAD miss downloads the blob to check whether it is a
+/// manifest: one declared larger than a manifest may be keeps the headers-only answer. The answer
+/// built from this org's own cached row carries no size, and an unknown size always fetches, so a
+/// missing size can only make the HEAD more careful, never skip the check.
 /// </summary>
-public sealed record OciBlobMetadata(string MediaType);
+public sealed record OciBlobMetadata(string MediaType, long? SizeBytes = null);
 
 /// <summary>
 /// Metadata returned by the single-flight blob fetch work item (<c>_blobInflight</c>).

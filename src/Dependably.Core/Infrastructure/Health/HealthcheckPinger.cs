@@ -132,7 +132,7 @@ public sealed class HealthcheckPinger : BackgroundService
     private async Task PingOnceAsync(CancellationToken ct)
     {
         // Air-gap gate: the heartbeat is an outbound request, so suppress it when the instance
-        // is air-gapped (AIR_GAPPED) or this job is named in DISABLE_BACKGROUND_JOBS.
+        // is air-gapped (AIR_GAPPED) or DISABLE_BACKGROUND_JOBS is true or names this job.
         if (_airGap.IsJobDisabled("healthcheck-pinger"))
         {
             return;

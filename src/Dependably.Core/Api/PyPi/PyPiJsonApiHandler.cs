@@ -12,7 +12,7 @@ namespace Dependably.Api.PyPiProtocol;
 /// Handles GET /pypi/{package}/json and GET /pypi/{package}/{version}/json — the PyPI JSON API
 /// endpoints. Synthesizes a local JSON document for packages with any locally-known versions
 /// (uploaded or global-plane proxy cached), or proxies the upstream document verbatim when
-/// no local versions are known.
+/// no local versions are known and the name is neither claimed local-only nor operator-reserved.
 /// </summary>
 public sealed class PyPiJsonApiHandler(
     OrgRepository orgs,
@@ -21,6 +21,7 @@ public sealed class PyPiJsonApiHandler(
     TokenRepository tokens,
     UpstreamClient upstream,
     ClaimResolver claimResolver,
+    ReservedNamespaceService reserved,
     UpstreamRegistryResolver registries)
 {
     // Serializer options for synthesized PyPI JSON documents — created once and reused so
@@ -55,8 +56,10 @@ public sealed class PyPiJsonApiHandler(
 
         var pkg = await packages.GetByPurlNameAsync(orgId, "pypi", purlName, ct);
 
-        // Determine whether passthrough to upstream is available.
+        // Determine whether passthrough to upstream is available. A reserved name never
+        // consults upstream; locally-known versions under it are still served below.
         bool passthroughAllowed = settings!.ProxyPassthroughEffective
+            && !await reserved.IsReservedAsync(orgId, "pypi", purlName, ct)
             && await claimResolver.IsProxyFetchAllowedAsync(orgId, "pypi", purlName, ct);
 
         // Collect all locally-known versions: uploaded (package_versions) + global-plane proxy
@@ -192,13 +195,19 @@ public sealed class PyPiJsonApiHandler(
     // Picks the version surfaced in `info` and `urls`: the requested version when one is
     // named, otherwise the latest non-yanked version by creation order (first version when
     // all are yanked). Null when nothing matches.
-    private static PackageVersion? SelectInfoVersion(
+    public static PackageVersion? SelectInfoVersion(
         IReadOnlyList<PackageVersion> versions, string? requestedVersion)
     {
-        return requestedVersion is not null
-            ? versions.FirstOrDefault(v =>
-                string.Equals(v.Version, requestedVersion, StringComparison.OrdinalIgnoreCase))
-            : versions.FirstOrDefault(v => !v.Yanked) ?? (versions.Count > 0 ? versions[0] : null);
+        if (requestedVersion is null)
+        {
+            return versions.FirstOrDefault(v => !v.Yanked) ?? (versions.Count > 0 ? versions[0] : null);
+        }
+
+        // The exact spelling wins: two spellings of one release can be separate rows, and the
+        // document for one must not describe the other. A spelling with no exact row still
+        // resolves through the ecosystem's version identity.
+        return versions.FirstOrDefault(v => v.Version == requestedVersion)
+            ?? versions.FirstOrDefault(v => VersionIdentity.Equal("pypi", v.Version, requestedVersion));
     }
 
     // Combines uploaded (package_versions) and global-plane proxy (cache_artifact) versions
@@ -208,7 +217,7 @@ public sealed class PyPiJsonApiHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string purlName, CancellationToken ct)
     {
-        return await inventory.ListServeableVersionsAsync(orgId, packageId, "pypi", purlName, ct);
+        return await inventory.ListServeableVersionsAsync(orgId, packageId, "pypi", purlName, ct: ct);
     }
 
     /// <summary>

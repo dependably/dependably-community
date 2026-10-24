@@ -1855,6 +1855,12 @@
         <target>révoquée</target>
       </segment>
     </unit>
+    <unit id="dashboard.gates.unscanned">
+      <segment state="translated">
+        <source>unscanned</source>
+        <target>non analysée</target>
+      </segment>
+    </unit>
     <unit id="dashboard.gates.vuln_score">
       <segment state="translated">
         <source>vuln score</source>
@@ -2611,6 +2617,12 @@
         <target>{registry} n&apos;a pas {name} en version {version}.</target>
       </segment>
     </unit>
+    <unit id="lookup.reserved">
+      <segment state="translated">
+        <source>Reserved name — your organization keeps this name for its own packages, so upstream metadata was not checked; the verdict rests on advisories and licence policy only.</source>
+        <target>Nom réservé — votre organisation garde ce nom pour ses propres paquets : les métadonnées en amont n&apos;ont donc pas été vérifiées; le verdict repose uniquement sur les avis et la politique de licences.</target>
+      </segment>
+    </unit>
     <unit id="lookup.title">
       <segment state="translated">
         <source>Check a package</source>
@@ -3073,6 +3085,48 @@
         <target>Aucune vulnérabilité connue</target>
       </segment>
     </unit>
+    <unit id="packages.vulns.ociFindings">
+      <segment state="translated">
+        <source>{count, plural, one {# vulnerability} other {# vulnerabilities}} found by the image scan</source>
+        <target>{count, plural, one {# vulnérabilité trouvée} other {# vulnérabilités trouvées}} par l&apos;analyse de l&apos;image</target>
+      </segment>
+    </unit>
+    <unit id="packages.vulns.ociNoFeed">
+      <segment state="translated">
+        <source>No scanner</source>
+        <target>Aucun analyseur</target>
+      </segment>
+    </unit>
+    <unit id="packages.vulns.ociNoFeedHelp">
+      <segment state="translated">
+        <source>No image scanner is running for this organization, so its images have not been checked for vulnerabilities. They are not known to be clean.</source>
+        <target>Aucun analyseur d&apos;images n&apos;est actif pour cette organisation; ses images n&apos;ont donc pas été vérifiées quant aux vulnérabilités. Elles ne sont pas réputées saines.</target>
+      </segment>
+    </unit>
+    <unit id="packages.vulns.ociPartial">
+      <segment state="translated">
+        <source>Partial scan</source>
+        <target>Analyse partielle</target>
+      </segment>
+    </unit>
+    <unit id="packages.vulns.ociPartialHelp">
+      <segment state="translated">
+        <source>Scanned, but part of an image was not checked. It is not known to be clean.</source>
+        <target>Analysée, mais une partie d&apos;une image n&apos;a pas été vérifiée. Elle n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="packages.vulns.ociUnscanned">
+      <segment state="translated">
+        <source>Not scanned</source>
+        <target>Non analysée</target>
+      </segment>
+    </unit>
+    <unit id="packages.vulns.ociUnscannedHelp">
+      <segment state="translated">
+        <source>An image has not been scanned yet. It is not known to be clean.</source>
+        <target>Une image n&apos;a pas encore été analysée. Elle n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
     <unit id="password.containsContext">
       <segment state="translated">
         <source>Don&apos;t include &quot;{term}&quot; in your password.</source>
@@ -3219,8 +3273,8 @@
     </unit>
     <unit id="policies.controls.license.what">
       <segment state="translated">
-        <source>Enforces your approved-licence policy: refuses components whose declared licence is blocked, or missing where the ecosystem always declares one.</source>
-        <target>Applique votre politique de licences approuvées : refuse les composants dont la licence déclarée est bloquée, ou absente pour un écosystème qui en déclare toujours une.</target>
+        <source>Enforces your licence policy. In Block mode it refuses components whose declared licence is blocklisted, is not on your allowlist, or is missing where the ecosystem always declares one.</source>
+        <target>Applique votre politique de licences. En mode Bloquer, refuse les composants dont la licence déclarée figure sur la liste de blocage, ne figure pas sur la liste d&apos;autorisation, ou est absente pour un écosystème qui en déclare toujours une.</target>
       </segment>
     </unit>
     <unit id="policies.controls.malicious_live.name">
@@ -3293,6 +3347,18 @@
       <segment state="translated">
         <source>Refuses components whose vulnerability is assessed as under active exploitation. Covers more than the known-exploited list. Requires the vulnerability tracker.</source>
         <target>Refuse les composants dont la vulnérabilité est évaluée comme activement exploitée. Couvre davantage que la liste des vulnérabilités exploitées connues. Nécessite le suivi des vulnérabilités.</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.unscanned.name">
+      <segment state="translated">
+        <source>Unscanned OCI images</source>
+        <target>Images OCI non analysées</target>
+      </segment>
+    </unit>
+    <unit id="policies.controls.unscanned.what">
+      <segment state="translated">
+        <source>Refuses an OCI image this organization holds no complete scan result for, and applies the vulnerability controls above to images using the organization&apos;s own scan. Requires image scanning on this instance.</source>
+        <target>Refuse une image OCI pour laquelle cette organisation ne détient aucun résultat d&apos;analyse complet, et applique aux images les contrôles de vulnérabilité ci-dessus à partir de l&apos;analyse propre à l&apos;organisation. Nécessite l&apos;analyse des images sur cette instance.</target>
       </segment>
     </unit>
     <unit id="policies.controls.vuln_score.name">
@@ -4475,6 +4541,12 @@
       <segment state="translated">
         <source>revoked</source>
         <target>révoquée</target>
+      </segment>
+    </unit>
+    <unit id="quarantine.gates.unscanned">
+      <segment state="translated">
+        <source>unscanned</source>
+        <target>non analysée</target>
       </segment>
     </unit>
     <unit id="quarantine.gates.vuln_score">
@@ -7987,8 +8059,8 @@
     </unit>
     <unit id="settings.licenses.allow.empty">
       <segment state="translated">
-        <source>No allowed licences configured. When the allowlist is empty, only the blocklist applies.</source>
-        <target>Aucune licence autorisée configurée. Lorsque la liste d&apos;autorisation est vide, seule la liste de blocage s&apos;applique.</target>
+        <source>No allowed licences configured. In Block mode, an empty allowlist refuses every licence. Off and Warn ignore the allowlist.</source>
+        <target>Aucune licence autorisée configurée. En mode Bloquer, une liste d&apos;autorisation vide refuse toutes les licences; les modes Désactivé et Avertir l&apos;ignorent.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.allow.title">
@@ -8149,8 +8221,8 @@
     </unit>
     <unit id="settings.licenses.mode.block.hint">
       <segment state="translated">
-        <source>Versions whose licence violates this policy are blocked at download.</source>
-        <target>Les versions dont la licence enfreint cette politique sont bloquées au téléchargement.</target>
+        <source>Versions whose licence is blocklisted or not on the allowlist are blocked at download.</source>
+        <target>Les versions dont la licence figure sur la liste de blocage ou ne figure pas sur la liste d&apos;autorisation sont bloquées au téléchargement.</target>
       </segment>
     </unit>
     <unit id="settings.licenses.mode.block.label">
@@ -8673,6 +8745,48 @@
       <segment state="translated">
         <source>Hours</source>
         <target>Heures</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.ociScanEnforcement">
+      <segment state="translated">
+        <source>OCI image scan enforcement</source>
+        <target>Application de l&apos;analyse des images OCI</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.ociScanEnforcementBlock">
+      <segment state="translated">
+        <source>Block</source>
+        <target>Bloquer</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.ociScanEnforcementDisabled">
+      <segment state="translated">
+        <source>Image scanning is not enabled on this instance (OCI_SCAN_ENABLED), so this can only be set to Off.</source>
+        <target>L&apos;analyse des images n&apos;est pas activée sur cette instance (OCI_SCAN_ENABLED) : ce réglage ne peut être que Désactivé.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.ociScanEnforcementHint">
+      <segment state="translated">
+        <source>Applies the vulnerability gates above to OCI image pulls, using this organization&apos;s own scan of each image. An image with no complete scan is refused as unscanned, so a first pull is refused until the scan lands. Turning this on also enforces your malicious-advisory setting, which blocks by default.</source>
+        <target>Applique les portes de vulnérabilité ci-dessus aux extractions d&apos;images OCI, à partir de l&apos;analyse de chaque image propre à cette organisation. Une image sans analyse complète est refusée comme non analysée : une première extraction est donc refusée jusqu&apos;à ce que l&apos;analyse soit terminée. L&apos;activer applique aussi votre réglage d&apos;avis malveillants, qui bloque par défaut.</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.ociScanEnforcementNoScanner">
+      <segment state="translated">
+        <source>No image scanner has connected for this organization yet, so this can only be set to Off. Start a scanner with an OCI image scanner service token first.</source>
+        <target>Aucun analyseur d&apos;images ne s&apos;est encore connecté pour cette organisation : ce réglage ne peut être que « Désactivé ». Démarrez d&apos;abord un analyseur avec un jeton de service « Analyseur d&apos;images OCI ».</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.ociScanEnforcementOff">
+      <segment state="translated">
+        <source>Off</source>
+        <target>Désactivé</target>
+      </segment>
+    </unit>
+    <unit id="settings.proxy.ociScanEnforcementWarn">
+      <segment state="translated">
+        <source>Warn</source>
+        <target>Avertir</target>
       </segment>
     </unit>
     <unit id="settings.proxy.osvTolerance">
@@ -11179,6 +11293,12 @@ dotnet/</target>
         <target>Annulée</target>
       </segment>
     </unit>
+    <unit id="system.backgroundJobs.outcome.degraded">
+      <segment state="translated">
+        <source>Degraded</source>
+        <target>Dégradé</target>
+      </segment>
+    </unit>
     <unit id="system.backgroundJobs.outcome.server_error">
       <segment state="translated">
         <source>Error</source>
@@ -11549,6 +11669,42 @@ dotnet/</target>
       <segment state="translated">
         <source>Degraded — {detail}</source>
         <target>Dégradé — {detail}</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.health.overallSummary.detailJobDegraded">
+      <segment state="translated">
+        <source>{count, plural, one {# background job is degraded} other {# background jobs are degraded}}</source>
+        <target>{count, plural, one {# tâche d&apos;arrière-plan est dégradée} other {# tâches d&apos;arrière-plan sont dégradées}}</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.health.overallSummary.detailJobFailing">
+      <segment state="translated">
+        <source>{count, plural, one {# background job is failing} other {# background jobs are failing}}</source>
+        <target>{count, plural, one {# tâche d&apos;arrière-plan est en échec} other {# tâches d&apos;arrière-plan sont en échec}}</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.health.overallSummary.detailJobsMixed">
+      <segment state="translated">
+        <source>{count} background jobs are failing, stale or degraded</source>
+        <target>{count} tâches d&apos;arrière-plan sont en échec, périmées ou dégradées</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.health.overallSummary.detailJobStale">
+      <segment state="translated">
+        <source>{count, plural, one {# background job is stale} other {# background jobs are stale}}</source>
+        <target>{count, plural, one {# tâche d&apos;arrière-plan est périmée} other {# tâches d&apos;arrière-plan sont périmées}}</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.health.overallSummary.detailStagingLow">
+      <segment state="translated">
+        <source>staging disk low</source>
+        <target>disque de transit presque plein</target>
+      </segment>
+    </unit>
+    <unit id="system.dashboard.health.overallSummary.detailStaleSnapshots">
+      <segment state="translated">
+        <source>stale snapshots</source>
+        <target>instantanés périmés</target>
       </segment>
     </unit>
     <unit id="system.dashboard.health.overallSummary.down">
@@ -12813,8 +12969,8 @@ dotnet/</target>
     </unit>
     <unit id="system.tenants.deleteConfirm">
       <segment state="translated">
-        <source>Soft-delete tenant {slug}? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days).</source>
-        <target>Supprimer (suppression douce) le locataire {slug}? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut).</target>
+        <source>Soft-delete tenant {slug}? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days). Every session ends, and all of its API tokens, pending invites, and unused reset links are revoked for good, even if the tenant is restored.</source>
+        <target>Supprimer (suppression douce) le locataire {slug}? Il sera inaccessible immédiatement et supprimé définitivement après le délai de grâce (30 jours par défaut). Toutes les sessions prennent fin, et tous ses jetons d&apos;API, invitations en attente et liens de réinitialisation inutilisés sont révoqués définitivement, même si le locataire est restauré.</target>
       </segment>
     </unit>
     <unit id="system.tenants.deleteModalTitle">
@@ -12969,8 +13125,8 @@ dotnet/</target>
     </unit>
     <unit id="system.tenants.disableConfirm">
       <segment state="translated">
-        <source>Disable {slug}? The tenant will be fully locked out — protocol access, downloads, the management API, and login — until re-enabled. Existing data is preserved.</source>
-        <target>Désactiver {slug}? Le locataire sera entièrement verrouillé — accès aux protocoles, téléchargements, API de gestion et connexion — jusqu&apos;à la réactivation. Les données existantes sont préservées.</target>
+        <source>Disable {slug}? The tenant will be fully locked out — protocol access, downloads, the management API, and login — until re-enabled. Every session ends, and all of its API tokens, pending invites, and unused reset links are revoked for good: after re-enabling, the tenant must issue new tokens, including for any edge node. Existing data is preserved.</source>
+        <target>Désactiver {slug}? Le locataire sera entièrement verrouillé — accès aux protocoles, téléchargements, API de gestion et connexion — jusqu&apos;à la réactivation. Toutes les sessions prennent fin, et tous ses jetons d&apos;API, invitations en attente et liens de réinitialisation inutilisés sont révoqués définitivement : après la réactivation, le locataire doit émettre de nouveaux jetons, y compris pour tout nœud en périphérie (edge). Les données existantes sont préservées.</target>
       </segment>
     </unit>
     <unit id="system.tenants.disableModalTitle">
@@ -12987,8 +13143,8 @@ dotnet/</target>
     </unit>
     <unit id="system.tenants.enableConfirm">
       <segment state="translated">
-        <source>Re-enable {slug}? Protocol access, downloads, the management API, and login will resume immediately.</source>
-        <target>Réactiver {slug}? L&apos;accès aux protocoles, les téléchargements, l&apos;API de gestion et la connexion reprendront immédiatement.</target>
+        <source>Re-enable {slug}? Protocol access, downloads, the management API, and login will resume immediately. Members sign in again, and API tokens revoked by the suspension stay revoked.</source>
+        <target>Réactiver {slug}? L&apos;accès aux protocoles, les téléchargements, l&apos;API de gestion et la connexion reprendront immédiatement. Les membres se reconnectent, et les jetons d&apos;API révoqués par la suspension le restent.</target>
       </segment>
     </unit>
     <unit id="system.tenants.enableModalTitle">
@@ -14059,6 +14215,12 @@ dotnet/</target>
         <target>Téléversement SBOM</target>
       </segment>
     </unit>
+    <unit id="tokenScopes.scanner">
+      <segment state="translated">
+        <source>OCI image scanner</source>
+        <target>Analyseur d&apos;images OCI</target>
+      </segment>
+    </unit>
     <unit id="upload.claimAndUpload">
       <segment state="translated">
         <source>Claim and re-upload</source>
@@ -14503,6 +14665,24 @@ dotnet/</target>
         <target>Aucune licence n&apos;a été extraite pour cette version.</target>
       </segment>
     </unit>
+    <unit id="versionDetail.badges.manifestAmbiguousHelp">
+      <segment state="translated">
+        <source>This npm archive has more than one top-level package.json, so Dependably cannot tell which one the client installs. It is not a declared install script.</source>
+        <target>Cette archive npm contient plus d&apos;un package.json de premier niveau; Dependably ne peut pas déterminer lequel le client installe. Il ne s&apos;agit pas d&apos;un script d&apos;installation déclaré.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.manifestIssue">
+      <segment state="translated">
+        <source>manifest needs review</source>
+        <target>manifeste à vérifier</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.badges.manifestUnscannableHelp">
+      <segment state="translated">
+        <source>This npm archive could not be read to the end, so Dependably cannot tell what the client installs. It is not a declared install script.</source>
+        <target>Cette archive npm n&apos;a pas pu être lue jusqu&apos;à la fin; Dependably ne peut pas déterminer ce que le client installe. Il ne s&apos;agit pas d&apos;un script d&apos;installation déclaré.</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.badges.provenanceFailed">
       <segment state="translated">
         <source>signature failed</source>
@@ -14755,6 +14935,36 @@ dotnet/</target>
         <target>Aucune vulnérabilité connue</target>
       </segment>
     </unit>
+    <unit id="versionDetail.detail.ociFindings">
+      <segment state="translated">
+        <source>{count, plural, one {# vulnerability} other {# vulnerabilities}} found by the image scan.</source>
+        <target>{count, plural, one {# vulnérabilité trouvée} other {# vulnérabilités trouvées}} par l&apos;analyse de l&apos;image.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.detail.ociGapsNote">
+      <segment state="translated">
+        <source>Coverage had {count, plural, one {# gap} other {# gaps}}, so part of the image was not checked.</source>
+        <target>La couverture comportait {count, plural, one {# lacune} other {# lacunes}}; une partie de l&apos;image n&apos;a donc pas été vérifiée.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.detail.ociNoFeed">
+      <segment state="translated">
+        <source>No image scanner is running for this organization, so this image has not been checked for vulnerabilities. It is not known to be clean.</source>
+        <target>Aucun analyseur d&apos;images n&apos;est actif pour cette organisation; cette image n&apos;a donc pas été vérifiée quant aux vulnérabilités. Elle n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.detail.ociPartial">
+      <segment state="translated">
+        <source>Scanned, but coverage had {count, plural, one {# gap} other {# gaps}}, so part of this image was not checked. It is not known to be clean.</source>
+        <target>Analysée, mais la couverture comportait {count, plural, one {# lacune} other {# lacunes}}; une partie de cette image n&apos;a donc pas été vérifiée. Elle n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.detail.ociUnscanned">
+      <segment state="translated">
+        <source>This image has not been scanned yet. It is not known to be clean.</source>
+        <target>Cette image n&apos;a pas encore été analysée. Elle n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.detail.published">
       <segment state="translated">
         <source>Published</source>
@@ -14929,6 +15139,258 @@ dotnet/</target>
         <target>Plusieurs fichiers — développez pour voir les sommes de contrôle par fichier</target>
       </segment>
     </unit>
+    <unit id="versionDetail.ociScan.clean">
+      <segment state="translated">
+        <source>The scan found no advisories on the platforms scanned ({platforms}), as last matched {time}.</source>
+        <target>L&apos;analyse n&apos;a trouvé aucun avis sur les plateformes analysées ({platforms}), au dernier rapprochement du {time}.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.closure.inside">
+      <segment state="translated">
+        <source>In entrypoint closure</source>
+        <target>Dans la fermeture du point d&apos;entrée</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.closure.outside">
+      <segment state="translated">
+        <source>Outside entrypoint closure</source>
+        <target>Hors de la fermeture du point d&apos;entrée</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.closure.undetermined">
+      <segment state="translated">
+        <source>Entrypoint closure not determined</source>
+        <target>Fermeture du point d&apos;entrée non déterminée</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.columns.component">
+      <segment state="translated">
+        <source>Component</source>
+        <target>Composant</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.columns.findings">
+      <segment state="translated">
+        <source>Findings</source>
+        <target>Constats</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.columns.layer">
+      <segment state="translated">
+        <source>Layer</source>
+        <target>Couche</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.confidence">
+      <segment state="translated">
+        <source>Confidence: {confidence}</source>
+        <target>Confiance : {confidence}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.gapsHelp">
+      <segment state="translated">
+        <source>Part of this platform was not inventoried or not matched, so the findings below cover only what the scanner read.</source>
+        <target>Une partie de cette plateforme n&apos;a pas été inventoriée ou rapprochée; les constats ci-dessous ne couvrent que ce que l&apos;analyseur a lu.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.gapsTitle">
+      <segment state="translated">
+        <source>{count, plural, one {# coverage gap} other {# coverage gaps}} on {platform}</source>
+        <target>{count, plural, one {# lacune de couverture} other {# lacunes de couverture}} sur {platform}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.layer">
+      <segment state="translated">
+        <source>Layer {index}</source>
+        <target>Couche {index}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.layerUnknown">
+      <segment state="translated">
+        <source>Layer not recorded</source>
+        <target>Couche non enregistrée</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.loadError">
+      <segment state="translated">
+        <source>The scan detail could not be loaded.</source>
+        <target>Le détail de l&apos;analyse n&apos;a pas pu être chargé.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.loading">
+      <segment state="translated">
+        <source>Loading the image&apos;s scan detail…</source>
+        <target>Chargement du détail de l&apos;analyse de l&apos;image…</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.matchedAt">
+      <segment state="translated">
+        <source>findings last matched {time}</source>
+        <target>constats rapprochés pour la dernière fois le {time}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.moreFindings">
+      <segment state="translated">
+        <source>{count, plural, one {# more finding} other {# more findings}} not listed</source>
+        <target>{count, plural, one {# autre constat non listé} other {# autres constats non listés}}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.next">
+      <segment state="translated">
+        <source>Next</source>
+        <target>Suivant</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.noFeed">
+      <segment state="translated">
+        <source>No image scanner is reporting for this organization, so this image has no scan result. It is not known to be clean.</source>
+        <target>Aucun analyseur d&apos;images ne rend compte pour cette organisation; cette image n&apos;a donc aucun résultat d&apos;analyse. Elle n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.notObservedBasis">
+      <segment state="translated">
+        <source>Basis: {basis}</source>
+        <target>Fondement : {basis}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.notObservedHelp">
+      <segment state="translated">
+        <source>The scanner did not observe a path to this code. That does not mean no path exists.</source>
+        <target>L&apos;analyseur n&apos;a observé aucun chemin vers ce code, ce qui ne signifie pas qu&apos;il n&apos;en existe aucun.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.ownedBy">
+      <segment state="translated">
+        <source>Installed by {purl}</source>
+        <target>Installé par {purl}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.pendingHold">
+      <segment state="translated">
+        <source>Tag {tag} has moved to this image upstream but still serves {serving}: this image has not yet passed the promotion gate (pending since {time}). A long hold usually means the image scanner is not running.</source>
+        <target>L&apos;étiquette {tag} pointe vers cette image en amont, mais sert encore {serving} : cette image n&apos;a pas encore franchi la porte de promotion (en attente depuis {time}). Une longue attente indique généralement que l&apos;analyseur d&apos;images ne fonctionne pas.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.platformsScanned">
+      <segment state="translated">
+        <source>Platforms scanned: {platforms}</source>
+        <target>Plateformes analysées : {platforms}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.platformTab">
+      <segment state="translated">
+        <source>{platform} ({count} affected)</source>
+        <target>{platform} ({count, plural, one {# touché} other {# touchés}})</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.previous">
+      <segment state="translated">
+        <source>Previous</source>
+        <target>Précédent</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.range">
+      <segment state="translated">
+        <source>{from}–{to} of {total}</source>
+        <target>{from}–{to} sur {total}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.reachability.not_observed">
+      <segment state="translated">
+        <source>Not observed</source>
+        <target>Non observé</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.reachability.reachable">
+      <segment state="translated">
+        <source>Reachable</source>
+        <target>Atteignable</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.reachability.unknown">
+      <segment state="translated">
+        <source>Reachability unknown</source>
+        <target>Atteignabilité inconnue</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.retry">
+      <segment state="translated">
+        <source>Retry</source>
+        <target>Réessayer</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.scannedAt">
+      <segment state="translated">
+        <source>Scanned {time}</source>
+        <target>Analysée le {time}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.source">
+      <segment state="translated">
+        <source>Source package: {name}</source>
+        <target>Paquet source : {name}</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.title">
+      <segment state="translated">
+        <source>Image scan</source>
+        <target>Analyse de l&apos;image</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.unscannedFailed">
+      <segment state="translated">
+        <source>The scanner gave up after {count, plural, one {# attempt} other {# attempts}}, and the image has no scan result. It is not known to be clean.</source>
+        <target>L&apos;analyseur a abandonné après {count, plural, one {# tentative} other {# tentatives}}, et l&apos;image n&apos;a aucun résultat d&apos;analyse. Elle n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.unscannedNone">
+      <segment state="translated">
+        <source>Not queued for this organization&apos;s image scanner yet. There is no scan result, so the image is not known to be clean.</source>
+        <target>Pas encore en file d&apos;attente pour l&apos;analyseur d&apos;images de cette organisation. Il n&apos;y a aucun résultat d&apos;analyse; l&apos;image n&apos;est donc pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.unscannedPending">
+      <segment state="translated">
+        <source>Queued for scanning, with no result yet. The image is not known to be clean.</source>
+        <target>En file d&apos;attente pour analyse, sans résultat pour l&apos;instant. L&apos;image n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.unscannedPendingAttempts">
+      <segment state="translated">
+        <source>Queued for scanning, with no result after {count, plural, one {# attempt} other {# attempts}}. The image is not known to be clean.</source>
+        <target>En file d&apos;attente pour analyse, sans résultat après {count, plural, one {# tentative} other {# tentatives}}. L&apos;image n&apos;est pas réputée saine.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.unscored">
+      <segment state="translated">
+        <source>UNSCORED</source>
+        <target>NON COTÉ</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.unscoredHelp">
+      <segment state="translated">
+        <source>The advisory carries no severity score. That is not the same as no risk.</source>
+        <target>L&apos;avis ne porte aucune note de gravité, ce qui ne signifie pas une absence de risque.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.viewAll">
+      <segment state="translated">
+        <source>All components</source>
+        <target>Tous les composants</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.viewFindings">
+      <segment state="translated">
+        <source>Findings</source>
+        <target>Constats</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.ociScan.zeroFindings">
+      <segment state="translated">
+        <source>0 findings among {count, plural, one {# component} other {# components}}</source>
+        <target>0 constat parmi {count, plural, one {# composant} other {# composants}}</target>
+      </segment>
+    </unit>
     <unit id="versionDetail.origin.proxy">
       <segment state="translated">
         <source>Proxy</source>
@@ -14975,6 +15437,12 @@ dotnet/</target>
       <segment state="translated">
         <source>No advisories</source>
         <target>Aucun avis</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.pillars.noScanner">
+      <segment state="translated">
+        <source>No scanner</source>
+        <target>Aucun analyseur</target>
       </segment>
     </unit>
     <unit id="versionDetail.pillars.operational">
@@ -15065,6 +15533,18 @@ dotnet/</target>
       <segment state="translated">
         <source>OSV publishes no advisory feed for this ecosystem, so this artefact has never been screened against one. It is not known to be clean.</source>
         <target>OSV ne publie aucun flux d&apos;avis pour cet écosystème; cet artefact n&apos;a donc jamais été confronté à un tel flux. Il n&apos;est pas réputé sain.</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.status.partial">
+      <segment state="translated">
+        <source>Partly scanned</source>
+        <target>Analyse partielle</target>
+      </segment>
+    </unit>
+    <unit id="versionDetail.status.partialHelp">
+      <segment state="translated">
+        <source>The image scanner could not inventory or match part of this image, so finding no advisories covers only what it read. It is not known to be clean.</source>
+        <target>L&apos;analyseur d&apos;images n&apos;a pas pu inventorier ou rapprocher une partie de cette image; l&apos;absence d&apos;avis ne couvre donc que ce qu&apos;il a lu. Elle n&apos;est pas réputée saine.</target>
       </segment>
     </unit>
     <unit id="versionDetail.status.unscanned">

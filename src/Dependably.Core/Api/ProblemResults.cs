@@ -90,6 +90,9 @@ public sealed class ProblemResults
     // ── IActionResult variants for use in [ApiController] controllers ─────────
 
     public IActionResult ValidationErrorAction(string fieldName, string detail)
+        => ValidationErrorAction(fieldName, detail, reason: null);
+
+    private ObjectResult ValidationErrorAction(string fieldName, string detail, string? reason)
     {
         var problem = new ProblemDetails
         {
@@ -98,6 +101,11 @@ public sealed class ProblemResults
             Detail = detail,
         };
         problem.Extensions["field"] = fieldName;
+        if (reason is not null)
+        {
+            problem.Extensions["reason"] = reason;
+        }
+
         return new ObjectResult(problem) { StatusCode = StatusCodes.Status422UnprocessableEntity };
     }
 
@@ -106,6 +114,13 @@ public sealed class ProblemResults
     /// string.Format placeholders ({0}, {1}, …) in the resource value.</summary>
     public IActionResult ValidationErrorActionKey(string fieldName, string resourceKey, params object[] args)
         => ValidationErrorAction(fieldName, Localize(resourceKey, args));
+
+    /// <summary>Like <see cref="ValidationErrorActionKey"/>, plus a machine-readable
+    /// <c>reason</c> extension so a client can tell apart two 422s on the same field without
+    /// parsing the localized detail.</summary>
+    public IActionResult ValidationErrorActionKeyWithReason(
+        string fieldName, string reason, string resourceKey, params object[] args)
+        => ValidationErrorAction(fieldName, Localize(resourceKey, args), reason);
 
     /// <summary>Variant of <see cref="ConflictAction"/> whose detail is a SharedResource
     /// key, resolved against the per-request culture.</summary>

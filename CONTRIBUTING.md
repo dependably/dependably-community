@@ -117,16 +117,78 @@ docker compose up -d --build
 ### Unit, integration, and security tests
 
 ```bash
-# Unit, compliance, and security tests (no external dependencies)
-dotnet test --filter "Category!=Integration"
+# Unit, compliance, and security tests (no external dependencies). RedisLive needs a live
+# Redis (TEST_REDIS_CONNECTION) and fails without one, so it is excluded here.
+dotnet test --filter "Category!=Integration&Category!=RedisLive"
 
 # All tests including integration (self-contained — in-memory blob + SQLite stores).
-# A bare run also selects Category=SchemaPostgres tests, which need TEST_POSTGRES_CONNECTION.
+# A bare run also selects Category=SchemaPostgres and Category=RedisLive tests, which need
+# TEST_POSTGRES_CONNECTION and TEST_REDIS_CONNECTION.
 dotnet test
 
 # Single test class
 dotnet test --filter "ClassName=PurlNormalizerTests"
 ```
+
+### Live-Postgres tests (`TEST_POSTGRES_CONNECTION`)
+
+`Category=SchemaPostgres` tests, and the integration suite under `TEST_INTEGRATION_DB=postgres` or
+`postgres-rls`, run against the server named by `TEST_POSTGRES_CONNECTION`. The harness is
+destructive: it drops and recreates the `public` schema of that database before each test, and
+creates and drops its own databases and roles on that server. Use a superuser on a throwaway
+server, never one that holds data you care about.
+
+```bash
+docker run -d --name dependably-tests -p 5433:5432 \
+  -e POSTGRES_DB=dependably_test -e POSTGRES_USER=dependably -e POSTGRES_PASSWORD=dependably_test_pw \
+  postgres:18-alpine
+export TEST_POSTGRES_CONNECTION="Host=localhost;Port=5433;Database=dependably_test;Username=dependably;Password=dependably_test_pw"
+dotnet test --filter "Category=Schema|Category=SchemaPostgres"
+```
+
+**Disposable-database guard.** Before it opens a connection, every destructive harness path
+(`LivePostgresReset`, `PostgresTestDatabase`, the row-level-security fixtures) checks the
+connection string and refuses to run unless:
+
+- it sets `Database=` explicitly (Npgsql would otherwise fall back to `PGDATABASE` or the user
+  name, which the guard cannot see), and
+- that name is `dependably_test` or `dependably_test_<suffix>` (lower case, e.g.
+  `dependably_test_local`).
+
+CI (`schema-integrity`, `integration-tests-postgres-rls`) and the setup above already use
+`dependably_test`. To point the harness at a disposable database with another name, set
+`TEST_POSTGRES_DISPOSABLE_DATABASE` to that exact database name. The opt-in names one database
+rather than switching the check off, so a stale export cannot authorize a different target.
+
+### Live-Redis tests (`TEST_REDIS_CONNECTION`)
+
+`Category=RedisLive` tests run the Redis-backed (HA) wiring against the broker named by
+`TEST_REDIS_CONNECTION`: two metadata-invalidation buses exchanging messages over it, and the
+full host booted with `REDIS_CONNECTION_STRING` until `/health` answers 200. They fail, rather
+than skip, when the variable is unset. The `redis-smoke` CI job runs them against a `redis`
+service; every other job's filter excludes the category. Use a throwaway Redis: the host-boot
+test writes the Data Protection key ring under the unprefixed `DataProtection-Keys` key.
+
+```bash
+docker run -d --rm --name dependably-redis -p 6390:6379 redis:7-alpine
+TEST_REDIS_CONNECTION=127.0.0.1:6390 dotnet test --filter "Category=RedisLive"
+```
+
+If the host-boot test fails on its start-up budget, the host is stuck in startup. To get its
+stacks, boot the real binary against the same broker and capture them with
+`dotnet-stack report -p <pid>` before killing it:
+
+```bash
+dotnet build src/Dependably
+data=$(mktemp -d)
+ASPNETCORE_ENVIRONMENT=Production ASPNETCORE_URLS=http://127.0.0.1:5290 \
+  DB_PATH="$data/dependably.db" LOCAL_STORAGE_PATH="$data/blobs" \
+  REDIS_CONNECTION_STRING=localhost:6390 \
+  dotnet run --project src/Dependably --no-build --no-launch-profile &
+curl -fsS --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:5290/health
+```
+
+Remove the broker with `docker rm -f dependably-redis` when you are done.
 
 ### End-to-end tests (Playwright)
 
@@ -243,12 +305,12 @@ AI_REVIEW_OUTCOME lens=security mr=1031 state=clean n_findings=0 n_dropped_ungro
 
 ### Configuration
 
-The endpoint and tuning knobs are job variables on the `.ai-review` template in `.gitlab-ci.yml`; override any of them as project CI/CD variables without editing YAML:
+The endpoint (`AI_REVIEW_URL`) and model (`AI_REVIEW_MODEL`) come only from CI/CD variables, so the review host can move without an MR. The tuning knobs are job variables on the `.ai-review` template in `.gitlab-ci.yml`; override any of them as project CI/CD variables without editing YAML:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OLLAMA_URL` | `http://192.168.2.25:11434` | Ollama base URL (`/api/chat` is appended) |
-| `OLLAMA_MODEL` | `gemma4:26b-a4b-it-qat` | Model name — must be pulled on the Ollama host |
+| `AI_REVIEW_URL` | none — set as a CI/CD variable | Ollama base URL (`/api/chat` is appended); the job fails if it is unset |
+| `AI_REVIEW_MODEL` | none — set as a CI/CD variable | Model name — must be pulled on the Ollama host; the job fails if it is unset |
 | `AI_REVIEW_MAX_DIFF_BYTES` | `200000` | Diff is truncated to this many bytes before review; truncation is disclosed in the posted note (see above), not just the job log |
 | `AI_REVIEW_DIFF_CONTEXT` | `10` | `git diff -U` context lines — more lets the model verify a hunk instead of speculating, but grows the diff toward the byte/context caps |
 | `AI_REVIEW_NUM_CTX` | `131072` | Model context window — must hold the persona + capped diff (~3.45 bytes/token, so a 200000-byte diff ≈ 58K tokens) **and** leave room to generate; too small and the prompt fills the window, leaving no room for output (empty/near-empty review). The floor `MAX_DIFF_BYTES`/3 + 6000 is **enforced at startup**: a window below it, or a value that is not a positive integer, refuses the lens as `(misconfigured)` and fails the job rather than letting the misconfiguration surface as an empty `(no content)` note. It is refused rather than clamped — the value is also sized against the review host's per-slot KV budget (Ollama allocates it per parallel slot, and a request that disagrees with the loaded size forces a full model reload), so running at a size nobody chose trades a visible error for an invisible one. This window would allow a ~375000-byte cap, but `AI_REVIEW_MAX_DIFF_BYTES` is deliberately set far below that — see its row |
@@ -278,7 +340,7 @@ so, unmitigated, is the job definition. Keep the blast radius small: give the to
 scope it to this project only, and rotate it on a schedule. The jobs are `allow_failure: true`
 and are not in `.release-required`, so this token can never gate a release.
 
-The runner must be able to reach `OLLAMA_URL`. Comment posting goes over the GitLab API and automatically falls back from `http` to `https` if the configured `CI_API_V4_URL` route-misses — some instances serve the v4 API only over https. `OLLAMA_URL` defaults to a plaintext `http://` LAN endpoint: the MR diff (up to `AI_REVIEW_MAX_DIFF_BYTES`) crosses the network unencrypted on every MR, so terminate TLS in front of Ollama or bind it to the runner host and reach it over loopback. Every posted report carries a standing banner marking it as unverified model output — the diff is the model's entire user turn, so its content can shape (or fabricate) what the comment says.
+The runner must be able to reach `AI_REVIEW_URL`. Comment posting goes over the GitLab API and automatically falls back from `http` to `https` if the configured `CI_API_V4_URL` route-misses — some instances serve the v4 API only over https. `AI_REVIEW_URL` points at a plaintext `http://` LAN endpoint: the MR diff (up to `AI_REVIEW_MAX_DIFF_BYTES`) crosses the network unencrypted on every MR, so terminate TLS in front of Ollama or bind it to the runner host and reach it over loopback. Every posted report carries a standing banner marking it as unverified model output — the diff is the model's entire user turn, so its content can shape (or fabricate) what the comment says.
 
 ---
 
@@ -512,6 +574,18 @@ A release tag also publishes two multi-arch (linux/amd64 + linux/arm64) images t
 Neither image carries `.pdb` files — Release builds are `DebugType=portable`, but the `publish-no-symbols` Dockerfile stage strips the compiled PDBs from the publish output that lands in the image, after the `symbols` stage has already exported them from the same compiled layer. The `publish-symbols` job packs those exported PDBs into a `.snupkg` per composition root (`Dependably` for the community image, `Dependably.Edge` for the edge image) and pushes it to the dogfood instance's own NuGet symbol server (`PUT $REGISTRY_URL/nuget/symbols`) at the same version. A debugger resolves a PDB by its SSQP key (`GET /nuget/symbols/{pdb}/{key}/{pdb}`), not by package id, so the symbol package id has no bearing on which running binary it debugs.
 
 `validate-release-tag` requires the tag to be **annotated** (`git tag -a`, not lightweight), its commit to be an **ancestor of `main`**, and its version to match `Directory.Build.props` `<Version>`. Tagging the branch tip before the version-bump MR merges fails the annotated and ancestor-of-main checks.
+
+### Release pipeline
+
+A tag pipeline does not re-run the heavy suites (unit, integration, schema, e2e, DAST, Sonar). `main`'s push pipeline has already run them on the same commit, and running both at once on the shared runners made both pipelines about three times slower and fail on timeouts. Instead, `main-pipeline-verified` requires `main`'s push pipeline for the tagged SHA to be green, with every job marked `.release-verified-on-main` succeeding in it. The job reads that list from the tagged commit's `.gitlab-ci.yml`. Guards, SCA, SBOM, image publish, and staging still run on the tag.
+
+- **You can push the tag straight after the merge.** While `main`'s pipeline is running, `main-pipeline-verified` waits for it (up to 80 minutes). It sits in the `validate` stage, so the rest of the tag pipeline holds until then.
+- **A red or cancelled `main` pipeline fails the job.** Retry the failed jobs in `main`'s pipeline until it is green, then retry `main-pipeline-verified`. You don't need to retag.
+- **The job needs `RELEASE_VERIFY_GITLAB_TOKEN`**, because `CI_JOB_TOKEN` cannot read pipelines or their jobs. Create a project access token with **`read_api`** scope and the **Reporter** role, and store it as a **protected + masked** CI/CD variable so only `main` and `v*` tags can see it. That relies on `v*` being a protected-tag pattern (Settings → Repository → Protected tags); a tag that is not protected cannot read the variable. Without it, the job fails closed and no release ships: the v0.14.0 tag pipeline stopped at this job because the variable was not set. Project access tokens expire, so give the token an expiry date, record who rotates it, and replace the variable before that date, or the next release tag stops here again.
+
+`release-contract-lint` keeps the split honest. A job carries `.release-required` (runs on the tag, sits in `release-gate.needs`) or `.release-verified-on-main` (skipped on the tag, verified through `main`), never both. A verified job must extend `.runs-on-ci-not-tag` or `.runs-on-main-not-tag`.
+
+The heavy jobs also carry a per-job `resource_group`. At most one copy of each runs at a time across all pipelines, so an MR pipeline that overlaps `main` queues instead of starving it.
 
 ### Verifying the stamp
 

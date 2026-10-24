@@ -9,8 +9,8 @@ set -euo pipefail
 
 PERSONA_FILE="${1:?usage: ai-review.sh <persona_file> <report_file>}"
 REPORT_FILE="${2:?usage: ai-review.sh <persona_file> <report_file>}"
-: "${OLLAMA_URL:?OLLAMA_URL must be set}"
-: "${OLLAMA_MODEL:?OLLAMA_MODEL must be set}"
+: "${AI_REVIEW_URL:?AI_REVIEW_URL must be set as a CI/CD variable}"
+: "${AI_REVIEW_MODEL:?AI_REVIEW_MODEL must be set as a CI/CD variable}"
 : "${CI_MERGE_REQUEST_IID:?this script only runs on merge_request_event pipelines}"
 
 MAX_DIFF_BYTES="${AI_REVIEW_MAX_DIFF_BYTES:-200000}"
@@ -88,7 +88,7 @@ MAX_REPORT_CHARS="${AI_REVIEW_MAX_REPORT_CHARS:-2200}"
 # dark lens from burying the rest of the job log. Generous enough that a real
 # off-format review survives intact — NUM_PREDICT 1500 tokens is well under it.
 RAW_LOG_MAX_BYTES="${AI_REVIEW_RAW_LOG_MAX_BYTES:-16384}"
-BASE_URL="${OLLAMA_URL%/}"
+BASE_URL="${AI_REVIEW_URL%/}"
 # Lens label shown in report/comment titles (e.g. "Security"). Set per job via
 # AI_REVIEW_LABEL; falls back to the report filename stem.
 REVIEW_LABEL="${AI_REVIEW_LABEL:-${REPORT_FILE%.md}}"
@@ -179,7 +179,7 @@ emit_report() {  # <status-suffix> <body-text>
   # arrive as positional args), so single quotes are intentional.
   # shellcheck disable=SC2016
   printf '# AI review — %s%s\n\n_Model `%s` · MR !%s · %s UTC_\n\n> **Advisory, machine-generated, unverified.** The MR diff is the entire user turn handed to the model, so anything below can be shaped by the diff itself. Treat findings as leads to verify; a clean report is not evidence that a change is safe.\n%s\n%s\n' \
-    "$REVIEW_LABEL" "$1" "$OLLAMA_MODEL" "$CI_MERGE_REQUEST_IID" "$(date -u +%Y-%m-%dT%H:%M:%S)" "$degraded_note" "$2" \
+    "$REVIEW_LABEL" "$1" "$AI_REVIEW_MODEL" "$CI_MERGE_REQUEST_IID" "$(date -u +%Y-%m-%dT%H:%M:%S)" "$degraded_note" "$2" \
     > "$REPORT_FILE"
   # Also echo the report into the job log, inside an expanded collapsible GitLab
   # section, so it's readable directly in CI without downloading the artifact.
@@ -389,7 +389,7 @@ truncate_diff() {  # <byte-count>
 # review pass and the verify passes.
 build_request() {  # <system_file> <user_file>
   jq -n \
-    --arg model "$OLLAMA_MODEL" \
+    --arg model "$AI_REVIEW_MODEL" \
     --argjson ctx "$NUM_CTX" \
     --argjson temp "$TEMPERATURE" \
     --argjson predict "$NUM_PREDICT" \
@@ -669,7 +669,7 @@ call_ollama() {
   case "$status" in
     200) return 0 ;;
     000) echo "ERROR: Ollama at $BASE_URL unreachable or timed out" >&2; return 1 ;;
-    404) echo "ERROR: $BASE_URL/api/chat returned 404 — is model '$OLLAMA_MODEL' pulled?" >&2; return 1 ;;
+    404) echo "ERROR: $BASE_URL/api/chat returned 404 — is model '$AI_REVIEW_MODEL' pulled?" >&2; return 1 ;;
     *)
       echo "ERROR: Ollama returned HTTP $status:" >&2
       # Same rationale as run_turn's non-JSON branch: an unexpected status

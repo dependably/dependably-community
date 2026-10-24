@@ -18,7 +18,7 @@
  */
 export const BLOCK_GATES = Object.freeze([
   'deprecated', 'revoked', 'release_age', 'license', 'install_script',
-  'provenance', 'malicious', 'kev', 'kev_ransomware', 'epss', 'vuln_score',
+  'provenance', 'malicious', 'kev', 'kev_ransomware', 'epss', 'vuln_score', 'unscanned',
 ])
 
 /**

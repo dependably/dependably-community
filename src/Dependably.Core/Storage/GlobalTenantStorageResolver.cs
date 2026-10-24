@@ -93,9 +93,5 @@ public sealed class GlobalTenantStorageResolver : ITenantStorageResolver
         return _tiered.Registry;
     }
 
-    private sealed class OrgGateRow
-    {
-        public string Status { get; init; } = "";
-        public string? UsagePosture { get; init; }
-    }
+    private sealed record OrgGateRow(string Status, string? UsagePosture);
 }

@@ -78,7 +78,7 @@ public sealed class BannerRepository
         string targetRole = req.TargetRole;
         string startsAt = req.StartsAt;
         string endsAt = req.EndsAt;
-        bool enabled = req.Enabled;
+        int enabled = req.Enabled ? 1 : 0;
         string createdAt = now;
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -101,7 +101,7 @@ public sealed class BannerRepository
             TargetRole = targetRole,
             StartsAt = startsAt,
             EndsAt = endsAt,
-            Enabled = enabled,
+            Enabled = req.Enabled,
             CreatedBy = createdBy,
             CreatedAt = now
         };
@@ -121,7 +121,7 @@ public sealed class BannerRepository
         string targetRole = req.TargetRole;
         string startsAt = req.StartsAt;
         string endsAt = req.EndsAt;
-        bool enabled = req.Enabled;
+        int enabled = req.Enabled ? 1 : 0;
         await using var conn = await _db.OpenAsync(ct);
         int rows = await conn.ExecuteAsync(
             """
@@ -181,7 +181,7 @@ public sealed class BannerRepository
         string targetRole = req.TargetRole;
         string startsAt = req.StartsAt;
         string endsAt = req.EndsAt;
-        bool enabled = req.Enabled;
+        int enabled = req.Enabled ? 1 : 0;
         string createdAt = now;
         await using var conn = await _db.OpenAsync(ct);
         await conn.ExecuteAsync(
@@ -204,7 +204,7 @@ public sealed class BannerRepository
             TargetRole = targetRole,
             StartsAt = startsAt,
             EndsAt = endsAt,
-            Enabled = enabled,
+            Enabled = req.Enabled,
             CreatedBy = createdBy,
             CreatedAt = now
         };
@@ -223,7 +223,7 @@ public sealed class BannerRepository
         string targetRole = req.TargetRole;
         string startsAt = req.StartsAt;
         string endsAt = req.EndsAt;
-        bool enabled = req.Enabled;
+        int enabled = req.Enabled ? 1 : 0;
         await using var conn = await _db.OpenAsync(ct);
         // xtenant: system-plane banners carry org_id IS NULL and belong to no tenant;
         // `scope = 'system'` is the complete bound. Operator-scope callers only.

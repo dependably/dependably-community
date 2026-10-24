@@ -13,8 +13,10 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte'
   import Skeleton from '../lib/Skeleton.svelte'
 
-  // Only the ecosystems GET /api/v1/lookup accepts — a subset of the full registry vocabulary
-  // (RPM, OCI, apk and Terraform are not OSV-covered or have no wired lookup metadata source).
+  // The ecosystems this form offers. GET /api/v1/lookup also answers for apk, rpm, oci and
+  // terraform, but the form has no distro field (apk and rpm lookups are scoped to a release) and
+  // does not render the response's advisorySource status, which is what tells those ecosystems'
+  // results apart from a flat vulnerability list, so they stay out of the picker.
   const LOOKUP_ECOSYSTEMS = ['npm', 'pypi', 'nuget', 'maven', 'golang', 'cargo', 'hex']
   const ECO_LABEL = { npm: 'npm', pypi: 'PyPI', nuget: 'NuGet', maven: 'Maven', golang: 'Go', cargo: 'Cargo', hex: 'Hex' }
 
@@ -151,6 +153,12 @@
         <p class="text-muted t-sm hint-row">
           <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-plane" /></svg>
           {$t('lookup.airGapped')}
+        </p>
+      {/if}
+      {#if result.reserved}
+        <p class="text-muted t-sm hint-row">
+          <svg width="12" height="12" aria-hidden="true"><use href="/icons.svg#icon-lock" /></svg>
+          {$t('lookup.reserved')}
         </p>
       {/if}
 

@@ -198,6 +198,14 @@ public sealed class NpmAuditHandler(
         var purls = pairs.Select(p => PurlNormalizer.Npm(p.Name, p.Version)).ToList();
         var results = new List<List<OsvAdvisory>>(pairs.Count);
 
+        // A source that holds no npm feed (a local dump sideloaded without it) answers every
+        // package empty, which reads exactly like a clean tree.
+        if (!await osv.HasCoverageFor("npm"))
+        {
+            logger.LogWarning("npm bulk audit: advisory source carries no npm advisory feed; refusing to report an all-clear");
+            return Unavailable("The vulnerability advisory source holds no npm advisories.");
+        }
+
         foreach (string[] chunk in purls.Chunk(OsvQueriesPerBatch))
         {
             var (batch, fetchError) = await FetchReachedBatchAsync(chunk, chunk.Length, ct);
@@ -268,8 +276,10 @@ public sealed class NpmAuditHandler(
             // Reporting that as "no advisories" is the one failure this endpoint must never have.
             batch = await osv.TryQueryBatchAsync(purls, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            // Only the caller's own cancellation propagates; a timeout inside the source while the
+            // request is live is an unavailable source like any other failure.
             throw;
         }
         catch (Exception ex)

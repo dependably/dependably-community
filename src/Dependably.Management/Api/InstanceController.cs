@@ -449,19 +449,8 @@ public sealed class InstanceController : ControllerBase
 
     // ── Background Jobs ──────────────────────────────────────────────────────────
 
-    private static readonly string[] AllJobNames =
-    [
-        "vuln-scan",
-        "vuln-rescan",
-        "deprecation-refresh",
-        "healthcheck-pinger",
-        "cache-eviction",
-        "retention",
-        "orphan-reconciler",
-        "tenant-hard-delete",
-        "blob-size-poller",
-        "tenant-count-poller",
-    ];
+    // Every registered job, so the report covers each name DISABLE_BACKGROUND_JOBS accepts.
+    private static readonly string[] AllJobNames = [.. BackgroundJobs.Known.Order(StringComparer.Ordinal)];
 
     /// <summary>GET /api/v1/instance/background-jobs</summary>
     [HttpGet("api/v1/instance/background-jobs")]
@@ -481,8 +470,8 @@ public sealed class InstanceController : ControllerBase
         var jobStatuses = new List<object>();
         foreach (string jobName in AllJobNames)
         {
-            bool disabled = _airGap.IsJobDisabled(jobName);
-            string disabledReason = !disabled ? "none" : _airGap.IsEnabled ? "AIR_GAPPED=true" : "DISABLE_BACKGROUND_JOBS";
+            string? disabledReason = BackgroundJobDisabledReason.For(_airGap, jobName);
+            bool disabled = disabledReason is not null;
             var (runs, _) = await _jobRuns.ListAsync(
                 new BackgroundJobRunQuery(JobName: jobName, Limit: 1, SortBy: "startedAt", SortDir: "desc"), ct);
             var lastRun = runs.Count > 0 ? runs[0] : null;
@@ -491,7 +480,7 @@ public sealed class InstanceController : ControllerBase
             {
                 name = jobName,
                 enabled = !disabled,
-                disabled_reason = disabled ? disabledReason : null as string,
+                disabled_reason = disabledReason,
                 last_run_at = lastRun?.StartedAt,
                 last_outcome = lastRun?.Outcome,
             });
@@ -709,6 +698,51 @@ public sealed class InstanceController : ControllerBase
         var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
         return deny ?? Ok(Dependably.Infrastructure.VulnTracker.VulnTrackerHealthAggregator.BuildView(
             await health.GetAsync(ct)));
+    }
+
+    /// <summary>
+    /// POST /api/v1/instance/secrets/verify — single-mode counterpart of the apex
+    /// <c>/api/v1/system/secrets/verify</c>, running the same verifier: tries to decrypt every
+    /// stored secret and lists the rows that cannot be decrypted by table, row id, org id, kind
+    /// and reason, never by value. Gated on <c>tenant:configure</c> like every instance route, and
+    /// rate-limited per caller by the <c>secrets-verify</c> policy.
+    /// </summary>
+    [HttpPost("api/v1/instance/secrets/verify")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("secrets-verify")]
+    [ProducesResponseType(typeof(Dependably.Infrastructure.Identity.ProtectedSecretReport), StatusCodes.Status200OK)]
+    public async Task<IActionResult> VerifyProtectedSecrets(
+        [FromServices] Dependably.Infrastructure.Identity.ProtectedSecretVerifier verifier,
+        CancellationToken ct)
+    {
+        if (_isMultiMode)
+        {
+            return NotFound();
+        }
+
+        var deny = await _guard.AuthorizeCapAsync(User, HttpContext, Capabilities.TenantConfigure, ct);
+        if (deny is not null)
+        {
+            return deny;
+        }
+
+        var report = await verifier.VerifyAsync(ct);
+
+        string? actor = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+            ?? User.FindFirst("sub")?.Value;
+        // Counts only: the failing rows are in the response, not the audit detail.
+        await _audit.LogSystemAsync(
+            action: "instance_protected_secrets_verified",
+            actorId: actor,
+            detail: System.Text.Json.JsonSerializer.Serialize(new
+            {
+                @checked = report.Checked,
+                failed = report.Failed,
+                legacy_plaintext = report.LegacyPlaintext,
+            }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            sourceIp: HttpContext.GetNormalizedRemoteIp(),
+            ct: ct);
+
+        return Ok(report);
     }
 
     // The legacy /api/v1/admin/users, /api/v1/admin/users/{id}/role, and /api/v1/admin/audit

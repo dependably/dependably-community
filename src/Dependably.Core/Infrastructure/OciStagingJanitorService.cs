@@ -39,13 +39,17 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
 
     private readonly IMetadataStore _db;
     private readonly IConfiguration _config;
+    private readonly IAirGapMode _airGap;
     private readonly ILogger<OciStagingJanitorService> _logger;
     private readonly TimeProvider _time;
     private readonly string _stagingPath;
 
     protected override string CronEnvKey => "OCI_STAGING_TTL_SCHEDULE";
     protected override string DefaultCron => "*/15 * * * *";
-    protected override string ScopeJobName => "oci-staging-janitor";
+    /// <summary>The <c>DISABLE_BACKGROUND_JOBS</c> name for this job.</summary>
+    public const string JobName = "oci-staging-janitor";
+
+    protected override string ScopeJobName => JobName;
     protected override string ScopeMetricName => "oci.staging.janitor";
 
     // Deliberately NOT leader-gated: the orphan sweep enumerates this node's local
@@ -58,9 +62,11 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
         IConfiguration config,
         ILogger<OciStagingJanitorService> logger,
         TimeProvider time,
-        IDistributedLock locks)
+        IDistributedLock locks,
+        IAirGapMode airGap)
         : base(config, logger, time, locks)
     {
+        _airGap = airGap;
         _db = db;
         _config = config;
         _logger = logger;
@@ -81,6 +87,15 @@ public sealed class OciStagingJanitorService : ScheduledBackgroundService
         // xtenant: stale upload sessions are found across every tenant; an upload id's staging file
         // is shared by its reference count.
         using var ownerScope = DbScope.CrossTenant("oci staging janitor");
+
+        // Only an explicit DISABLE_BACKGROUND_JOBS entry can stop this job: AIR_GAPPED and the
+        // whole-set switch exempt it (BackgroundJobs.HousekeepingExemptFromWholeSet), and edge
+        // mode keeps it, because it reclaims local staging disk and makes no outbound call.
+        if (_airGap.IsJobDisabled(JobName))
+        {
+            _logger.LogInformation("OCI staging janitor skipped (named in DISABLE_BACKGROUND_JOBS).");
+            return new JanitorSummary(0, 0);
+        }
 
         int ttlMinutes = ParseTtlMinutes();
         var cutoff = _time.GetUtcNow().AddMinutes(-ttlMinutes);

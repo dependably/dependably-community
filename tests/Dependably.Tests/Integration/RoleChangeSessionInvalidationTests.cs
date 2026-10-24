@@ -136,7 +136,8 @@ public sealed class RoleChangeSessionInvalidationTests : IClassFixture<Dependabl
     [Fact]
     public async Task SamlRoleResync_IssuesValidPostBumpSession()
     {
-        var login = _factory.Services.GetRequiredService<LoginService>();
+        using var scope = _factory.Services.CreateScope();
+        var login = scope.ServiceProvider.GetRequiredService<LoginService>();
         string orgId = await GetDefaultOrgIdAsync();
         string nameId = $"resync-{Guid.NewGuid():N}";
         string email = $"{nameId}@example.com";

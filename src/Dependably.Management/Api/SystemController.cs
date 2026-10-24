@@ -59,7 +59,7 @@ public sealed partial class SystemController : ControllerBase
 
     // Static vocabulary surfaced on the background-jobs facets endpoint. Mirrors the
     // <c>dependably.background_job.duration</c> histogram outcome label values.
-    private static readonly string[] BackgroundJobOutcomes = ["success", "server_error", "cancelled"];
+    private static readonly string[] BackgroundJobOutcomes = ["success", "degraded", "server_error", "cancelled"];
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
         Justification = "Controller aggregates 12 independent DI-resolved services (4 repos, metadata store, problem-results helper, " +
@@ -149,7 +149,7 @@ public sealed partial class SystemController : ControllerBase
             return _problems.ValidationErrorActionKey("body", "error.common.bodyRequired");
         }
 
-        var extraReserved = ReservedSlugs.ParseExtra(_config["RESERVED_SUBDOMAINS"]);
+        var extraReserved = ReservedSlugs.ForConfig(_config);
         string? slug = ReservedSlugs.Normalize(req.Slug, extraReserved);
         if (slug is null)
         {
@@ -213,6 +213,10 @@ public sealed partial class SystemController : ControllerBase
             }
         }
 
+        // After the commit: a request for this subdomain that arrived before the tenant existed
+        // cached "no such tenant", which would otherwise answer 404 for the rest of its TTL.
+        _tenantCache?.InvalidateSlug(slug);
+
         // Audit on a fresh connection — opening it inside the BEGIN IMMEDIATE above would
         // deadlock SQLite's single writer lock.
         var actor = SystemActor.From(User);
@@ -242,6 +246,9 @@ public sealed partial class SystemController : ControllerBase
     /// subdomain immediately starts returning 404. system_admin can restore via the restore
     /// endpoint within <c>TENANT_HARD_DELETE_GRACE_DAYS</c> (default 30); after that, the
     /// background <see cref="Background.TenantHardDeleteService"/> hard-deletes via FK cascade.
+    /// The delete revokes every credential of the tenant (sessions, remembered devices, personal
+    /// access and service tokens, pending reset and email-change links, pending invites; see
+    /// <see cref="OrgRepository.UpdateOrgStatusAsync"/>) and the audit entry records the counts.
     /// </summary>
     [HttpDelete("tenants/{slug}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -254,7 +261,7 @@ public sealed partial class SystemController : ControllerBase
             return NotFound();
         }
 
-        await _orgs.SoftDeleteOrgAsync(org.Id, ct);
+        var deletion = await _orgs.SoftDeleteOrgAsync(org.Id, ct);
         _tenantCache?.InvalidateSlug(slug);
 
         var actor = SystemActor.From(User);
@@ -262,7 +269,9 @@ public sealed partial class SystemController : ControllerBase
             action: "tenant.deleted",
             actorId: actor.Id,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, via_token_owner = actor.OwnerId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { slug, revoked = RevokedDetail(deletion.Revoked), via_token_owner = actor.OwnerId },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             actorKind: actor.Kind,
             actorLabel: actor.Label,
@@ -340,7 +349,9 @@ public sealed partial class SystemController : ControllerBase
     /// cache for up to its remaining TTL (5 seconds) before it re-reads the new status. Existing
     /// data is preserved. Body: <c>{ "status": "active" | "suspended" | "read_only" }</c>.
     /// Soft-deleted tenants must be restored first. <c>'archived'</c> and <c>'deleting'</c> get the
-    /// identical full lockout but are enterprise-only and rejected here.
+    /// identical full lockout but are enterprise-only and rejected here. Entering or leaving
+    /// <c>suspended</c> revokes every credential of the tenant for good, API tokens included (see
+    /// <see cref="OrgRepository.UpdateOrgStatusAsync"/>); the audit entry records the counts.
     /// </summary>
     [HttpPatch("tenants/{slug}/status")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -367,8 +378,8 @@ public sealed partial class SystemController : ControllerBase
         }
 
         string priorStatus = org.Status;
-        bool ok = await _orgs.UpdateOrgStatusAsync(org.Id, req.Status, ct);
-        if (!ok)
+        var change = await _orgs.UpdateOrgStatusAsync(org.Id, req.Status, ct);
+        if (!change.Applied)
         {
             return NotFound();
         }
@@ -381,7 +392,7 @@ public sealed partial class SystemController : ControllerBase
             actorId: actor.Id,
             orgId: org.Id,
             detail: System.Text.Json.JsonSerializer.Serialize(
-                new { slug, status = req.Status, priorStatus, via_token_owner = actor.OwnerId },
+                new { slug, status = req.Status, priorStatus, revoked = RevokedDetail(change.Revoked), via_token_owner = actor.OwnerId },
                 Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             actorKind: actor.Kind,
@@ -393,9 +404,23 @@ public sealed partial class SystemController : ControllerBase
         return NoContent();
     }
 
+    // The revocation counts on a lifecycle audit entry, named like the entry's other camelCase
+    // detail fields.
+    private static object RevokedDetail(TenantAccessRevocation r) => new
+    {
+        members = r.Members,
+        trustedDevices = r.TrustedDevices,
+        userTokens = r.UserTokens,
+        serviceTokens = r.ServiceTokens,
+        passwordResetLinks = r.PasswordResetLinks,
+        emailChangeLinks = r.EmailChangeLinks,
+        pendingInvites = r.PendingInvites,
+    };
+
     /// <summary>
     /// PATCH /api/v1/system/tenants/{slug}/restore — restore a soft-deleted tenant. Returns 404
     /// if the tenant doesn't exist or isn't currently soft-deleted (idempotent on already-active).
+    /// Tokens revoked by the delete stay revoked; the tenant issues new ones after the restore.
     /// </summary>
     [HttpPatch("tenants/{slug}/restore")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
@@ -413,8 +438,8 @@ public sealed partial class SystemController : ControllerBase
             return _problems.ConflictActionKey("error.system.tenantAlreadyActive");
         }
 
-        bool restored = await _orgs.RestoreOrgAsync(org.Id, ct);
-        if (!restored)
+        var restore = await _orgs.RestoreOrgAsync(org.Id, ct);
+        if (!restore.Applied)
         {
             return NotFound();
         }
@@ -426,7 +451,9 @@ public sealed partial class SystemController : ControllerBase
             action: "tenant.restored",
             actorId: actor.Id,
             orgId: org.Id,
-            detail: System.Text.Json.JsonSerializer.Serialize(new { slug, via_token_owner = actor.OwnerId }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
+            detail: System.Text.Json.JsonSerializer.Serialize(
+                new { slug, revoked = RevokedDetail(restore.Revoked), via_token_owner = actor.OwnerId },
+                Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
             sourceIp: HttpContext.GetNormalizedRemoteIp(),
             actorKind: actor.Kind,
             actorLabel: actor.Label,
@@ -839,7 +866,6 @@ public sealed partial class SystemController : ControllerBase
     [HttpPost("me/password")]
     public async Task<IActionResult> ChangeMyPassword(
         [FromBody] ChangePasswordRequest req,
-        [FromServices] TrustedDeviceService trustedDevices,
         [FromServices] LoginService login,
         [FromServices] IPublicUrlBuilder urls,
         [FromServices] Dependably.Infrastructure.Mail.TransactionalEmailService mailer,
@@ -879,9 +905,6 @@ public sealed partial class SystemController : ControllerBase
         var tokenVersionStore = HttpContext.RequestServices
             .GetRequiredService<Dependably.Infrastructure.Identity.SystemAdminTokenVersionStore>();
         tokenVersionStore.Invalidate(sub);
-
-        // Revoke all trusted-device records so remembered devices no longer bypass TOTP.
-        await trustedDevices.DeleteAllForUserAsync(sub, "system", ct);
 
         var admin = await _systemAdmins.GetByIdAsync(sub, ct);
         if (!string.IsNullOrEmpty(admin?.Email))

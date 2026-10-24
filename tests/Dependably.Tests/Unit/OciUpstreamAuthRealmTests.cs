@@ -6,7 +6,7 @@ namespace Dependably.Tests.Unit;
 /// <summary>
 /// The token-exchange realm comes verbatim from the upstream's Www-Authenticate challenge,
 /// and the operator-configured credentials are attached to whatever it names — so the realm
-/// must be HTTPS and constrained to exactly the upstream's own host (or the
+/// must be HTTPS and constrained to exactly the upstream's own host and port (or the
 /// operator-pinned TokenEndpoint) before any exchange happens. Otherwise a hostile or
 /// MITM'd upstream could harvest the registry credentials.
 ///
@@ -129,10 +129,41 @@ public class OciUpstreamAuthRealmTests
     }
 
     [Fact]
-    public void RealmOnUpstreamsOwnHost_WithConfiguredPort_IsAllowed()
+    public void RealmOnUpstreamsOwnHostAndConfiguredPort_IsAllowed()
     {
         Assert.True(OciUpstreamAuthService.IsTrustedRealm(
-            "https://registry.internal.example/token", Upstream("registry.internal.example:5000")));
+            "https://registry.internal.example:5000/token", Upstream("registry.internal.example:5000")));
+    }
+
+    [Fact]
+    public void RealmSpellingOutTheDefaultPort_IsAllowed()
+    {
+        // An upstream Host without a port is pulled over HTTPS's default 443, so a realm naming
+        // :443 explicitly is the same origin.
+        Assert.True(OciUpstreamAuthService.IsTrustedRealm(
+            "https://ghcr.io:443/token", Upstream("ghcr.io")));
+    }
+
+    [Theory]
+    // Registry on :5000, realm on the same host's default port.
+    [InlineData("https://registry.internal.example/token", "registry.internal.example:5000")]
+    // Registry on the default port, realm on another port of the same host.
+    [InlineData("https://ghcr.io:8443/token", "ghcr.io")]
+    public void RealmOnUpstreamsOwnHost_DifferentPort_IsRejected(string realm, string upstreamHost)
+    {
+        // A different port on the same host is a different service, possibly run by a different
+        // principal; the Basic credential sent to the realm does not extend to it unpinned.
+        Assert.False(OciUpstreamAuthService.IsTrustedRealm(realm, Upstream(upstreamHost)));
+    }
+
+    [Fact]
+    public void RealmOnUpstreamsOwnHost_DifferentPort_WithPinnedTokenEndpoint_IsAllowed()
+    {
+        // The operator escape hatch for a token service on another port of the registry's host
+        // (a self-hosted GitLab registry on :5050 with its realm on :443, say).
+        Assert.True(OciUpstreamAuthService.IsTrustedRealm(
+            "https://registry.internal.example/token", Upstream(
+                "registry.internal.example:5000", tokenEndpoint: "https://registry.internal.example/token")));
     }
 
     [Fact]

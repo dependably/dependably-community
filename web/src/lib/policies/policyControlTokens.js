@@ -15,7 +15,7 @@ export const POLICY_CONTROL_GROUPS = [
     key: 'vulnerability',
     tokens: [
       'malicious', 'malicious_live', 'kev', 'kev_ransomware', 'ssvc_exploitation',
-      'vuln_score', 'epss', 'epss_percentile',
+      'vuln_score', 'epss', 'epss_percentile', 'unscanned',
     ],
   },
   {

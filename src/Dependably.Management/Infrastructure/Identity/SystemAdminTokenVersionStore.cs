@@ -24,6 +24,15 @@ namespace Dependably.Infrastructure.Identity;
 /// token as an expiration trigger; <see cref="Invalidate"/> cancels the current token, so a fill
 /// that raced the bump binds an already-cancelled token and its write is dropped (or immediately
 /// evicted).
+///
+/// Only an <c>active</c> admin has a current version. A locked or disabled admin reads as null,
+/// exactly like a deleted one, so the caller fails the session. This is defence in depth behind
+/// <see cref="SystemAdminRepository.SetAccountStatusAsync"/>, which already bumps the version on
+/// a lock or disable: a status written by any path that forgets the bump still ends the admin's
+/// sessions on the next uncached read (at most one TTL on a single replica, at once under
+/// <c>ha</c>). A non-active answer is never cached, and every status change evicts the entry, so a
+/// re-activation is seen on the next request. Locking does not strand a flow the admin needs: a
+/// locked admin cannot sign in either, and unlocking is another admin's action.
 /// </summary>
 public sealed class SystemAdminTokenVersionStore
 {
@@ -55,7 +64,7 @@ public sealed class SystemAdminTokenVersionStore
 
     /// <summary>
     /// Returns the system_admin's current token version, or null when the row no longer
-    /// exists. A null result causes the caller to fail the session.
+    /// exists or the admin is not <c>active</c>. A null result causes the caller to fail the session.
     /// </summary>
     public async Task<long?> GetCurrentVersionAsync(string adminId, CancellationToken ct = default)
     {
@@ -81,7 +90,8 @@ public sealed class SystemAdminTokenVersionStore
         {
             await using var conn = await _db.OpenAsync(ct);
             long? version = await conn.ExecuteScalarAsync<long?>(
-                "SELECT token_version FROM system_admins WHERE id = @id", new { id = adminId });
+                "SELECT token_version FROM system_admins WHERE id = @id AND account_status = 'active'",
+                new { id = adminId });
 
             if (version is not null && _cache is not null)
             {
@@ -106,10 +116,10 @@ public sealed class SystemAdminTokenVersionStore
         {
             if (guardSource is not null && !tied)
             {
-                // A missing system_admin row is never cached, so the generation minted before the
-                // read is never tied to a cache entry. Retire the just-minted instance here so a
-                // removed admin's id (or a thrown DB open/read) does not leave its guard in the map
-                // forever.
+                // A missing or non-active system_admin is never cached, so the generation minted
+                // before the read is never tied to a cache entry. Retire the just-minted instance
+                // here so a removed or disabled admin's id (or a thrown DB open/read) does not leave
+                // its guard in the map forever.
                 CacheFillGuard.RetireUnbound(_fillGuards, adminId, guardSource);
             }
         }

@@ -41,9 +41,12 @@ public sealed partial class OciController
         string orgId = CurrentTenantId();
 
         // Local cache first; on a miss (no blob record or evicted blob), fall through
-        // to the upstream proxy.
-        var local = await TryServeLocalBlobAsync(orgId, name, digest, headOnly, auth.Token, ct);
-        return local ?? await ServeUpstreamBlobAsync(orgId, name, digest, headOnly, auth.Token, ct);
+        // to the upstream proxy. An edge whose master gates the org (or whose last 'off' is older
+        // than the freshness bound) reads manifest bytes through the master even on this route;
+        // layers stay served from the edge's own cache.
+        bool throughMaster = await MustAskMasterAsync(orgId, ct) && await IsHeldManifestAsync(orgId, digest, ct);
+        var local = throughMaster ? null : await TryServeLocalBlobAsync(orgId, name, digest, headOnly, auth.Token, ct);
+        return local ?? await ServeUpstreamBlobAsync(orgId, name, digest, headOnly, auth.Token, ct, throughMaster);
     }
 
     /// <summary>
@@ -73,8 +76,24 @@ public sealed partial class OciController
 
         // Block gate before any bytes and before any URL. A manifest is reachable by its digest
         // through this route too, so the license arm runs here on exactly the same terms it runs
-        // on the manifest route.
-        if (await EvaluateLicenseBlockAsync(orgId, purl, LicenseSpdx, token, ct) is { } blocked)
+        // on the manifest route. Under scan enforcement the stored media type is not trusted to
+        // say what the bytes are: a manifest fetched through this route is often stored under a
+        // generic type, so it is recognised by what the org knows of the digest or by its bytes.
+        string? manifestType = OciManifestParser.IsAcceptedMediaType(MediaType) ? MediaType
+            : await IsScanEnforcedAsync(orgId, ct)
+                ? await IsManifestBlobAsync(
+                    orgId, digest, MediaType, SizeBytes,
+                    readCt => ProbeStoredBlobAsync(BlobTierFor(Origin), BlobKey, SizeBytes, readCt), ct)
+                : null;
+        if (OciManifestParser.IsAcceptedMediaType(manifestType))
+        {
+            // The bytes were recognised as a manifest stored under a generic label: answer with
+            // the manifest's own type, so a caching edge stores what the bytes are.
+            MediaType = manifestType;
+        }
+
+        if (await EvaluateOciPullGateAsync(
+                orgId, name, digest, LicenseSpdx, token, ct, gatesManifest: manifestType is not null) is { } blocked)
         {
             return blocked;
         }
@@ -201,40 +220,24 @@ public sealed partial class OciController
     /// arrive. A layer blob is pulled once per image, so the retry storm is per-layer.
     /// </remarks>
     private async Task<IActionResult> ServeUpstreamBlobAsync(
-        string orgId, string name, string digest, bool headOnly, TokenRecord? token, CancellationToken ct)
+        string orgId, string name, string digest, bool headOnly, TokenRecord? token, CancellationToken ct,
+        bool throughMaster = false)
     {
         if (headOnly)
         {
-            return await ServeUpstreamBlobHeadAsync(orgId, name, digest, token, ct);
+            return await ServeUpstreamBlobHeadAsync(orgId, name, digest, token, throughMaster, ct);
         }
 
-        // Stream-through: hand the resolver somewhere to mirror the layer into, and it commits
-        // these headers and starts the body as soon as upstream answers, instead of after the
-        // whole layer has landed. The distinction is invisible on a small blob and decisive on a
-        // large one — a store-and-forward pull of a multi-gigabyte layer sends nothing for
-        // minutes, which no reverse proxy's read timeout tolerates.
-        var sink = CreateUpstreamBlobSink(digest);
+        // Stream-through: the resolver commits headers and starts the body as soon as upstream
+        // answers, instead of after the whole layer has landed.
+        bool gateManifests = await IsScanEnforcedAsync(orgId, ct);
+        bool knownManifest = await IsHeldAsManifestAsync(orgId, digest, gateManifests, ct);
+        var sink = CreateUpstreamBlobSink(digest, gateManifests, holdAll: knownManifest);
 
-        OciBlobServeResult? upstreamResult;
-        try
+        var (upstreamResult, failure) = await FetchUpstreamBlobAsync(orgId, name, digest, token, sink, throughMaster, ct);
+        if (failure is not null)
         {
-            upstreamResult = await _svc.Upstream.FetchBlobAsync(orgId, name, digest, ct, sink);
-        }
-        catch (AirGappedException)
-        {
-            return OrAbortIfStarted(AirGappedBlobMiss(name, digest));
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            return OrAbortIfStarted(ClientWentAway(name, digest));
-        }
-        catch (OciBlobRefusedException ex)
-        {
-            return OrAbortIfStarted(BlobRefused(ex, name, digest, token));
-        }
-        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
-        {
-            return OrAbortIfStarted(UpstreamUnreachable(ex, name, digest));
+            return failure;
         }
 
         if (upstreamResult is null)
@@ -264,25 +267,158 @@ public sealed partial class OciController
             return new EmptyResult();
         }
 
-        SetUpstreamBlobHeaders(digest, blob.MediaType);
-        return File(blob.Content, blob.MediaType);
+        if (!gateManifests)
+        {
+            SetUpstreamBlobHeaders(digest, blob.MediaType);
+            return File(blob.Content, blob.MediaType);
+        }
+
+        var (content, probe) = await BufferBlobCandidateAsync(digest, blob, ct);
+        if (content is null)
+        {
+            return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
+        }
+
+        string? manifestType = await IsManifestBlobAsync(
+            orgId, digest, await ReadBlobMediaTypeAsync(orgId, digest, blob.MediaType, ct), content.CanSeek ? content.Length : null,
+            _ => Task.FromResult(probe), ct);
+        if (await EvaluateOciPullGateAsync(
+                orgId, name, digest, await ReadStampedLicenseAsync(orgId, digest, ct), token, ct,
+                gatesManifest: manifestType is not null) is { } refused)
+        {
+            await content.DisposeAsync();
+            return refused;
+        }
+
+        // A manifest recognised by its bytes is answered under its manifest type, so an edge
+        // caching this answer stores what the bytes are rather than the upstream's generic label.
+        string servedType = OciManifestParser.IsAcceptedMediaType(manifestType) ? manifestType! : blob.MediaType;
+        SetUpstreamBlobHeaders(digest, servedType);
+        return File(content, servedType);
+    }
+
+    // Whether a blob is held back from streaming because the org already knows its digest as a
+    // manifest. Stream-through hands the resolver somewhere to mirror the layer into, so it
+    // commits headers and starts the body as soon as upstream answers. The distinction is
+    // invisible on a small blob and decisive on a large one: a store-and-forward pull of a
+    // multi-gigabyte layer sends nothing for minutes, which no reverse proxy's read timeout
+    // tolerates. Under scan enforcement only a blob that cannot be a manifest streams through:
+    // one larger than any manifest, and not labelled as one. The upstream's label never proves a
+    // smaller blob is not a manifest (Docker distribution labels a manifest read through this
+    // route application/octet-stream, and nothing stops an upstream calling one a layer), so
+    // every smaller blob is cached first and checked by its bytes before any byte is sent. A
+    // digest the org already knows as a manifest is held whatever its size, so it reaches the
+    // gate however the upstream labels it and however large it says it is.
+    private async Task<bool> IsHeldAsManifestAsync(string orgId, string digest, bool gateManifests, CancellationToken ct) =>
+        gateManifests && _svc.PullGate is { } pullGate && await pullGate.IsKnownManifestAsync(orgId, digest, ct);
+
+    // An upstream blob fetch whose every failure is mapped to the response the client gets. A
+    // failure may arrive after the sink already began the response, so each one aborts rather
+    // than writing a second body.
+    private async Task<(OciBlobServeResult? Result, IActionResult? Failure)> FetchUpstreamBlobAsync(
+        string orgId, string name, string digest, TokenRecord? token, OciBlobStreamSink? sink, bool throughMaster,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await _svc.Upstream.FetchBlobAsync(orgId, name, digest, ct, sink, throughMaster);
+            return (result, null);
+        }
+        catch (AirGappedException)
+        {
+            return (null, OrAbortIfStarted(AirGappedBlobMiss(name, digest)));
+        }
+        catch (OciPassthroughOffException)
+        {
+            return (null, OrAbortIfStarted(PassthroughOffBlobMiss(name, digest)));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return (null, OrAbortIfStarted(ClientWentAway(name, digest)));
+        }
+        catch (OciBlobRefusedException ex)
+        {
+            return (null, OrAbortIfStarted(BlobRefused(ex, name, digest, token)));
+        }
+        catch (OciUpstreamRefusedException ex)
+        {
+            return (null, OrAbortIfStarted(MasterRefusal(ex)));
+        }
+        catch (Exception ex) when (IsUpstreamFailure(ex, ct))
+        {
+            return (null, throughMaster && !Response.HasStarted
+                ? await ServeThroughMasterOutageAsync(orgId, name, digest, HttpMethods.IsHead(Request.Method), token, ex, ct)
+                : OrAbortIfStarted(UpstreamUnreachable(ex, name, digest)));
+        }
+    }
+
+    /// <summary>
+    /// The blob-route answer for a held manifest digest read through a master that cannot be
+    /// reached: refused for an org whose last-known posture is <c>warn</c> or <c>block</c>,
+    /// otherwise served from the edge's own cache as it would be with no gate, and 502 only when
+    /// the edge does not hold it.
+    /// </summary>
+#pragma warning disable S107 // the request coordinates plus the failure being answered
+    private async Task<IActionResult> ServeThroughMasterOutageAsync(
+        string orgId, string name, string digest, bool headOnly, TokenRecord? token, Exception ex, CancellationToken ct)
+#pragma warning restore S107
+    {
+        if (await MasterOutageGatedPostureAsync(orgId, ct) is { } gated)
+        {
+            return MasterOutageRefusal(gated, name, digest, ex);
+        }
+
+        if (await TryServeLocalBlobAsync(orgId, name, digest, headOnly, token, ct) is { } local)
+        {
+            _logger.LogWarning(
+                "OCI master unreachable for {Repository}@{Digest} ({ExceptionType}); served from the edge cache, as "
+                + "the org's last-known master posture does not gate it.",
+                name, digest, ex.GetType().Name);
+            return local;
+        }
+
+        return UpstreamUnreachable(ex, name, digest);
+    }
+
+    // A blob that could still be a manifest is buffered so its bytes can be checked and still
+    // sent. One that is too large, or whose first byte shows it is not a JSON document, is not
+    // buffered; it is reopened to send, since the check consumed part of the stream. Content is
+    // null when the reopen finds nothing.
+    private async Task<(Stream? Content, BlobProbe Probe)> BufferBlobCandidateAsync(
+        string digest, OciBlobResult blob, CancellationToken ct)
+    {
+        if (await OciManifestParser.ReadManifestCandidateAsync(blob.Content, ct) is { } candidate)
+        {
+            return (candidate, BlobProbe.Candidate(candidate.TryGetBuffer(out var segment) ? segment : default));
+        }
+
+        await blob.Content.DisposeAsync();
+        string[] parts = digest.Split(':', 2);
+        var reopened = await _svc.BlobStore.Cache.GetAsync(BlobKeys.OciBlob(parts[0], parts[^1]), ct);
+        return (reopened, BlobProbe.NotAManifest);
     }
 
     /// <summary>
     /// HEAD on a cache miss: asks upstream for the blob's headers to confirm it exists without
-    /// downloading the body, which may be gigabytes for a large layer.
+    /// downloading the body, which may be gigabytes for a large layer. Under scan enforcement a
+    /// blob that could be a manifest is acquired first and answered as a cache hit is
+    /// (<see cref="AnswerHeadMissAsHitAsync"/>), so the same digest gets the same status either way.
     /// </summary>
     private async Task<IActionResult> ServeUpstreamBlobHeadAsync(
-        string orgId, string name, string digest, TokenRecord? token, CancellationToken ct)
+        string orgId, string name, string digest, TokenRecord? token, bool throughMaster, CancellationToken ct)
     {
         OciBlobMetadata? meta;
         try
         {
-            meta = await _svc.Upstream.FetchBlobMetadataAsync(orgId, name, digest, ct);
+            meta = await _svc.Upstream.FetchBlobMetadataAsync(orgId, name, digest, ct, throughMaster);
         }
         catch (AirGappedException)
         {
             return AirGappedBlobMiss(name, digest);
+        }
+        catch (OciPassthroughOffException)
+        {
+            return PassthroughOffBlobMiss(name, digest);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -292,9 +428,15 @@ public sealed partial class OciController
         {
             return BlobRefused(ex, name, digest, token);
         }
+        catch (OciUpstreamRefusedException ex)
+        {
+            return MasterRefusal(ex);
+        }
         catch (Exception ex) when (IsUpstreamFailure(ex, ct))
         {
-            return UpstreamUnreachable(ex, name, digest);
+            return throughMaster
+                ? await ServeThroughMasterOutageAsync(orgId, name, digest, headOnly: true, token, ex, ct)
+                : UpstreamUnreachable(ex, name, digest);
         }
 
         if (meta is null)
@@ -302,8 +444,61 @@ public sealed partial class OciController
             return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
         }
 
+        if (!IsPushProbe(token) && await IsScanEnforcedAsync(orgId, ct)
+            && await AnswerHeadMissAsHitAsync(orgId, name, digest, meta, token, throughMaster, ct) is { } answered)
+        {
+            return answered;
+        }
+
         SetUpstreamBlobHeaders(digest, meta.MediaType);
         return Ok();
+    }
+
+    /// <summary>
+    /// Under scan enforcement, the answer to a blob-route HEAD miss for a blob that could be a
+    /// manifest: one labelled as a manifest, one the org already knows as a manifest, or one no
+    /// larger than a manifest may be (the upstream's label never proves a smaller blob is not one).
+    /// The blob is fetched and cached, as the GET would, and the HEAD is then answered by the
+    /// cache-hit path, which recognises a manifest by its bytes and gates it. Null for a blob too
+    /// large to be a manifest, which keeps the headers-only answer, as its GET streams ungated;
+    /// the manifest route refuses a manifest that large under enforcement. A push probe never
+    /// reaches here: it downloads nothing and is answered from the headers.
+    /// </summary>
+#pragma warning disable S107 // the request coordinates plus the upstream headers already read
+    private async Task<IActionResult?> AnswerHeadMissAsHitAsync(
+        string orgId, string name, string digest, OciBlobMetadata meta, TokenRecord? token, bool throughMaster,
+        CancellationToken ct)
+#pragma warning restore S107
+    {
+        bool labelled = OciManifestParser.IsAcceptedMediaType(meta.MediaType);
+        bool known = await IsHeldAsManifestAsync(orgId, digest, gateManifests: true, ct);
+        if (!labelled && !known && meta.SizeBytes > OciManifestParser.ManifestSniffMaxBytes)
+        {
+            return null;
+        }
+
+        var (fetched, failure) = await FetchUpstreamBlobAsync(orgId, name, digest, token, sink: null, throughMaster, ct);
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        if (fetched?.Blob is not { } blob)
+        {
+            return OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN, $"Blob unknown: {digest}");
+        }
+
+        await blob.Content.DisposeAsync();
+        if (await TryServeLocalBlobAsync(orgId, name, digest, headOnly: true, token, ct) is { } local)
+        {
+            Response.Headers["X-Cache"] = "MISS";
+            return local;
+        }
+
+        // Fetched but not held (evicted between the two reads): gated on what the headers say.
+        return await EvaluateOciPullGateAsync(
+            orgId, name, digest, await ReadStampedLicenseAsync(orgId, digest, ct), token, ct,
+            gatesManifest: labelled || known);
     }
 
     /// <summary>
@@ -311,7 +506,7 @@ public sealed partial class OciController
     /// headers and starts the body as soon as upstream answers, and resets the connection when
     /// the resolver refuses bytes already on the wire.
     /// </summary>
-    private OciBlobStreamSink CreateUpstreamBlobSink(string digest)
+    private OciBlobStreamSink CreateUpstreamBlobSink(string digest, bool holdManifests = false, bool holdAll = false)
     {
         return new OciBlobStreamSink(
             BeginAsync: async (mediaType, contentLength, beginCt) =>
@@ -349,7 +544,164 @@ public sealed partial class OciController
                 {
                     bodyControl.AllowSynchronousIO = true;
                 }
-            });
+            })
+        {
+            // Under scan enforcement mirrors only a blob that cannot be a manifest: one larger than
+            // any manifest is allowed to be. A blob the upstream labels with a manifest type, or one
+            // the org already knows as a manifest, is always held, whatever its size.
+            Mirrors = holdAll ? (_, _) => false
+                : holdManifests
+                ? (mediaType, length) => !OciManifestParser.IsAcceptedMediaType(mediaType)
+                    && length > OciManifestParser.ManifestSniffMaxBytes
+                : null,
+        };
+    }
+
+    private async Task<bool> IsScanEnforcedAsync(string orgId, CancellationToken ct) =>
+        (await _svc.Orgs.GetSettingsAsync(orgId, ct))?.OciScanEnforcement is "warn" or "block";
+
+    /// <summary>
+    /// Whether a blob read through the blob route is a manifest, under scan enforcement, and
+    /// under which manifest media type: null when it is not. A manifest media type; a digest the
+    /// org already knows as a manifest (catalogued, or listed by an index it holds); or bytes that
+    /// parse as one, whatever type they were stored or labelled under. A blob larger than any
+    /// manifest is not read, and is a manifest only when the org already knows its digest as one;
+    /// any other is read once, and a layer stops at its first byte. When the bytes reveal a
+    /// manifest stored under the
+    /// wrong type, the row is corrected, so the next read does not need the bytes; when they
+    /// prove a blob is not a manifest, that is remembered so later reads skip the read.
+    /// </summary>
+#pragma warning disable S107 // the blob's identity and stored facts plus how to read its bytes
+    private async Task<string?> IsManifestBlobAsync(
+        string orgId, string digest, string? storedType, long? sizeBytes,
+        Func<CancellationToken, Task<BlobProbe>> probeBlob, CancellationToken ct)
+#pragma warning restore S107
+    {
+        if (OciManifestParser.IsAcceptedMediaType(storedType))
+        {
+            return storedType;
+        }
+
+        if (sizeBytes > OciManifestParser.ManifestSniffMaxBytes)
+        {
+            // Too large to read, but a digest the org already knows as a manifest (a row cached
+            // when manifests were allowed to be larger) is still one.
+            return _svc.PullGate is { } sizedGate && await sizedGate.IsKnownManifestAsync(orgId, digest, ct)
+                ? storedType ?? string.Empty
+                : null;
+        }
+
+        bool known = _svc.PullGate is { } gate && await gate.IsKnownManifestAsync(orgId, digest, ct);
+        if (!known && NonManifestBlobs.Contains(orgId, digest))
+        {
+            return null;
+        }
+
+        var probe = await probeBlob(ct);
+        string? sniffed = probe.Kind == BlobProbeKind.Candidate
+            ? OciManifestParser.SniffManifestMediaType(probe.Bytes)
+            : null;
+        if (sniffed is null)
+        {
+            if (probe.Kind != BlobProbeKind.Unavailable && !known)
+            {
+                // Content-addressed: bytes that are not a manifest never become one.
+                NonManifestBlobs.Add(orgId, digest);
+            }
+
+            return known ? storedType ?? string.Empty : null;
+        }
+
+        await using var conn = await _svc.Db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            "UPDATE oci_blobs SET media_type = @sniffed WHERE digest = @digest AND org_id = @orgId",
+            new { sniffed, digest, orgId });
+        return sniffed;
+    }
+
+    private enum BlobProbeKind { Unavailable, NotAManifest, Candidate }
+
+    // What reading a blob's leading bytes established: it cannot be a manifest (too large, or not
+    // a JSON document), its whole content is in hand, or its bytes could not be read at all.
+    private readonly record struct BlobProbe(BlobProbeKind Kind, ReadOnlyMemory<byte> Bytes)
+    {
+        public static BlobProbe Unavailable => new(BlobProbeKind.Unavailable, default);
+
+        public static BlobProbe NotAManifest => new(BlobProbeKind.NotAManifest, default);
+
+        public static BlobProbe Candidate(ArraySegment<byte> bytes) => new(BlobProbeKind.Candidate, bytes);
+    }
+
+    // The probe of a stored blob: its bytes when it could be a manifest, NotAManifest when its
+    // recorded size or leading byte rules that out, Unavailable when the store no longer has it.
+    private static async Task<BlobProbe> ProbeStoredBlobAsync(IBlobStore tier, string blobKey, long sizeBytes, CancellationToken ct)
+    {
+        if (sizeBytes > OciManifestParser.ManifestSniffMaxBytes)
+        {
+            return BlobProbe.NotAManifest;
+        }
+
+        await using var stream = await tier.GetAsync(blobKey, ct);
+        if (stream is null)
+        {
+            return BlobProbe.Unavailable;
+        }
+
+        using var candidate = await OciManifestParser.ReadManifestCandidateAsync(stream, ct);
+        return candidate is null
+            ? BlobProbe.NotAManifest
+            : BlobProbe.Candidate(candidate.TryGetBuffer(out var segment) ? segment : default);
+    }
+
+    // Digests proven, by their bytes, not to be manifests: bounded, in-process, keyed by tenant.
+    private static readonly NonManifestBlobMemo NonManifestBlobs = new();
+
+    private sealed class NonManifestBlobMemo
+    {
+        private const int Capacity = 8192;
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<(string OrgId, string Digest), byte> _entries = new();
+
+        public bool Contains(string orgId, string digest) => _entries.ContainsKey((orgId, digest));
+
+        public void Add(string orgId, string digest)
+        {
+            if (_entries.Count >= Capacity)
+            {
+                _entries.Clear();
+            }
+
+            _entries[(orgId, digest)] = 0;
+        }
+    }
+
+    // True when the org holds this digest as a manifest: recorded as one, known to its catalogue,
+    // or (under a generic label) bytes that parse as one. An edge asks this for every blob read
+    // of an org whose master gates it, so a manifest primed under a generic label still goes to
+    // the master.
+    private async Task<bool> IsHeldManifestAsync(string orgId, string digest, CancellationToken ct)
+    {
+        await using var conn = await _svc.Db.OpenAsync(ct);
+        // xtenant: (digest, org_id) PK is tenant-scoped.
+        var (MediaType, SizeBytes, BlobKey, Origin) = await conn.QuerySingleOrDefaultAsync<(string? MediaType, long SizeBytes, string? BlobKey, string? Origin)>(
+            "SELECT media_type AS MediaType, size_bytes AS SizeBytes, blob_key AS BlobKey, origin AS Origin " +
+            "FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId });
+        return BlobKey is not null
+            && await IsManifestBlobAsync(
+                orgId, digest, MediaType, SizeBytes,
+                readCt => ProbeStoredBlobAsync(BlobTierFor(Origin), BlobKey, SizeBytes, readCt), ct) is not null;
+    }
+
+    // The media type recorded for a blob this org now holds: the oci_blobs row the fetch wrote,
+    // falling back to what the serve result carried. A cache-store hit reports a generic octet
+    // stream, so the row is the reliable answer to "is this a manifest".
+    private async Task<string?> ReadBlobMediaTypeAsync(string orgId, string digest, string fallback, CancellationToken ct)
+    {
+        await using var conn = await _svc.Db.OpenAsync(ct);
+        // xtenant: (digest, org_id) PK is tenant-scoped.
+        return await conn.ExecuteScalarAsync<string?>(
+            "SELECT media_type FROM oci_blobs WHERE digest = @digest AND org_id = @orgId",
+            new { digest, orgId }) ?? fallback;
     }
 
     /// <summary>Response headers common to every cache-miss blob answer, streamed or not.</summary>
@@ -432,15 +784,15 @@ public sealed partial class OciController
     /// </para>
     /// </summary>
     private ObjectResult BlobRefused(
-        OciBlobRefusedException ex, string name, string digest, TokenRecord? token)
+        OciBlobRefusedException ex, string name, string digest, TokenRecord? token, string kind = "Blob")
     {
         bool authenticated = token is not null;
 
         _logger.LogWarning(
-            "OCI blob refused for {Repository}/{Digest}: {Fault}. {Reason}",
-            name, digest, ex.Fault, ex.Message);
+            "OCI {Kind} refused for {Repository}/{Digest}: {Fault}. {Reason}",
+            kind.ToLowerInvariant(), name, digest, ex.Fault, ex.Message);
 
-        string message = $"Blob {digest} could not be served for repository '{name}'.";
+        string message = $"{kind} {digest} could not be served for repository '{name}'.";
         if (authenticated)
         {
             message += " " + ex.OperatorMessage;
@@ -466,6 +818,12 @@ public sealed partial class OciController
         OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN,
             $"Blob unknown: {digest}. This instance is air-gapped, so {name} was not fetched from "
             + "an upstream registry; only locally held content is available.");
+
+    /// <summary>The blob counterpart of <c>PassthroughOffManifestMiss</c>.</summary>
+    private static ObjectResult PassthroughOffBlobMiss(string name, string digest) =>
+        OciError(StatusCodes.Status404NotFound, OciErrorCode.BLOB_UNKNOWN,
+            $"Blob unknown: {digest}. Proxy passthrough is off for this organization, so {name} was not "
+            + "fetched from an upstream registry; only locally held content is available.");
 
     /// <summary>
     /// Parses the <c>Range: bytes=from-to</c> header on the current request. Supports the

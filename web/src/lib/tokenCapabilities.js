@@ -22,6 +22,9 @@
  *            than folded into `push`: publish:* already covers uploading a package, and
  *            widening it to also cover SBOM upload would silently broaden what every existing
  *            `push`/`both` token can already do.
+ *   scanner — OCI image scanning only (scan:oci) — the out-of-process image scanner, which claims
+ *            queued images, reads them and posts their results. Privileged for the same reason as
+ *            sbom: scan:oci is in AdminCaps.
  *
  * The capabilities → preset direction is only ever a convenience label, and it matches a
  * preset's exact capability set and nothing else. A token minted through the API can hold any
@@ -43,6 +46,7 @@ const PRESET_CAPS = {
   push:  ['publish:*'],
   both:  ['read:metadata', 'read:artifact', 'read:packages', 'publish:*'],
   sbom:  ['sbom:upload'],
+  scanner: ['scan:oci'],
   admin: ['tenant:configure', 'read:tenant'],
   audit: ['read:audit'],
 }
@@ -51,7 +55,7 @@ const PRESET_CAPS = {
 // admin or owner carries it, so offering it to a member would render a control whose mint
 // the server refuses as privilege escalation.
 export const PACKAGE_PRESETS = ['pull', 'push', 'both']
-export const PRIVILEGED_PRESETS = ['admin', 'audit', 'sbom']
+export const PRIVILEGED_PRESETS = ['admin', 'audit', 'sbom', 'scanner']
 
 export function presetToCapabilities(preset) {
   return PRESET_CAPS[preset] ?? PRESET_CAPS.pull
@@ -59,7 +63,7 @@ export function presetToCapabilities(preset) {
 
 /**
  * Best-effort preset key from a TokenRecord's capabilities JSON string. Returns one of
- * 'pull' | 'push' | 'both' | 'admin' | 'audit' | 'custom' (caps that don't match a known
+ * 'pull' | 'push' | 'both' | 'admin' | 'audit' | 'sbom' | 'scanner' | 'custom' (caps that don't match a known
  * preset), or '—' when the value is missing/unparseable. The key is CSS-class-safe (no
  * spaces) — display text is resolved from i18n (`tokenScopes.<key>`). Used for the row
  * badge class, sort comparator, and display label.

@@ -119,8 +119,8 @@ public class PyPiController : ControllerBase
 
     // ── Helpers ────────────────────────────────────────────────────────
 
-    private string CurrentTenantId() =>
-        ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+    // Not an OrgScopedControllerBase, so it reads the tenant through the same throwing guard.
+    private string CurrentTenantId() => HttpContext.RequireTenantId();
 }
 
 // DI-injected dependency aggregate for PyPiController. Single param avoids S107.

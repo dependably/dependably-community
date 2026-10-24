@@ -120,13 +120,13 @@
     if (openOsvId === advisory.osvId) { openOsvId = ''; openDetail = null; return }
     openOsvId = advisory.osvId
 
-    const cacheKey = `${advisory.osvId}::${item.version ?? ''}`
+    const cacheKey = `${advisory.osvId}::${item.ecosystem ?? ''}::${item.name ?? ''}::${item.version ?? ''}`
     const cached = detailCache.get(cacheKey)
     if (cached) { openDetail = cached; return }
 
     openDetail = { loading: true, error: false, detail: null }
     try {
-      const detail = await api.getVulnDetail(advisory.osvId, item.version)
+      const detail = await api.getVulnDetail(advisory.osvId, item.version, item.ecosystem, item.name)
       const loaded = { loading: false, error: false, detail }
       detailCache.set(cacheKey, loaded)
       // Ignore a late resolve if the reader collapsed this advisory or opened another meanwhile.

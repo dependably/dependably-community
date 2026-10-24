@@ -279,7 +279,13 @@ public sealed class OrgListsController : OrgScopedControllerBase
         }
 
         string orgId = CurrentTenantId();
-        var entry = await _reserved.AddAsync(orgId, ecosystem, pattern, GetUserId(), ct);
+        var (entry, created) = await _reserved.TryAddAsync(orgId, ecosystem, pattern, GetUserId(), ct);
+        if (!created)
+        {
+            // Already reserved: nothing was written, so nothing is audited, and the caller is
+            // told so rather than handed an id that names no stored row.
+            return _problems.ConflictActionKeyFormat("error.list.reservedNamespaceDuplicate", entry.Pattern);
+        }
 
         await _audit.LogAsync("reserved_namespace_added", orgId, GetUserId(),
             actorKind: ActorKinds.User,

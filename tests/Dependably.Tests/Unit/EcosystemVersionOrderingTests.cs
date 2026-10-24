@@ -186,4 +186,237 @@ public sealed class EcosystemVersionOrderingTests
         Assert.Null(EcosystemVersionOrdering.Compare("npm", "not-a-version", "1.0.0"));
         Assert.Null(EcosystemVersionOrdering.Compare("npm", "1.0.0", "not-a-version"));
     }
+
+    private static int Sign(string ecosystem, string left, string right)
+    {
+        int? result = EcosystemVersionOrdering.Compare(ecosystem, left, right);
+        Assert.NotNull(result);
+        return Math.Sign(result.Value);
+    }
+
+    // ── SemVer precedence (npm, cargo, terraform, hex) ────────────────────────
+
+    [Theory]
+    [InlineData("npm", "2.0.0", "1.9.9", 1)]
+    [InlineData("npm", "1.2.0", "1.1.9", 1)]
+    [InlineData("npm", "1.0.1", "1.0.2", -1)]
+    [InlineData("npm", "1.0.0", "1.0.0-alpha", 1)]
+    [InlineData("npm", "1.0.0-alpha", "1.0.0-alpha", 0)]
+    [InlineData("npm", "1.0.0-alpha", "1.0.0-beta", -1)]
+    [InlineData("npm", "1.0.0-alpha", "1.0.0-alpha.1", -1)]
+    [InlineData("npm", "1.0.0-rc.1.2", "1.0.0-rc.1", 1)]
+    [InlineData("npm", "1.0.0-alpha.1", "1.0.0-alpha.beta", -1)]
+    [InlineData("npm", "1.0.0-alpha.beta", "1.0.0-alpha.1", 1)]
+    [InlineData("npm", "1.0.0-rc.2", "1.0.0-rc.10", -1)]
+    [InlineData("npm", "1.0.0-rc.007", "1.0.0-rc.7", 0)]
+    [InlineData("npm", "1.0.0-99999999999999999999", "1.0.0-9999999999999999999", 1)]
+    [InlineData("npm", "1.0.0-Beta", "1.0.0-alpha", -1)]
+    [InlineData("npm", "1.0.0-alpha.", "1.0.0-alpha.1", 1)]
+    [InlineData("npm", "v1.2.3", "1.2.3", 0)]
+    [InlineData("npm", "V2.0.0", "1.0.0", 1)]
+    [InlineData("npm", " 1.2.3 ", "1.2.3", 0)]
+    [InlineData("npm", "1.2.3+build.5", "1.2.3+build.9", 0)]
+    [InlineData("cargo", "0.9.0", "0.10.0", -1)]
+    [InlineData("terraform", "3.0.0-beta.1", "3.0.0", -1)]
+    [InlineData("hex", "1.0.0-rc.1", "1.0.0-rc.2", -1)]
+    public void Compare_SemVerEcosystems_FollowSemverOrgPrecedence(string ecosystem, string left, string right, int expected)
+    {
+        Assert.Equal(expected, Sign(ecosystem, left, right));
+        Assert.Equal(-expected, Sign(ecosystem, right, left));
+    }
+
+    [Theory]
+    [InlineData("1.2")]
+    [InlineData("1.2.3.4")]
+    [InlineData("1.x.3")]
+    [InlineData("-1.2.3")]
+    [InlineData("1.2.3.")]
+    [InlineData("99999999999.0.0")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("v")]
+    public void Compare_SemVerEcosystems_MalformedVersionIsUnknown(string malformed)
+    {
+        Assert.Null(EcosystemVersionOrdering.Compare("npm", malformed, "1.0.0"));
+        Assert.Null(EcosystemVersionOrdering.Compare("cargo", "1.0.0", malformed));
+    }
+
+    [Theory]
+    [InlineData("npm")]
+    [InlineData("cargo")]
+    [InlineData("terraform")]
+    [InlineData("hex")]
+    public void OrderStableDescending_SemVerEcosystems_DropPrereleasesAndGarbageButKeepTheRawSpelling(string ecosystem)
+    {
+        var stable = EcosystemVersionOrdering.OrderStableDescending(
+            ecosystem, new[] { "v1.2.0", "1.10.0", "1.9.0", "2.0.0-rc.1", "junk", "1.0.0+build" });
+
+        Assert.Equal(new[] { "1.10.0", "1.9.0", "v1.2.0", "1.0.0+build" }, stable);
+    }
+
+    [Theory]
+    [InlineData("npm")]
+    [InlineData("cargo")]
+    [InlineData("terraform")]
+    [InlineData("hex")]
+    public void CountNewerStable_SemVerEcosystems_IgnoreUnparseableEntriesInTheList(string ecosystem)
+    {
+        string[] list = new[] { "2.0.0", "garbage", "1.5.0", "1.0.0" };
+
+        Assert.Equal(2, EcosystemVersionOrdering.CountNewerStable(ecosystem, list, "1.0.0"));
+        Assert.Equal(1, EcosystemVersionOrdering.CountNewerStable(ecosystem, list, "1.5.0"));
+        Assert.Null(EcosystemVersionOrdering.CountNewerStable(ecosystem, list, "garbage"));
+    }
+
+    // ── PEP 440 ──────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("1.0", "1.0.0", 0)]
+    [InlineData("1.0.0", "1.0.0.0.0", 0)]
+    [InlineData("1.10", "1.9", 1)]
+    [InlineData("1.2.3.4", "1.2.3.5", -1)]
+    [InlineData("1!0.1", "2.0", 1)]
+    [InlineData("1.0a1", "1.0b1", -1)]
+    [InlineData("1.0b1", "1.0rc1", -1)]
+    [InlineData("1.0rc1", "1.0c1", 0)]
+    [InlineData("1.0alpha1", "1.0a1", 0)]
+    [InlineData("1.0beta2", "1.0b2", 0)]
+    [InlineData("1.0preview1", "1.0rc1", 0)]
+    [InlineData("1.0pre1", "1.0rc1", 0)]
+    [InlineData("1.0a2", "1.0a10", -1)]
+    [InlineData("1.0.dev1", "1.0a1", -1)]
+    [InlineData("1.0.dev1", "1.0.dev2", -1)]
+    [InlineData("1.0a1", "1.0", -1)]
+    [InlineData("1.0", "1.0.post1", -1)]
+    [InlineData("1.0.post1", "1.0.post2", -1)]
+    [InlineData("1.0-1", "1.0.post1", 0)]
+    [InlineData("1.0rc1.dev1", "1.0rc1", -1)]
+    [InlineData("1.0+local.1", "1.0+local.2", 0)]
+    [InlineData(" 1.0 ", "1.0", 0)]
+    [InlineData("1.0.RC1", "1.0rc1", 0)]
+    [InlineData("1.0a", "1.0a0", 0)]
+    [InlineData("1.0rc", "1.0rc0", 0)]
+    public void Compare_PyPi_FollowsPep440Precedence(string left, string right, int expected)
+    {
+        Assert.Equal(expected, Sign("pypi", left, right));
+        Assert.Equal(-expected, Sign("pypi", right, left));
+    }
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("")]
+    [InlineData("1.0.0.")]
+    [InlineData("1.0 final")]
+    [InlineData("1..0")]
+    public void Compare_PyPi_UnparseableVersionIsUnknown(string malformed)
+    {
+        Assert.Null(EcosystemVersionOrdering.Compare("pypi", malformed, "1.0"));
+        Assert.Null(EcosystemVersionOrdering.Compare("pypi", "1.0", malformed));
+    }
+
+    [Fact]
+    public void OrderStableDescending_PyPi_EpochDominatesAndPrereleaseDevAndGarbageAreDropped()
+    {
+        var stable = EcosystemVersionOrdering.OrderStableDescending(
+            "pypi", new[] { "1.0", "1.0.post1", "1.0rc1", "0.9", "1!0.1", "junk", "1.0.dev1", "2.0b3.dev1" });
+
+        Assert.Equal(new[] { "1!0.1", "1.0.post1", "1.0", "0.9" }, stable);
+    }
+
+    [Fact]
+    public void CountNewerStable_PyPi_HeldPrereleaseCountsItsOwnFinalAsNewer()
+    {
+        string[] list = new[] { "2.0", "junk", "1.0", "0.9" };
+
+        Assert.Equal(2, EcosystemVersionOrdering.CountNewerStable("pypi", list, "1.0rc1"));
+        Assert.Null(EcosystemVersionOrdering.CountNewerStable("pypi", list, "not a version"));
+    }
+
+    // ── NuGet ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void OrderStableDescending_NuGet_NormalizesSpellingDropsPrereleaseAndGarbage()
+    {
+        var stable = EcosystemVersionOrdering.OrderStableDescending(
+            "nuget", new[] { "1.0.0", "1.1.0-beta", "2.0.0-RC1", "3.0.0", "junk", "1.0.0.1", "2.0" });
+
+        Assert.Equal(new[] { "3.0.0", "2.0.0", "1.0.0.1", "1.0.0" }, stable);
+    }
+
+    [Fact]
+    public void CountNewerStable_NuGet_HeldPrereleaseAndUnparseableHeld()
+    {
+        string[] list = new[] { "2.0.0", "1.0.0" };
+
+        Assert.Equal(2, EcosystemVersionOrdering.CountNewerStable("nuget", list, "1.0.0-beta"));
+        Assert.Equal(0, EcosystemVersionOrdering.CountNewerStable("nuget", list, "2.0.0"));
+        Assert.Null(EcosystemVersionOrdering.CountNewerStable("nuget", list, "junk"));
+    }
+
+    [Fact]
+    public void Compare_NuGet_PrereleaseLabelsOrderNumericallyAndUnparseableIsUnknown()
+    {
+        Assert.Equal(-1, Sign("nuget", "1.0.0-beta.2", "1.0.0-beta.11"));
+        Assert.Equal(1, Sign("nuget", "1.0.0.1", "1.0.0"));
+        Assert.Null(EcosystemVersionOrdering.Compare("nuget", "junk", "1.0.0"));
+        Assert.Null(EcosystemVersionOrdering.Compare("nuget", "1.0.0", "junk"));
+    }
+
+    // ── Maven ────────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("1.0", "1.0.0", 0)]
+    [InlineData("1", "1.0.0.0", 0)]
+    [InlineData("1.10", "1.9", 1)]
+    [InlineData("1.0-alpha", "1.0-beta", -1)]
+    [InlineData("1.0-beta", "1.0-milestone", -1)]
+    [InlineData("1.0-m", "1.0-milestone", 0)]
+    [InlineData("1.0-m1", "1.0-rc1", -1)]
+    [InlineData("1.0-rc1", "1.0-cr1", 0)]
+    [InlineData("1.0-rc1", "1.0-snapshot", -1)]
+    [InlineData("1.0-snapshot", "1.0", -1)]
+    [InlineData("1.0-beta", "1.0", -1)]
+    [InlineData("1.0-ga", "1.0", 0)]
+    [InlineData("1.0-final", "1.0", 0)]
+    [InlineData("1.0-sp1", "1.0", 1)]
+    [InlineData("1.0-foo", "1.0-bar", 1)]
+    [InlineData("1.0-foo", "1.0-rc1", 1)]
+    [InlineData("1.0-abc", "1.0", 1)]
+    [InlineData("1.0.1", "1.0-sp1", 1)]
+    [InlineData("1.0-1", "1.0-alpha", 1)]
+    [InlineData("1.0-RC1", "1.0-rc1", 0)]
+    public void Compare_Maven_FollowsComparableVersionStyleQualifierRanks(string left, string right, int expected)
+    {
+        Assert.Equal(expected, Sign("maven", left, right));
+        Assert.Equal(-expected, Sign("maven", right, left));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("---")]
+    [InlineData("...")]
+    public void Compare_Maven_VersionWithNoTokensIsUnknown(string malformed)
+    {
+        Assert.Null(EcosystemVersionOrdering.Compare("maven", malformed, "1.0"));
+        Assert.Null(EcosystemVersionOrdering.Compare("maven", "1.0", malformed));
+    }
+
+    [Fact]
+    public void OrderStableDescending_Maven_DropsSnapshotsCaseInsensitivelyAndTokenlessVersions()
+    {
+        var stable = EcosystemVersionOrdering.OrderStableDescending(
+            "maven", new[] { "1.0", "1.0-SNAPSHOT", "2.0-snapshot", "1.0-sp1", "---", "", "1.0-RC1" });
+
+        Assert.Equal(new[] { "1.0-sp1", "1.0", "1.0-RC1" }, stable);
+    }
+
+    [Fact]
+    public void CountNewerStable_Maven_IgnoresUnparseableEntriesAndRejectsUnparseableHeld()
+    {
+        string[] list = new[] { "2.0", "---", "1.5", "1.0" };
+
+        Assert.Equal(2, EcosystemVersionOrdering.CountNewerStable("maven", list, "1.0"));
+        Assert.Null(EcosystemVersionOrdering.CountNewerStable("maven", list, "---"));
+    }
 }

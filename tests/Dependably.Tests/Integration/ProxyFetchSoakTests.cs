@@ -74,7 +74,7 @@ public sealed class ProxyFetchSoakTests
             // buffers via GetOrFetchMetadataAsync + ProxyFetchService. Memory bound
             // for hash-and-stage is asserted in the focused
             // direct-streaming test below.
-            byte[] bytes = RandomNumberGenerator.GetBytes(256 * 1024);
+            byte[] bytes = NpmFixtures.BuildTarballWithPayload(name, version, 256 * 1024);
             string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
             coords.Add((name, filename, bytes, sha));
         }
@@ -89,7 +89,7 @@ public sealed class ProxyFetchSoakTests
         string token = await factory.CreateToken("pull");
 
         // Fire 10 concurrent GETs.
-        var responseBodyLengths = new ConcurrentBag<long>();
+        var responseBodyLengths = new ConcurrentBag<(long Expected, long Actual)>();
         var statusCodes = new ConcurrentBag<HttpStatusCode>();
 
         var tasks = coords.Select(async coord =>
@@ -101,14 +101,14 @@ public sealed class ProxyFetchSoakTests
             statusCodes.Add(resp.StatusCode);
 
             byte[] bodyBytes = await resp.Content.ReadAsByteArrayAsync();
-            responseBodyLengths.Add(bodyBytes.Length);
+            responseBodyLengths.Add((coord.Bytes.Length, bodyBytes.Length));
         }).ToArray();
 
         await Task.WhenAll(tasks);
 
         // ── Structural assertions ─────────────────────────────────────────────
         Assert.All(statusCodes, sc => Assert.Equal(HttpStatusCode.OK, sc));
-        Assert.All(responseBodyLengths, len => Assert.Equal(coords[0].Bytes.Length, len));
+        Assert.All(responseBodyLengths, r => Assert.Equal(r.Expected, r.Actual));
         // Upstream tarball calls: exactly one per coordinate — the inflight dedup map
         // did not collapse the 10 distinct coordinates.
         Assert.Equal(ConcurrentRequests, handler.CallCount);
@@ -216,7 +216,7 @@ public sealed class ProxyFetchSoakTests
         {
             string name = $"clean{Guid.NewGuid():N}"[..16].ToLowerInvariant();
             string filename = $"{name}-1.0.0.tgz";
-            byte[] bytes = RandomNumberGenerator.GetBytes(64 * 1024); // small payload — speed
+            byte[] bytes = NpmFixtures.BuildTarballWithPayload(name, "1.0.0", 64 * 1024); // small payload — speed
             string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
             coords.Add((name, filename, bytes, sha));
         }

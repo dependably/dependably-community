@@ -256,6 +256,18 @@ public sealed partial class PackageRepository
         return (pkg, ver);
     }
 
+    /// <summary>The version strings of a package's uploaded rows, for identity comparison without loading whole rows.</summary>
+    public async Task<IReadOnlyList<string>> ListUploadedVersionStringsAsync(string packageId, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        // xtenant: keyed by package_id (caller-org-scoped); inherited via FK to packages(id).
+        var rows = await conn.QueryAsync<string>(new CommandDefinition(
+            // plane-ok: uploaded plane only; proxy versions are cache_artifact rows.
+            "SELECT version FROM package_versions WHERE package_id = @packageId AND origin = 'uploaded'",
+            new { packageId }, cancellationToken: ct));
+        return rows.ToList();
+    }
+
     public async Task<IReadOnlyList<PackageVersion>> GetVersionsAsync(string packageId, CancellationToken ct = default)
     {
         await using var conn = await _db.OpenAsync(ct);
@@ -322,6 +334,40 @@ public sealed partial class PackageRepository
             WHERE package_id = @packageId AND version = @version
             """,
             new { packageId, version });
+    }
+
+    /// <summary>
+    /// Resolves the hosted row a route-supplied version names, by the ecosystem's version identity
+    /// rather than the spelling typed. The exact string wins; otherwise NuGet retries on its
+    /// normalized form (uploads are stored lowercase-normalized) and PyPI on the uploaded version
+    /// whose PEP 440 canonical form is equal (not SQL-computable, so compared in C#). Every other
+    /// ecosystem is exact-string, which is its identity. Null when no hosted row matches, so a
+    /// caller can fall through to the proxied plane.
+    /// </summary>
+    public async Task<PackageVersion?> ResolveHostedVersionAsync(
+        string packageId, string ecosystem, string version, CancellationToken ct = default)
+    {
+        var exact = await GetVersionAsync(packageId, version, ct);
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        switch (ecosystem)
+        {
+            case "nuget":
+                string normalized = Dependably.Api.NuGetProtocol.NuGetNormalization.NormalizeVersion(version);
+                return string.Equals(normalized, version, StringComparison.Ordinal)
+                    ? null
+                    : await GetVersionAsync(packageId, normalized, ct);
+            case "pypi":
+                var identity = Dependably.Protocol.VersionIdentity.Comparer("pypi");
+                string? match = (await ListUploadedVersionStringsAsync(packageId, ct))
+                    .FirstOrDefault(v => identity.Equals(v, version));
+                return match is null ? null : await GetVersionAsync(packageId, match, ct);
+            default:
+                return null;
+        }
     }
 
     /// <summary>

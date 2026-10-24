@@ -398,6 +398,7 @@ public partial class Program
         // after auth and rate limiting, not immediately after SubdomainTenantMiddleware — so
         // neither stage gets bypassed for a cut-off tenant; see the middleware's own doc comment
         // for the full reasoning. /health, /ready, /metrics, and /version are exempt.
+        // It also 404s a protocol request whose host resolved no tenant (apex, unknown slug).
         app.UseMiddleware<TenantStatusEnforcementMiddleware>();
 
         // Prometheus exposition (IP-allowlisted via MetricsAccessMiddleware earlier).

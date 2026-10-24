@@ -950,6 +950,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>Le motif doit compter au plus 512 caractères.</target>
       </segment>
     </unit>
+    <unit id="error.list.reservedNamespaceDuplicate">
+      <notes>
+        <note category="translator">409 detail for POST /api/v1/reserved-namespaces when the organization already reserves the same pattern in the same ecosystem. {0} = the pattern as entered (API literal, e.g. &apos;@acme/*&apos;).</note>
+      </notes>
+      <segment state="translated">
+        <source>&apos;{0}&apos; is already reserved for this ecosystem.</source>
+        <target>« {0} » est déjà réservé pour cet écosystème.</target>
+      </segment>
+    </unit>
     <unit id="error.list.trailingGlobOnly">
       <notes>
         <note category="translator">422 detail: wildcard placed anywhere except the end of the pattern.</note>
@@ -966,6 +975,15 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>version_pattern must be 128 characters or fewer.</source>
         <target>version_pattern doit compter au plus 128 caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.distroInvalid">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when the distro query parameter is not a recognised release for the ecosystem (apk or rpm). &apos;distro&apos; is the API literal query-parameter name; &apos;v3.20&apos; and &apos;Rocky Linux:9&apos; are literal examples of the accepted values - do not translate them.</note>
+      </notes>
+      <segment state="translated">
+        <source>distro is not a release this lookup can check. Use an Alpine release such as v3.20, or Rocky Linux:9, AlmaLinux:9 or Red Hat:enterprise_linux:9::baseos.</source>
+        <target>distro n&apos;est pas une version que cette vérification peut traiter. Utilisez une version d&apos;Alpine comme v3.20, ou Rocky Linux:9, AlmaLinux:9 ou Red Hat:enterprise_linux:9::baseos.</target>
       </segment>
     </unit>
     <unit id="error.lookup.mavenCoordinateInvalid">
@@ -995,9 +1013,54 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
         <target>name est obligatoire.</target>
       </segment>
     </unit>
+    <unit id="error.lookup.ociDigestRequired">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup?ecosystem=oci when version is missing or is not an algorithm:hex digest (a tag is not accepted). &apos;sha256&apos; is the literal digest algorithm prefix - do not translate.</note>
+      </notes>
+      <segment state="translated">
+        <source>For an OCI image, version must be the image digest (for example sha256:...).</source>
+        <target>Pour une image OCI, version doit être le condensat (digest) de l&apos;image (par exemple sha256:...).</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.passthroughOffVersionRequired">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when no version was given and the organization has turned proxy passthrough off (Settings, Proxy), so no upstream registry is consulted. This is a configuration state, not an outage, so it must not suggest retrying. {0} = the ecosystem name (API literal, e.g. &apos;npm&apos;).</note>
+      </notes>
+      <segment state="translated">
+        <source>Proxy passthrough is off for your organization, so the latest &apos;{0}&apos; version is not looked up upstream. Specify a version to check the package.</source>
+        <target>Le relais proxy est désactivé pour votre organisation : la dernière version « {0} » n&apos;est donc pas recherchée auprès de la source amont. Indiquez une version pour vérifier le paquet.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.releaseRequired">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup?ecosystem=apk or rpm when version lacks the package revision or release, so it cannot be compared to an advisory&apos;s fixed build. &apos;8.5.0-r0&apos; and &apos;1:3.0.7-24.el9&apos; are literal examples - do not translate.</note>
+      </notes>
+      <segment state="translated">
+        <source>For apk, version must include the package revision (for example 8.5.0-r0). For rpm, it must be version-release with an optional epoch (for example 1:3.0.7-24.el9).</source>
+        <target>Pour apk, version doit inclure la révision du paquet (par exemple 8.5.0-r0). Pour rpm, elle doit être de la forme version-release avec une époque facultative (par exemple 1:3.0.7-24.el9).</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.reservedVersionRequired">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when no version was given for a name the organization has reserved (a reserved name is never fetched from an upstream registry, by the operator&apos;s choice). This is permanent until the reservation changes, so it must not suggest retrying. {0} = the ecosystem name (API literal, e.g. &apos;maven&apos;).</note>
+      </notes>
+      <segment state="translated">
+        <source>This name is reserved for your organization&apos;s own &apos;{0}&apos; packages, so its latest version is not looked up upstream. Specify a version to check it.</source>
+        <target>Ce nom est réservé aux paquets « {0} » de votre organisation : sa dernière version n&apos;est donc pas recherchée auprès de la source amont. Indiquez une version pour le vérifier.</target>
+      </segment>
+    </unit>
+    <unit id="error.lookup.upstreamNotConfigured">
+      <notes>
+        <note category="translator">422 detail for GET /api/v1/lookup when no version was given and the organization has no upstream registry configured for the ecosystem (proxying is turned off for it). This is a configuration state, not an outage, so it must not suggest retrying. {0} = the ecosystem name (API literal, e.g. &apos;maven&apos;).</note>
+      </notes>
+      <segment state="translated">
+        <source>No upstream registry is configured for &apos;{0}&apos;, so there is no latest version to look up. Specify a version to check the package.</source>
+        <target>Aucune source amont n&apos;est configurée pour « {0} » : il n&apos;y a donc pas de dernière version à rechercher. Indiquez une version pour vérifier le paquet.</target>
+      </segment>
+    </unit>
     <unit id="error.lookup.upstreamUnavailable">
       <notes>
-        <note category="translator">503 detail for GET /api/v1/lookup when the upstream registry could not be reached (transient network failure) or has no upstream configured. {0} = the ecosystem name (API literal).</note>
+        <note category="translator">503 detail for GET /api/v1/lookup when a fetch from the upstream registry was attempted and could not be completed (transient network failure, timeout, or error response). {0} = the ecosystem name (API literal).</note>
       </notes>
       <segment state="translated">
         <source>The upstream registry for &apos;{0}&apos; is temporarily unavailable. Try again shortly.</source>
@@ -1092,6 +1155,240 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Not Found</source>
         <target>Introuvable</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.advisoriesMax">
+      <notes>
+        <note category="translator">422 detail for an OCI scan result with too many advisories.</note>
+      </notes>
+      <segment state="translated">
+        <source>A result may carry at most {0} advisories.</source>
+        <target>Un résultat peut contenir au plus {0} avis de sécurité.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.advisoryInvalid">
+      <notes>
+        <note category="translator">422 detail when an advisory in an OCI scan result is not an OSV record.</note>
+      </notes>
+      <segment state="translated">
+        <source>Every advisory must be a complete OSV record with an id.</source>
+        <target>Chaque avis doit être un enregistrement OSV complet doté d&apos;un identifiant.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.advisorySourceUnavailable">
+      <notes>
+        <note category="translator">503 detail when an OCI scanner&apos;s result is refused because the server&apos;s OSV source is unreachable. The job has already been returned to the queue, so the scanner should not fail it.</note>
+      </notes>
+      <segment state="translated">
+        <source>The result names advisories this server does not hold, and its advisory source cannot be reached to verify them. Nothing was stored; the job will be retried.</source>
+        <target>Le résultat cite des avis que ce serveur ne détient pas, et sa source d&apos;avis est injoignable pour les vérifier. Rien n&apos;a été enregistré; la tâche sera relancée.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.attemptRequired">
+      <notes>
+        <note category="translator">422 detail when a scanner calls a heartbeat, result, fail or rematch route without the attempt query parameter, or with a value below 1. &apos;attempt&apos; is an API parameter name.</note>
+      </notes>
+      <segment state="translated">
+        <source>attempt is required: pass the attempt the claim returned.</source>
+        <target>attempt est requis : transmettez l&apos;attempt renvoyé par la réclamation.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.claimMax">
+      <notes>
+        <note category="translator">422 detail when a scanner&apos;s claim asks for too few or too many jobs. &apos;max&apos; is an API field name.</note>
+      </notes>
+      <segment state="translated">
+        <source>max must be between 1 and {0}.</source>
+        <target>max doit être compris entre 1 et {0}.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.componentInvalid">
+      <notes>
+        <note category="translator">422 detail for a malformed component in an OCI scan result.</note>
+      </notes>
+      <segment state="translated">
+        <source>Each component needs a purl, ecosystem, name and version, and no text field may exceed {0} characters.</source>
+        <target>Chaque composant exige un purl, un écosystème, un nom et une version, et aucun champ texte ne peut dépasser {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.componentsInvalid">
+      <notes>
+        <note category="translator">422 detail when an OCI scan result&apos;s component list is missing or too long.</note>
+      </notes>
+      <segment state="translated">
+        <source>Each platform must list its components, at most {0} in all.</source>
+        <target>Chaque plateforme doit énumérer ses composants, au plus {0} au total.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.contentGapsNotSubset">
+      <notes>
+        <note category="translator">422 detail when an OCI scan result lists a content gap that is not among the platform&apos;s gaps. &apos;contentGaps&apos; and &apos;gaps&apos; are API field names.</note>
+      </notes>
+      <segment state="translated">
+        <source>Each platform&apos;s contentGaps must be a subset of its gaps.</source>
+        <target>Les contentGaps de chaque plateforme doivent faire partie de ses gaps.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.failReason">
+      <notes>
+        <note category="translator">422 detail when a scanner reports a failure without a usable reason. &apos;reason&apos; is an API field name.</note>
+      </notes>
+      <segment state="translated">
+        <source>reason is required and at most {0} characters.</source>
+        <target>reason est requis et ne peut dépasser {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.findingsMax">
+      <notes>
+        <note category="translator">422 detail when an OCI scan or match result carries too many findings across all of its components.</note>
+      </notes>
+      <segment state="translated">
+        <source>A result may carry at most {0} findings in total, summed over every component.</source>
+        <target>Un résultat peut contenir au plus {0} constats au total, tous composants confondus.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.findingUnknown">
+      <notes>
+        <note category="translator">422 detail when a rematch finding names a component the image&apos;s stored inventory does not hold on that platform.</note>
+      </notes>
+      <segment state="translated">
+        <source>Every finding must name a stored component of this image, on the platform it is listed under, once.</source>
+        <target>Chaque constat doit désigner, une seule fois, un composant enregistré de cette image sur la plateforme sous laquelle il figure.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.gapsInvalid">
+      <notes>
+        <note category="translator">422 detail for a malformed gap list in an OCI scan result.</note>
+      </notes>
+      <segment state="translated">
+        <source>Each platform may list at most {0} coverage gaps, none of them empty.</source>
+        <target>Chaque plateforme peut énumérer au plus {0} lacunes de couverture, aucune vide.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.inventoryChanged">
+      <notes>
+        <note category="translator">409 detail when a scanner posts matches for an OCI image inventory that has since been replaced.</note>
+      </notes>
+      <segment state="translated">
+        <source>The image was re-extracted after its inventory was read, so these matches no longer apply. Nothing was stored.</source>
+        <target>L&apos;image a été extraite de nouveau après la lecture de son inventaire; ces correspondances ne s&apos;appliquent plus. Rien n&apos;a été enregistré.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.leaseLost">
+      <notes>
+        <note category="translator">409 detail when a scanner writes to an OCI scan job it no longer holds.</note>
+      </notes>
+      <segment state="translated">
+        <source>This job is not leased to the caller: its lease expired, or another claim holds it.</source>
+        <target>Cette tâche n&apos;est pas louée à l&apos;appelant : son bail a expiré, ou une autre demande la détient.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.matchPlatformInvalid">
+      <notes>
+        <note category="translator">422 detail for a malformed platform entry in an OCI rematch result. &apos;coverageId&apos; is an API field name.</note>
+      </notes>
+      <segment state="translated">
+        <source>Each platform needs a distinct name, the coverageId the inventory returned, a scanner version and an OSV source.</source>
+        <target>Chaque plateforme exige un nom distinct, le coverageId renvoyé par l&apos;inventaire, une version du scanner et une source OSV.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.platformInvalid">
+      <notes>
+        <note category="translator">422 detail for a malformed platform entry in an OCI scan result.</note>
+      </notes>
+      <segment state="translated">
+        <source>Each platform needs a distinct name, a scanner version, an extraction version and an OSV source.</source>
+        <target>Chaque plateforme exige un nom distinct, une version d&apos;analyseur, une version d&apos;extraction et une source OSV.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.platformsIncomplete">
+      <notes>
+        <note category="translator">422 detail when an OCI rematch result leaves out one of the image&apos;s stored platforms.</note>
+      </notes>
+      <segment state="translated">
+        <source>A rematch result must cover every stored platform of the image.</source>
+        <target>Un résultat de nouvelle correspondance doit couvrir chaque plateforme enregistrée de l&apos;image.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.platformsMax">
+      <notes>
+        <note category="translator">422 detail for an OCI scan result with too many platforms.</note>
+      </notes>
+      <segment state="translated">
+        <source>A result may describe at most {0} platforms.</source>
+        <target>Un résultat peut décrire au plus {0} plateformes.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.platformsRequired">
+      <notes>
+        <note category="translator">422 detail for an OCI scan result with no platforms.</note>
+      </notes>
+      <segment state="translated">
+        <source>A result must describe at least one platform.</source>
+        <target>Un résultat doit décrire au moins une plateforme.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.platformUnknown">
+      <notes>
+        <note category="translator">422 detail when the scan-detail read names a platform the stored result does not hold. &quot;platform&quot; is an OS/architecture pair such as linux/amd64.</note>
+      </notes>
+      <segment state="translated">
+        <source>The image&apos;s scan result has no such platform.</source>
+        <target>Le résultat d&apos;analyse de l&apos;image ne contient pas cette plateforme.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.reachabilityInvalid">
+      <notes>
+        <note category="translator">422 detail for an unknown reachability value. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>reachability must be reachable, not_observed or unknown.</source>
+        <target>reachability doit valoir reachable, not_observed ou unknown.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.unavailable">
+      <notes>
+        <note category="translator">503 detail when an image&apos;s layer or manifest is referenced but neither stored nor fetchable from upstream.</note>
+      </notes>
+      <segment state="translated">
+        <source>The image references this object, but it cannot be read now. Fail the job as retryable and it will be retried.</source>
+        <target>L&apos;image référence cet objet, mais il ne peut pas être lu pour le moment. Signalez l&apos;échec de la tâche comme réessayable et elle sera relancée.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.verdictInvalid">
+      <notes>
+        <note category="translator">422 detail for a malformed component verdict in an OCI scan result. The quoted values are API literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>A component verdict needs a status of reachable, not_observed or unknown, and no text field may exceed {0} characters.</source>
+        <target>Le verdict d&apos;un composant exige un status reachable, not_observed ou unknown, et aucun champ texte ne peut dépasser {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.vulnsMax">
+      <notes>
+        <note category="translator">422 detail when one component in an OCI scan result lists too many advisories.</note>
+      </notes>
+      <segment state="translated">
+        <source>A component may list at most {0} advisories.</source>
+        <target>Un composant peut énumérer au plus {0} avis de sécurité.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.vulnTextTooLong">
+      <notes>
+        <note category="translator">422 detail when a finding&apos;s basis or confidence text is too long.</note>
+      </notes>
+      <segment state="translated">
+        <source>A finding&apos;s text fields may not exceed {0} characters.</source>
+        <target>Les champs texte d&apos;un constat ne peuvent dépasser {0} caractères.</target>
+      </segment>
+    </unit>
+    <unit id="error.ociScan.vulnUnknown">
+      <notes>
+        <note category="translator">422 detail when a finding references an advisory the result does not include.</note>
+      </notes>
+      <segment state="translated">
+        <source>Every finding must name an advisory whose OSV record is in the result&apos;s advisories.</source>
+        <target>Chaque constat doit nommer un avis dont l&apos;enregistrement OSV figure parmi les avis du résultat.</target>
       </segment>
     </unit>
     <unit id="error.org.notFound">
@@ -1668,6 +1965,24 @@ Si vous n&apos;êtes pas à l&apos;origine de ce changement, contactez immédiat
       <segment state="translated">
         <source>Must be between 0.0 and 1.0 (EPSS probability), or null to disable.</source>
         <target>Doit être compris entre 0,0 et 1,0 (probabilité EPSS), ou null pour désactiver.</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.ociScanDisabled">
+      <notes>
+        <note category="translator">422 detail for oci_scan_enforcement when a non-off value is set while the instance has image scanning disabled. OCI_SCAN_ENABLED and &apos;off&apos; are literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>OCI image scanning is not enabled on this instance (OCI_SCAN_ENABLED), so every image would be refused as unscanned. Enable scanning first, or leave this at &apos;off&apos;.</source>
+        <target>L&apos;analyse des images OCI n&apos;est pas activée sur cette instance (OCI_SCAN_ENABLED) : chaque image serait refusée comme non analysée. Activez d&apos;abord l&apos;analyse, ou laissez ce réglage à « off ».</target>
+      </segment>
+    </unit>
+    <unit id="error.settings.ociScannerNotSeen">
+      <notes>
+        <note category="translator">422 detail for oci_scan_enforcement when a non-off value is set while image scanning is enabled but the organization&apos;s scanner has never called the scan API. scan:oci and &apos;off&apos; are literals.</note>
+      </notes>
+      <segment state="translated">
+        <source>No OCI image scanner has connected for this organization yet, so every image would be refused as unscanned. Start a scanner with a scan:oci token first, or leave this at &apos;off&apos;.</source>
+        <target>Aucun analyseur d&apos;images OCI ne s&apos;est encore connecté pour cette organisation : chaque image serait refusée comme non analysée. Démarrez d&apos;abord un analyseur avec un jeton scan:oci, ou laissez ce réglage à « off ».</target>
       </segment>
     </unit>
     <unit id="error.settings.offWarnBlock">

@@ -291,7 +291,7 @@ public sealed class NuGetControllerExtendedTests : IClassFixture<DependablyFacto
 
         // Evict so the next request is a genuine cache MISS that must rebuild.
         var cache = _factory.Services.GetRequiredService<RenderedResponseCache<NuGetRegistrationKey>>();
-        var proxyKey = new NuGetRegistrationKey(orgId, id, SemVer2: false) { IsProxy = true };
+        var proxyKey = new NuGetRegistrationKey(orgId, id, SemVer2: false) { IsProxy = true, PublicBase = "http://localhost" };
         cache.Evict(proxyKey);
         Assert.False(cache.TryGet(proxyKey, out byte[]? _));
 

@@ -66,7 +66,7 @@
   let expandedDetail = null      // { loading, error, detail } for the open row, or null
   // Deliberately a plain Map — reactivity is driven by `expandedDetail`, not this cache.
   // eslint-disable-next-line svelte/prefer-svelte-reactivity
-  const detailCache = new Map()  // `${osvId}::${version}` -> loaded { loading, error, detail }
+  const detailCache = new Map()  // `${osvId}::${ecosystem}::${packageName}::${version}` -> loaded { loading, error, detail }
   // Request sequence — page/filter/sort changes can fire overlapping loads; a response whose
   // token no longer matches the latest issued request is stale and must not overwrite newer state.
   let seq = 0
@@ -160,13 +160,13 @@
     expandedKey = key
     loadAffectedApps(r, key)
 
-    const cacheKey = `${r.osvId}::${r.version ?? ''}`
+    const cacheKey = `${r.osvId}::${r.ecosystem ?? ''}::${r.packageName ?? ''}::${r.version ?? ''}`
     const cached = detailCache.get(cacheKey)
     if (cached) { expandedDetail = cached; return }
 
     expandedDetail = { loading: true, error: false, detail: null }
     try {
-      const detail = await api.getVulnDetail(r.osvId, r.version)
+      const detail = await api.getVulnDetail(r.osvId, r.version, r.ecosystem, r.packageName)
       const loaded = { loading: false, error: false, detail }
       detailCache.set(cacheKey, loaded)
       // Ignore a late resolve if the user collapsed this row or opened another meanwhile.

@@ -139,10 +139,10 @@ public sealed class CargoMetadataRepository
     // Merges local and global-plane index lines: local rows shadow any global-plane row
     // for the same version. The local set is preserved in order; global-only versions
     // are appended after local ones.
-    private static List<string> MergeIndexLines(
+    internal static List<string> MergeIndexLines(
         List<string> localLines, List<string> globalLines)
     {
-        var localVersions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var localVersions = new HashSet<string>(VersionIdentity.Comparer("cargo"));
         foreach (string line in localLines)
         {
             string? vers = ParseVersionFromIndexLine(line);

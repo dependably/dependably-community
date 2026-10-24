@@ -72,6 +72,37 @@ public sealed class WidenNumericColumnsLockTimeoutResetTests
         Assert.DoesNotContain(log.Entries, e => e.Message.Contains("could not reset lock_timeout", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task OnlyAlterAttempts_RunUnderLockTimeout_ProbesAndEverythingAfterRunUnbounded()
+    {
+        int alters = 0;
+        var conn = new ScriptedConnection(
+            alter: () =>
+            {
+                // The first attempt on each table loses the lock race, so the retry must set the bound again.
+                if (alters++ % 2 == 0)
+                {
+                    throw new PostgresException("canceling statement due to lock timeout", "ERROR", "ERROR", PostgresErrorCodes.LockNotAvailable);
+                }
+            },
+            reset: () => { });
+        var init = new SchemaInitializer(new PostgresProviderStore(), new CapturingLogger())
+        {
+            WidenLockRetry = new SchemaInitializer.LockRetryPolicy(TimeSpan.FromMilliseconds(250), [TimeSpan.Zero]),
+        };
+
+        await init.WidenPostgresNumericColumnsAsync(conn);
+
+        var probes = conn.Trace.Where(t => t.Statement == "probe").ToList();
+        var attempts = conn.Trace.Where(t => t.Statement == "alter").ToList();
+        Assert.NotEmpty(probes);
+        Assert.All(probes, t => Assert.False(t.Bounded, "A catalogue probe ran under lock_timeout, where a lock conflict is not retried."));
+        Assert.NotEmpty(attempts);
+        Assert.Equal(alters, attempts.Count);
+        Assert.All(attempts, t => Assert.True(t.Bounded, "An ALTER attempt ran without lock_timeout."));
+        Assert.False(conn.LockTimeoutInEffect, "lock_timeout leaked past the migration.");
+    }
+
     private sealed class PostgresProviderStore : IMetadataStore
     {
         public DbProvider Provider => DbProvider.Postgres;
@@ -105,6 +136,10 @@ public sealed class WidenNumericColumnsLockTimeoutResetTests
     {
         public int AlterAttempts { get; private set; }
 
+        public bool LockTimeoutInEffect { get; private set; }
+
+        public List<(string Statement, bool Bounded)> Trace { get; } = [];
+
         public int ResetAttempts { get; private set; }
 
         [AllowNull]
@@ -136,17 +171,20 @@ public sealed class WidenNumericColumnsLockTimeoutResetTests
         {
             if (sql.StartsWith("SELECT set_config", StringComparison.Ordinal))
             {
+                LockTimeoutInEffect = true;
                 return null;
             }
 
             if (sql.Contains("information_schema.columns", StringComparison.Ordinal))
             {
+                Trace.Add(("probe", LockTimeoutInEffect));
                 return "integer";
             }
 
             if (sql.StartsWith("ALTER TABLE", StringComparison.Ordinal))
             {
                 AlterAttempts++;
+                Trace.Add(("alter", LockTimeoutInEffect));
                 alter();
                 return null;
             }
@@ -154,6 +192,7 @@ public sealed class WidenNumericColumnsLockTimeoutResetTests
             if (sql == "RESET lock_timeout")
             {
                 ResetAttempts++;
+                LockTimeoutInEffect = false;
                 reset();
                 return null;
             }

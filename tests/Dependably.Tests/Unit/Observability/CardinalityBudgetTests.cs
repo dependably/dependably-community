@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using Dependably.Tests.Compliance;
 
 namespace Dependably.Tests.Unit.Observability;
@@ -10,10 +9,21 @@ namespace Dependably.Tests.Unit.Observability;
 /// <c>org_id</c>, <c>user_id</c>, <c>email</c>, <c>purl</c>, <c>sha256</c>,
 /// or <c>ip_address</c>.
 ///
-/// Detection is a source-text scan for the OTel tagging idiom
-/// <c>new KeyValuePair&lt;string, object?&gt;("&lt;name&gt;", …)</c>. Tenant
-/// attribution belongs on spans and log records, where high cardinality is
-/// cheap. Putting it on metrics blows up the TSDB working set.
+/// Detection is a source-text scan (<see cref="MetricAttributeScanner"/>) for every form the
+/// metrics API accepts an attribute in: an explicit or target-typed
+/// <c>KeyValuePair&lt;string, object?&gt;</c>, <c>KeyValuePair.Create</c>, <c>TagList.Add</c> and
+/// <c>TagList</c> initializers, and pairs passed straight to an instrument, a
+/// <c>Measurement&lt;T&gt;</c> or <c>DomainTimer.Start</c>. Tenant attribution belongs on spans
+/// and log records, where high cardinality is cheap, so <c>Activity.SetTag</c> and log scopes are
+/// deliberately not read. Putting it on metrics blows up the TSDB working set.
+///
+/// <para>
+/// A key that is not a string literal cannot be checked against the allowlist, so it fails
+/// unless a <c>// cardinality-ok: &lt;reason&gt;</c> marker on its line or in the five lines above
+/// says why its value set is bounded (or why the pair is not a metric attribute at all). A bare
+/// marker with no reason is not honoured. The marker never admits a literal name: an unlisted
+/// literal goes on the allowlist or not at all.
+/// </para>
 ///
 /// <para>
 /// The name check is a <em>closed allowlist</em> (<see cref="AllowedAttributeNames"/>), not a
@@ -32,7 +42,7 @@ namespace Dependably.Tests.Unit.Observability;
 /// </para>
 /// </summary>
 [Trait("Category", "Unit")]
-public sealed partial class CardinalityBudgetTests
+public sealed class CardinalityBudgetTests
 {
     /// <summary>
     /// Every metric attribute name the codebase may emit, each with the bounded value set
@@ -42,7 +52,9 @@ public sealed partial class CardinalityBudgetTests
     /// </summary>
     private static readonly HashSet<string> AllowedAttributeNames = new(StringComparer.Ordinal)
     {
-        "ecosystem",    // the fixed ecosystem list (npm|pypi|nuget|maven|rpm|oci|go|cargo|apk)
+        "ecosystem",    // the shared ecosystem vocabulary (ECOSYSTEMS in web/src/lib/ecosystems.js)
+        "scope",        // ecosystem|org — the metadata-invalidation counters only: which kind of
+                        // cache set the message clears (MetadataInvalidationScopes)
         "outcome",      // the closed vocabulary pinned by OutcomeValueTests
         "reason",       // per-instrument bounded reason vocabularies
         "policy",       // rate-limit policy names declared by [EnableRateLimiting], plus "tenant"
@@ -57,31 +69,17 @@ public sealed partial class CardinalityBudgetTests
         "pass",         // provenance verification pass/fail label
     };
 
-    [GeneratedRegex(@"KeyValuePair<string,\s*object\?>\(""(?<name>[^""]+)""")]
-    private static partial Regex MetricAttributeRegex();
-
     [Fact]
     public void NoAttributeNameOutsideTheAllowlistOnMetricInstruments()
     {
+        var files = EnumerateScannedSource().Select(f => (Path: f, Text: File.ReadAllText(f))).ToList();
+        var context = MetricAttributeScanner.BuildContext(files.Select(f => f.Text));
         var violations = new List<string>();
 
-        foreach (string file in EnumerateScannedSource())
+        foreach (var (file, text) in files)
         {
-            string[] lines = File.ReadAllLines(file);
-            for (int i = 0; i < lines.Length; i++)
-            {
-                foreach (Match m in MetricAttributeRegex().Matches(lines[i]))
-                {
-                    string name = m.Groups["name"].Value;
-                    if (AllowedAttributeNames.Contains(name))
-                    {
-                        continue;
-                    }
-
-                    string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
-                    violations.Add($"{rel}:{i + 1}  metric attribute \"{name}\" is not in the allowlist");
-                }
-            }
+            string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
+            violations.AddRange(FindViolations(text, context).Select(v => $"{rel}:{v}"));
         }
 
         Assert.True(
@@ -90,8 +88,62 @@ public sealed partial class CardinalityBudgetTests
             "from a bounded vocabulary; tenant, package, principal, digest, version and address " +
             "attribution belongs on spans / logs, not on metrics. Add a genuinely bounded new " +
             "attribute to AllowedAttributeNames in CardinalityBudgetTests, stating its value set. " +
+            "A key the scan cannot read (not a string literal) needs a literal, or a " +
+            "`// cardinality-ok: <reason>` marker on its line or in the five lines above. " +
             "See dependably-community.spec/specs/design/DESIGN-observability-taxonomy.md#cardinality-budget.\n  " +
             string.Join("\n  ", violations));
+    }
+
+    /// <summary>
+    /// Every allowlisted name is emitted somewhere in src. Guards both ways: a scan that has
+    /// stopped reading a form goes red here instead of green-but-blind, and a name whose last
+    /// emitter was removed leaves the allowlist rather than lingering as pre-approval.
+    /// </summary>
+    [Fact]
+    public void EveryAllowlistedNameIsSeenByTheScan()
+    {
+        var files = EnumerateScannedSource().Select(File.ReadAllText).ToList();
+        var context = MetricAttributeScanner.BuildContext(files);
+        var seen = files
+            .SelectMany(text => MetricAttributeScanner.Scan(text, context))
+            .Where(k => k.Kind == MetricAttributeKeyKind.Literal)
+            .Select(k => k.Text)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var unseen = AllowedAttributeNames.Where(n => !seen.Contains(n)).Order(StringComparer.Ordinal).ToList();
+
+        Assert.True(
+            unseen.Count == 0,
+            "Allowlisted metric attribute names the scan found no emitter for: " + string.Join(", ", unseen) +
+            ". Either the scan has gone blind to the form that emits them, or the emitter is gone and " +
+            "the name should leave AllowedAttributeNames.");
+    }
+
+    /// <summary>
+    /// The gate's verdict on one source text: each entry is <c>&lt;line&gt;  &lt;why&gt;</c>.
+    /// </summary>
+    internal static IReadOnlyList<string> FindViolations(string source, MetricAttributeScanner.Context context)
+    {
+        var violations = new List<string>();
+        string[] lines = source.Split('\n');
+        foreach (var key in MetricAttributeScanner.Scan(source, context))
+        {
+            if (key.Kind == MetricAttributeKeyKind.Literal)
+            {
+                if (!AllowedAttributeNames.Contains(key.Text))
+                {
+                    violations.Add($"{key.Line}  metric attribute \"{key.Text}\" is not in the allowlist");
+                }
+            }
+            else if (!MetricAttributeScanner.HasOptOut(lines, key.Line))
+            {
+                violations.Add(
+                    $"{key.Line}  metric attribute key `{key.Text}` is not a string literal, so the " +
+                    "allowlist cannot check it; use a literal or mark it `// cardinality-ok: <reason>`");
+            }
+        }
+
+        return violations;
     }
 
     // ── bounded reason vocabulary on upstream_url_blocks ─────────────────────

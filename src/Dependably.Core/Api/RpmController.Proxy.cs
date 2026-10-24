@@ -273,7 +273,7 @@ public sealed partial class RpmController
         // it can only ever ride to a fetch whose host matches the configured upstream — never to
         // whatever third-party host the upstream's own repodata named.
         string? rpmUpstreamCredential = null;
-        string? authorizationHeader = UpstreamHostPin.IsSameHost(upstreamBase, resolution.PackageUrl)
+        string? authorizationHeader = UpstreamHostPin.IsSameOrigin(upstreamBase, resolution.PackageUrl)
             ? rpmUpstreamCredential
             : null;
 

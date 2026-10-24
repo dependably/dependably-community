@@ -321,6 +321,10 @@
     <value>'*' is only supported as the final character (trailing glob).</value>
     <comment>422 detail: wildcard placed anywhere except the end of the pattern.</comment>
   </data>
+  <data name="error.list.reservedNamespaceDuplicate" xml:space="preserve">
+    <value>'{0}' is already reserved for this ecosystem.</value>
+    <comment>409 detail for POST /api/v1/reserved-namespaces when the organization already reserves the same pattern in the same ecosystem. {0} = the pattern as entered (API literal, e.g. '@acme/*').</comment>
+  </data>
   <data name="error.list.ecosystemInvalidDenylist" xml:space="preserve">
     <value>ecosystem must be one of: npm, pypi, nuget, maven, cargo, golang, rpm, oci.</value>
     <comment>422 detail. The field name and values are API literals - do not translate them.</comment>
@@ -368,6 +372,14 @@
   <data name="error.settings.offWarnBlock" xml:space="preserve">
     <value>Must be 'off', 'warn', or 'block'.</value>
     <comment>422 detail shared by the tri-state security gates. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.settings.ociScanDisabled" xml:space="preserve">
+    <value>OCI image scanning is not enabled on this instance (OCI_SCAN_ENABLED), so every image would be refused as unscanned. Enable scanning first, or leave this at 'off'.</value>
+    <comment>422 detail for oci_scan_enforcement when a non-off value is set while the instance has image scanning disabled. OCI_SCAN_ENABLED and 'off' are literals.</comment>
+  </data>
+  <data name="error.settings.ociScannerNotSeen" xml:space="preserve">
+    <value>No OCI image scanner has connected for this organization yet, so every image would be refused as unscanned. Start a scanner with a scan:oci token first, or leave this at 'off'.</value>
+    <comment>422 detail for oci_scan_enforcement when a non-off value is set while image scanning is enabled but the organization's scanner has never called the scan API. scan:oci and 'off' are literals.</comment>
   </data>
   <data name="error.quarantine.stateInvalid" xml:space="preserve">
     <value>Must be 'pending', 'approved', or 'denied'.</value>
@@ -766,6 +778,18 @@ View this alert in the Dependably Alerts settings.
     <value>Version is not valid.</value>
     <comment>422 detail for GET /api/v1/lookup when the version query parameter has an invalid shape.</comment>
   </data>
+  <data name="error.lookup.ociDigestRequired" xml:space="preserve">
+    <value>For an OCI image, version must be the image digest (for example sha256:...).</value>
+    <comment>422 detail for GET /api/v1/lookup?ecosystem=oci when version is missing or is not an algorithm:hex digest (a tag is not accepted). 'sha256' is the literal digest algorithm prefix - do not translate.</comment>
+  </data>
+  <data name="error.lookup.releaseRequired" xml:space="preserve">
+    <value>For apk, version must include the package revision (for example 8.5.0-r0). For rpm, it must be version-release with an optional epoch (for example 1:3.0.7-24.el9).</value>
+    <comment>422 detail for GET /api/v1/lookup?ecosystem=apk or rpm when version lacks the package revision or release, so it cannot be compared to an advisory's fixed build. '8.5.0-r0' and '1:3.0.7-24.el9' are literal examples - do not translate.</comment>
+  </data>
+  <data name="error.lookup.distroInvalid" xml:space="preserve">
+    <value>distro is not a release this lookup can check. Use an Alpine release such as v3.20, or Rocky Linux:9, AlmaLinux:9 or Red Hat:enterprise_linux:9::baseos.</value>
+    <comment>422 detail for GET /api/v1/lookup when the distro query parameter is not a recognised release for the ecosystem (apk or rpm). 'distro' is the API literal query-parameter name; 'v3.20' and 'Rocky Linux:9' are literal examples of the accepted values - do not translate them.</comment>
+  </data>
   <data name="error.lookup.mavenCoordinateInvalid" xml:space="preserve">
     <value>Maven name must be a "groupId:artifactId" coordinate.</value>
     <comment>422 detail for GET /api/v1/lookup?ecosystem=maven. 'groupId:artifactId' is the literal expected shape - do not translate the punctuation.</comment>
@@ -776,7 +800,19 @@ View this alert in the Dependably Alerts settings.
   </data>
   <data name="error.lookup.upstreamUnavailable" xml:space="preserve">
     <value>The upstream registry for '{0}' is temporarily unavailable. Try again shortly.</value>
-    <comment>503 detail for GET /api/v1/lookup when the upstream registry could not be reached (transient network failure) or has no upstream configured. {0} = the ecosystem name (API literal).</comment>
+    <comment>503 detail for GET /api/v1/lookup when a fetch from the upstream registry was attempted and could not be completed (transient network failure, timeout, or error response). {0} = the ecosystem name (API literal).</comment>
+  </data>
+  <data name="error.lookup.reservedVersionRequired" xml:space="preserve">
+    <value>This name is reserved for your organization's own '{0}' packages, so its latest version is not looked up upstream. Specify a version to check it.</value>
+    <comment>422 detail for GET /api/v1/lookup when no version was given for a name the organization has reserved (a reserved name is never fetched from an upstream registry, by the operator's choice). This is permanent until the reservation changes, so it must not suggest retrying. {0} = the ecosystem name (API literal, e.g. 'maven').</comment>
+  </data>
+  <data name="error.lookup.upstreamNotConfigured" xml:space="preserve">
+    <value>No upstream registry is configured for '{0}', so there is no latest version to look up. Specify a version to check the package.</value>
+    <comment>422 detail for GET /api/v1/lookup when no version was given and the organization has no upstream registry configured for the ecosystem (proxying is turned off for it). This is a configuration state, not an outage, so it must not suggest retrying. {0} = the ecosystem name (API literal, e.g. 'maven').</comment>
+  </data>
+  <data name="error.lookup.passthroughOffVersionRequired" xml:space="preserve">
+    <value>Proxy passthrough is off for your organization, so the latest '{0}' version is not looked up upstream. Specify a version to check the package.</value>
+    <comment>422 detail for GET /api/v1/lookup when no version was given and the organization has turned proxy passthrough off (Settings, Proxy), so no upstream registry is consulted. This is a configuration state, not an outage, so it must not suggest retrying. {0} = the ecosystem name (API literal, e.g. 'npm').</comment>
   </data>
   <data name="email.invite.subject" xml:space="preserve">
     <value>You've been invited to {0} on Dependably</value>
@@ -1136,5 +1172,109 @@ If you did not make this change, contact your administrator immediately — your
   <data name="error.trustAnchor.labelTooLong" xml:space="preserve">
     <value>Label must be {0} characters or fewer.</value>
     <comment>422 detail: trust-anchor label over the length cap. {0} = the cap.</comment>
+  </data>
+  <data name="error.ociScan.claimMax" xml:space="preserve">
+    <value>max must be between 1 and {0}.</value>
+    <comment>422 detail when a scanner's claim asks for too few or too many jobs. 'max' is an API field name.</comment>
+  </data>
+  <data name="error.ociScan.leaseLost" xml:space="preserve">
+    <value>This job is not leased to the caller: its lease expired, or another claim holds it.</value>
+    <comment>409 detail when a scanner writes to an OCI scan job it no longer holds.</comment>
+  </data>
+  <data name="error.ociScan.failReason" xml:space="preserve">
+    <value>reason is required and at most {0} characters.</value>
+    <comment>422 detail when a scanner reports a failure without a usable reason. 'reason' is an API field name.</comment>
+  </data>
+  <data name="error.ociScan.advisorySourceUnavailable" xml:space="preserve">
+    <value>The result names advisories this server does not hold, and its advisory source cannot be reached to verify them. Nothing was stored; the job will be retried.</value>
+    <comment>503 detail when an OCI scanner's result is refused because the server's OSV source is unreachable. The job has already been returned to the queue, so the scanner should not fail it.</comment>
+  </data>
+  <data name="error.ociScan.unavailable" xml:space="preserve">
+    <value>The image references this object, but it cannot be read now. Fail the job as retryable and it will be retried.</value>
+    <comment>503 detail when an image's layer or manifest is referenced but neither stored nor fetchable from upstream.</comment>
+  </data>
+  <data name="error.ociScan.platformsRequired" xml:space="preserve">
+    <value>A result must describe at least one platform.</value>
+    <comment>422 detail for an OCI scan result with no platforms.</comment>
+  </data>
+  <data name="error.ociScan.platformsMax" xml:space="preserve">
+    <value>A result may describe at most {0} platforms.</value>
+    <comment>422 detail for an OCI scan result with too many platforms.</comment>
+  </data>
+  <data name="error.ociScan.advisoriesMax" xml:space="preserve">
+    <value>A result may carry at most {0} advisories.</value>
+    <comment>422 detail for an OCI scan result with too many advisories.</comment>
+  </data>
+  <data name="error.ociScan.advisoryInvalid" xml:space="preserve">
+    <value>Every advisory must be a complete OSV record with an id.</value>
+    <comment>422 detail when an advisory in an OCI scan result is not an OSV record.</comment>
+  </data>
+  <data name="error.ociScan.platformInvalid" xml:space="preserve">
+    <value>Each platform needs a distinct name, a scanner version, an extraction version and an OSV source.</value>
+    <comment>422 detail for a malformed platform entry in an OCI scan result.</comment>
+  </data>
+  <data name="error.ociScan.gapsInvalid" xml:space="preserve">
+    <value>Each platform may list at most {0} coverage gaps, none of them empty.</value>
+    <comment>422 detail for a malformed gap list in an OCI scan result.</comment>
+  </data>
+  <data name="error.ociScan.componentsInvalid" xml:space="preserve">
+    <value>Each platform must list its components, at most {0} in all.</value>
+    <comment>422 detail when an OCI scan result's component list is missing or too long.</comment>
+  </data>
+  <data name="error.ociScan.componentInvalid" xml:space="preserve">
+    <value>Each component needs a purl, ecosystem, name and version, and no text field may exceed {0} characters.</value>
+    <comment>422 detail for a malformed component in an OCI scan result.</comment>
+  </data>
+  <data name="error.ociScan.findingsMax" xml:space="preserve">
+    <value>A result may carry at most {0} findings in total, summed over every component.</value>
+    <comment>422 detail when an OCI scan or match result carries too many findings across all of its components.</comment>
+  </data>
+  <data name="error.ociScan.vulnsMax" xml:space="preserve">
+    <value>A component may list at most {0} advisories.</value>
+    <comment>422 detail when one component in an OCI scan result lists too many advisories.</comment>
+  </data>
+  <data name="error.ociScan.vulnUnknown" xml:space="preserve">
+    <value>Every finding must name an advisory whose OSV record is in the result's advisories.</value>
+    <comment>422 detail when a finding references an advisory the result does not include.</comment>
+  </data>
+  <data name="error.ociScan.reachabilityInvalid" xml:space="preserve">
+    <value>reachability must be reachable, not_observed or unknown.</value>
+    <comment>422 detail for an unknown reachability value. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.ociScan.vulnTextTooLong" xml:space="preserve">
+    <value>A finding's text fields may not exceed {0} characters.</value>
+    <comment>422 detail when a finding's basis or confidence text is too long.</comment>
+  </data>
+  <data name="error.ociScan.platformUnknown" xml:space="preserve">
+    <value>The image's scan result has no such platform.</value>
+    <comment>422 detail when the scan-detail read names a platform the stored result does not hold. "platform" is an OS/architecture pair such as linux/amd64.</comment>
+  </data>
+  <data name="error.ociScan.contentGapsNotSubset" xml:space="preserve">
+    <value>Each platform's contentGaps must be a subset of its gaps.</value>
+    <comment>422 detail when an OCI scan result lists a content gap that is not among the platform's gaps. 'contentGaps' and 'gaps' are API field names.</comment>
+  </data>
+  <data name="error.ociScan.verdictInvalid" xml:space="preserve">
+    <value>A component verdict needs a status of reachable, not_observed or unknown, and no text field may exceed {0} characters.</value>
+    <comment>422 detail for a malformed component verdict in an OCI scan result. The quoted values are API literals.</comment>
+  </data>
+  <data name="error.ociScan.attemptRequired" xml:space="preserve">
+    <value>attempt is required: pass the attempt the claim returned.</value>
+    <comment>422 detail when a scanner calls a heartbeat, result, fail or rematch route without the attempt query parameter, or with a value below 1. 'attempt' is an API parameter name.</comment>
+  </data>
+  <data name="error.ociScan.inventoryChanged" xml:space="preserve">
+    <value>The image was re-extracted after its inventory was read, so these matches no longer apply. Nothing was stored.</value>
+    <comment>409 detail when a scanner posts matches for an OCI image inventory that has since been replaced.</comment>
+  </data>
+  <data name="error.ociScan.findingUnknown" xml:space="preserve">
+    <value>Every finding must name a stored component of this image, on the platform it is listed under, once.</value>
+    <comment>422 detail when a rematch finding names a component the image's stored inventory does not hold on that platform.</comment>
+  </data>
+  <data name="error.ociScan.matchPlatformInvalid" xml:space="preserve">
+    <value>Each platform needs a distinct name, the coverageId the inventory returned, a scanner version and an OSV source.</value>
+    <comment>422 detail for a malformed platform entry in an OCI rematch result. 'coverageId' is an API field name.</comment>
+  </data>
+  <data name="error.ociScan.platformsIncomplete" xml:space="preserve">
+    <value>A rematch result must cover every stored platform of the image.</value>
+    <comment>422 detail when an OCI rematch result leaves out one of the image's stored platforms.</comment>
   </data>
 </root>

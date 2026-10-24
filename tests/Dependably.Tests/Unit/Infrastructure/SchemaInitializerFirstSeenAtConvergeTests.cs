@@ -256,6 +256,52 @@ public sealed class SchemaInitializerFirstSeenAtConvergeTests : IAsyncLifetime
         Assert.Equal("2026-05-05T05:05:05Z", firstSeen);
     }
 
+    [Theory]
+    [InlineData("add_pvv_owner_invariant_check", "id                  TEXT PRIMARY KEY,", "package_version_id  TEXT REFERENCES")]
+    [InlineData("make_pvv_package_version_id_nullable", "id                  TEXT,", "package_version_id  TEXT NOT NULL REFERENCES")]
+    public async Task PvvReshapes_PreserveMalStillLiveForVersion(string migration, string idColumn, string versionColumn)
+    {
+        await using var conn = await _db.OpenAsync();
+
+        // The shape each reshape rebuilds from, already carrying the additive columns a database
+        // gains in phase 1 of the same boot, before the reshape runs.
+        await conn.ExecuteAsync("DROP TABLE package_version_vulns");
+        await conn.ExecuteAsync($"""
+            CREATE TABLE package_version_vulns (
+                {idColumn}
+                {versionColumn} package_versions(id) ON DELETE CASCADE,
+                vuln_id             TEXT NOT NULL REFERENCES vulnerabilities(id) ON DELETE CASCADE,
+                checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                first_seen_at       TEXT,
+                cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
+                owner_kind          TEXT NOT NULL DEFAULT 'package_version'
+                                    CHECK (owner_kind IN ('package_version','cache_artifact')),
+                mal_still_live_for_version INTEGER NOT NULL DEFAULT 0,
+                alias_severity      TEXT,
+                alias_cvss_score    REAL,
+                alias_summary       TEXT,
+                alias_resolved_at   TEXT
+            )
+            """);
+
+        string verId = await SeedPackageVersionAsync();
+        string vulnId = await SeedVulnerabilityAsync($"GHSA-mal-live-{migration}"[..30]);
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO package_version_vulns
+                (id, package_version_id, vuln_id, owner_kind, checked_at, first_seen_at, mal_still_live_for_version)
+            VALUES ('pvv-mal-01', @verId, @vulnId, 'package_version',
+                    '2026-05-05T05:05:05Z', '2026-05-05T05:05:05Z', 1)
+            """,
+            new { verId, vulnId });
+
+        await ResetMigrationAsync(migration);
+        await ReapplyAsync();
+
+        Assert.Equal(1L, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM package_version_vulns WHERE mal_still_live_for_version = 1"));
+    }
+
     // ── seed helpers ───────────────────────────────────────────────────────────────────────
 
     private async Task<string> SeedOrgAsync()

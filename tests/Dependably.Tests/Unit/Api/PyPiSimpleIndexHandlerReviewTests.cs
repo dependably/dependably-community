@@ -97,14 +97,137 @@ public sealed class PyPiSimpleIndexHandlerReviewTests : IAsyncLifetime
             "with no intervening Invalidate the render must be cached");
     }
 
+    [Fact]
+    public async Task Proxy_ProxySettingsInvalidateAfterSettingsReadBeforeRebuild_StaleRenderIsNotCached()
+    {
+        // Passthrough ON with no upstream registry: the proxy path renders the local fallback
+        // and caches it under the proxy key. The seam invalidates the org's epoch at the proxy
+        // path's first cache lookup, which is after the handler read the settings it renders
+        // with and before the single-flight rebuild starts. A token captured at the rebuild
+        // would be the fresh one and keep the pre-flip render for the full proxy TTL.
+        await SeedLocalPackageAsync(passthrough: true);
+        await ClaimMixedAsync("hosted-pkg");
+
+        var epochStore = new OrgCacheEpochStore();
+        var cacheKey = new PyPiSimpleIndexKey(_orgId, "hosted-pkg") { IsProxy = true };
+        var cache = new InvalidateEpochDuringReadCache(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.PyPiSimpleIndex, epochStore, cacheKey, _orgId);
+        var handler = BuildHandler(cache);
+
+        var result = await handler.PackageIndexAsync(
+            BuildContext("host.example.test"), _orgId, "hosted-pkg", CancellationToken.None);
+        Assert.IsType<FileContentResult>(result);
+
+        Assert.False(cache.TryGet(cacheKey, out _),
+            "a render whose settings predate a concurrent proxy-settings invalidate must not be cached");
+    }
+
+    [Fact]
+    public async Task Proxy_NoConcurrentInvalidate_RenderIsCached()
+    {
+        await SeedLocalPackageAsync(passthrough: true);
+        await ClaimMixedAsync("hosted-pkg");
+
+        var epochStore = new OrgCacheEpochStore();
+        var cacheKey = new PyPiSimpleIndexKey(_orgId, "hosted-pkg") { IsProxy = true };
+        var cache = new RenderedResponseCache<PyPiSimpleIndexKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.PyPiSimpleIndex, epochStore);
+        var handler = BuildHandler(cache);
+
+        Assert.IsType<FileContentResult>(await handler.PackageIndexAsync(
+            BuildContext("host.example.test"), _orgId, "hosted-pkg", CancellationToken.None));
+
+        Assert.True(cache.TryGet(cacheKey, out byte[]? cached) && cached is not null,
+            "with no intervening Invalidate the proxy-path render must be cached");
+    }
+
+    // An uploaded version shadows the proxied rows of the same PEP 440 version in listings, but the
+    // index is file-level: the shadowed proxied file keeps its own entry, and its block state.
+    private const string ShadowedProxyFile = "hosted_pkg-1.0.0.tar.gz";
+
+    private async Task<string> SeedShadowedProxyFileAsync(string? manualBlockState)
+    {
+        var cacheArtifacts = new CacheArtifactRepository(_db);
+        var at = _clock.GetUtcNow();
+        var cached = await cacheArtifacts.InsertAsync(new CacheArtifact
+        {
+            Id = Guid.NewGuid().ToString("D"),
+            Ecosystem = "pypi",
+            Name = "hosted-pkg",
+            Version = "01.0.0",
+            Filename = ShadowedProxyFile,
+            BlobKey = $"proxy/{Guid.NewGuid():N}",
+            ContentHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd",
+            SizeBytes = 3,
+            FirstCachedAt = at,
+            LastAccessedAt = at,
+        });
+        var access = new TenantArtifactAccessRepository(_db);
+        await access.UpsertAsync(_orgId, cached.Id, at, TenantContentBinding.None);
+        if (manualBlockState is not null)
+        {
+            await access.SetManualBlockStateAsync(_orgId, cached.Id, manualBlockState);
+        }
+
+        return cached.Id;
+    }
+
+    private async Task<string> RenderLocalIndexAsync()
+    {
+        var cache = new RenderedResponseCache<PyPiSimpleIndexKey>(
+            new MemoryCache(new MemoryCacheOptions { SizeLimit = 32 * 1024 * 1024 }),
+            MetadataCacheKeys.PyPiSimpleIndex, new OrgCacheEpochStore());
+        var result = await BuildHandler(cache).PackageIndexAsync(
+            BuildContext("host.example.test"), _orgId, "hosted-pkg", CancellationToken.None);
+        return Assert.IsType<ContentResult>(result).Content!;
+    }
+
+    [Fact]
+    public async Task LocalOnly_ShadowedProxiedFile_IsAdvertisedUnderItsOwnName()
+    {
+        await SeedLocalPackageAsync();
+        await SeedShadowedProxyFileAsync(manualBlockState: null);
+
+        string body = await RenderLocalIndexAsync();
+
+        Assert.Contains(ShadowedProxyFile, body);
+        Assert.Contains("hosted_pkg-1.0.0-py3-none-any.whl", body);
+    }
+
+    [Fact]
+    public async Task LocalOnly_BlockedShadowedProxiedFile_IsWithheld()
+    {
+        await SeedLocalPackageAsync();
+        await SeedShadowedProxyFileAsync(manualBlockState: "blocked");
+
+        string body = await RenderLocalIndexAsync();
+
+        Assert.DoesNotContain(ShadowedProxyFile, body);
+        Assert.Contains("hosted_pkg-1.0.0-py3-none-any.whl", body);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    private async Task SeedLocalPackageAsync()
+    // A hosted name is implicitly local-only; a mixed claim is the operator opt-in that routes it
+    // through the proxy path.
+    private async Task ClaimMixedAsync(string name)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync("""
+            INSERT INTO claim (id, org_id, ecosystem, name, state, reason)
+            VALUES (@id, @o, 'pypi', @name, 'mixed', 'test')
+            """,
+            new { id = Guid.NewGuid().ToString("N"), o = _orgId, name });
+    }
+
+    private async Task SeedLocalPackageAsync(bool passthrough = false)
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(
-            "INSERT INTO org_settings (org_id, anonymous_pull, proxy_passthrough_enabled) VALUES (@id, 1, 0)",
-            new { id = _orgId });
+            "INSERT INTO org_settings (org_id, anonymous_pull, proxy_passthrough_enabled) VALUES (@id, 1, @passthrough)",
+            new { id = _orgId, passthrough = passthrough ? 1 : 0 });
         await conn.ExecuteAsync("""
             INSERT INTO packages (id, org_id, ecosystem, name, purl_name, is_proxy)
             VALUES (@id, @o, 'pypi', 'hosted-pkg', 'hosted-pkg', 0)

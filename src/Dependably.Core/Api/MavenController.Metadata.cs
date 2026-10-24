@@ -129,21 +129,37 @@ public sealed partial class MavenController
         // g/a/{release}/maven-metadata.xml parses as an artifact-level request for a coordinate
         // nothing holds and 404s, which is what Maven Central answers for it too.
         bool isSnapshotVersionMetadata = coords.Version is not null && coords.IsSnapshot;
-        var cacheKey = isSnapshotVersionMetadata
-            ? new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId, coords.Version)
-            : new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId);
+
+        // Capture the org policy epoch before reading any of the org state the rendering decision
+        // and the rebuild depend on (proxy settings, registries, reservations). A reservation add
+        // or proxy-settings PUT bumps the epoch after committing; one landing after the reads
+        // below cancels this token, so the document rendered from the pre-change state is stored
+        // already expired instead of binding to the fresh epoch and serving until its TTL.
+        var epochToken = _svc.MetadataCache.CaptureOrgEpochToken(orgId);
 
         // Decide proxy-vs-local up front from the cheap checks: a configured upstream registry
-        // and a non-reserved groupId. This drives both the in-memory cache TTL and the HTTP
-        // Cache-Control header. On a cache HIT the rebuild below is skipped, so the only work
-        // these incur is a registry resolve + reserved-namespace lookup (DB/registry reads,
-        // not the upstream HTTP fetch that the cache exists to avoid).
+        // and no reserved name behind the path. This drives the cache key variant, the in-memory
+        // cache TTL and the HTTP Cache-Control header. On a cache HIT the rebuild below is
+        // skipped, so the only work these incur is a registry resolve + reserved-namespace lookup
+        // (DB/registry reads, not the upstream HTTP fetch that the cache exists to avoid).
         var settings = await _svc.Orgs.GetSettingsAsync(orgId, ct);
         var bases = await _svc.Registries.ResolveAsync(orgId, "maven", ct);
         bool useUpstream = _svc.Upstream is not null &&
+            (settings is null || settings.ProxyPassthroughEffective) &&
             bases.Count > 0 &&
-            !await _svc.ReservedNamespaces.IsReservedAsync(orgId, "maven", coords.GroupId, ct);
+            !await _svc.ReservedNamespaces.IsMavenMetadataPathReservedAsync(
+                orgId, coords.GroupId, coords.ArtifactId, isSnapshotVersionMetadata, ct);
         var ttl = useUpstream ? MetadataProxyTtl : MetadataLocalTtl;
+
+        // The decision is part of the key, so a document rendered when proxying was allowed can
+        // never answer a request that decided local-only, whichever replica or epoch stored it.
+        // The version-level SNAPSHOT document is built only from maven_version_files, so its two
+        // variants hold identical bytes; it carries the axis anyway so every Maven key has the
+        // same variant matrix and the coordinator's eviction is uniform. The duplicate is at
+        // most one extra entry per coordinate, bounded by the cache SizeLimit.
+        var cacheKey = isSnapshotVersionMetadata
+            ? new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId, coords.Version) { IsProxy = useUpstream }
+            : new MavenMetadataKey(orgId, coords.GroupId, coords.ArtifactId) { IsProxy = useUpstream };
 
         // Both the metadata response and the checksum sidecar must read the SAME rendered bytes —
         // the sidecar hashes the document we serve. Producing the body once through the cache
@@ -153,7 +169,8 @@ public sealed partial class MavenController
             rebuildCt => isSnapshotVersionMetadata
                 ? BuildMavenSnapshotMetadataBytesAsync(orgId, coords, rebuildCt)
                 : BuildMavenMetadataBytesAsync(orgId, coords, bases, useUpstream, settings, rebuildCt),
-            ct);
+            ct,
+            epochToken);
 
         if (bodyBytes is null)
         {
@@ -265,7 +282,7 @@ public sealed partial class MavenController
     private async Task<HashSet<string>> BlockedMavenVersionsAsync(
         string orgId, string purlName, OrgSettings? settings, CancellationToken ct)
     {
-        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var blocked = new HashSet<string>(VersionIdentity.Comparer("maven"));
         var now = _svc.Time.GetUtcNow();
 
         var pkg = await _svc.Packages.GetByPurlNameAsync(orgId, "maven", purlName, ct);
@@ -380,8 +397,16 @@ public sealed partial class MavenController
             : null;
 
         // Merge upstream versions when proxying is live for this coordinate. An empty
-        // registry list (proxying disabled) or a reserved groupId leaves it local-only.
+        // registry list (proxying disabled) or a reserved name behind the path leaves it local-only.
+        //
+        // g/a/maven-metadata.xml is also the URL of the group-level document for group g.a, which
+        // Maven reads to resolve a short plugin prefix (mvn help:help against
+        // org/apache/maven/plugins/maven-metadata.xml). Upstream answers that path with whichever
+        // document it holds, so the same fetch is read both ways: a body declaring versions takes
+        // the merge below, and a plugin-prefix body is kept aside as the fallback served when
+        // nothing lists a version.
         var mergedVersions = localVersions;
+        byte[]? upstreamPluginGroup = null;
         if (useUpstream)
         {
             string groupPath = coords.GroupId.Replace('.', '/');
@@ -390,24 +415,35 @@ public sealed partial class MavenController
             // Walk upstreams in priority order; the first that returns versions wins.
             foreach (var source in bases)
             {
-                var upstreamVersions = await _svc.Upstream!.FetchUpstreamVersionsAsync(source.Url, artifactPath, ct, source.AuthorizationHeader);
-                if (upstreamVersions is { Count: > 0 })
+                var upstream = await _svc.Upstream!.FetchUpstreamMetadataAsync(source.Url, artifactPath, ct, source.AuthorizationHeader);
+                if (upstream is null)
+                {
+                    continue;
+                }
+
+                if (upstream.Versions.Count > 0)
                 {
                     // Union: local wins on collision; preserve order (local first, then upstream-only additions).
-                    var localSet = new HashSet<string>(localVersions, StringComparer.OrdinalIgnoreCase);
+                    var localSet = new HashSet<string>(localVersions, VersionIdentity.Comparer("maven"));
                     mergedVersions = [
                         .. localVersions,
-                        .. upstreamVersions.Where(v => !localSet.Contains(v) && !blocked.Contains(v)),
+                        .. upstream.Versions.Where(v => !localSet.Contains(v) && !blocked.Contains(v)),
                     ];
                     break;
                 }
+
+                upstreamPluginGroup ??= upstream.PluginGroupDocument;
             }
         }
 
-        // Null caches nothing and surfaces as the empty-version-set 404 below.
         if (mergedVersions.Count == 0)
         {
-            return null;
+            // No version to list, so this is not an artifact this org can serve. Serve the
+            // upstream plugin-prefix document verbatim when there is one; otherwise null caches
+            // nothing and surfaces as the empty-version-set 404. A reserved group-level reading
+            // never reaches here with a document: IsMavenMetadataPathReservedAsync kept the fetch
+            // from running at all.
+            return upstreamPluginGroup;
         }
 
         string body = MavenMetadataBuilder.Build(coords.GroupId, coords.ArtifactId, mergedVersions, lastUpdated);

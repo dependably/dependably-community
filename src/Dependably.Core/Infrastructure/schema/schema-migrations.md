@@ -104,6 +104,15 @@ migration to rewrite legacy rows — e.g. `migrate_block_deprecated_to_block_all
 
 Adding or removing indexes is always safe — they don't affect data visible to running code.
 
+Where an index is declared is not, though. The schema files run before the additive pass, against
+whatever table shape the booting database already has. An index there that names a column added by
+an `ALTER` therefore fails the boot of every database created before that column existed. Declare
+such an index in `RunAdditiveMigrationsAsync`, right after the `ALTER` that adds the column, and
+leave it there while any supported upgrade source lacks the column. The additive pass also runs on
+fresh installs, so they still get the index. `SchemaUpgradeOrderComplianceTests` enforces this
+against the previous release and against every release from its `OldestUpgradeSource` (the oldest
+release a live database may have been created by) on.
+
 ### Destructive DDL
 
 Never pair a destructive statement (`DROP COLUMN`, `DROP TABLE`) with a statement that depends on the new structure in the same release.
@@ -143,7 +152,7 @@ The baseline is the newest `vX.Y.Z` tag reachable from `HEAD`. The tag's objects
 The comparison is between the two **declarative** schema files at the previous tag and in the working tree. It never reads `SchemaInitializer`, and it does not compare views. So these remain reviewer-enforced:
 
 - **Migration-applied DDL.** A `RunOnceAsync` `DROP COLUMN` / `DROP TABLE` whose object is still declared in `Schema.sql` is invisible — the gate sees the declaration, the database sees the drop. Likewise the `ADD CONSTRAINT … CHECK` narrowings in `SchemaInitializer.OwnerPlane.cs` and the table rebuilds in `SchemaInitializer.Reshapes.cs`: those change the on-disk shape without touching either schema file. Keeping the schema files authoritative (the rule at the top of this document) is what keeps this blind spot empty.
-- **Views.** `artifact_inventory`, `artifact_license`, and `org_storage_bytes` are created imperatively in `SchemaInitializer.Views.cs`, so no schema-file diff describes them. Their shape is under the same blue-green rule as a table's — a view may gain columns, but dropping, renaming, or retyping one is an expand/migrate/contract sequence, because blue reads the view while green replaces it. Postgres enforces that mechanically (`CREATE OR REPLACE VIEW` refuses all three), and the guarded drop+create fallback is the deliberate contract step; on SQLite the rule is reviewer-enforced. A boot that changes no view definition performs no view DDL at all, so replica starts, scale-out, and rolling restarts leave concurrent readers untouched.
+- **Views.** `artifact_inventory`, `artifact_license`, `org_storage_bytes`, and `org_billable_storage_bytes` are created imperatively in `SchemaInitializer.Views.cs`, so no schema-file diff describes them. Their shape is under the same blue-green rule as a table's — a view may gain columns, but dropping, renaming, or retyping one is an expand/migrate/contract sequence, because blue reads the view while green replaces it. Postgres enforces that mechanically (`CREATE OR REPLACE VIEW` refuses all three), and the guarded drop+create fallback is the deliberate contract step; on SQLite the rule is reviewer-enforced. A boot that changes no view definition and runs no table reshape performs no view DDL at all, so replica starts, scale-out, rolling restarts, and an upgrade whose only pending one-time migrations rewrite rows leave concurrent readers untouched. The views are dropped only before a pending `RunOnceAsync` whose body declares `dropsViews: true` — one that recreates, renames, drops, or retypes a table or column, which SQLite and Postgres refuse while a dependent view exists — and are recreated at the end of the same apply. For the length of that window the previous release's reads through the views fail, so a release carrying such a migration is a blue-green hazard to call out; a backfill or other row-only migration must leave `dropsViews` at its default of `false`.
 - **Multi-list `CHECK` columns.** A column constrained by more than one `IN (...)` list contributes the union of those lists, so a value is reported only when it disappears from every list. The alternative (intersection) would produce false narrowing reports on correct schemas. Unreachable today — of the `IN` lists in the two files, no column carries more than one.
 - **Baseline selection on an unrebased branch.** When ancestry is unknowable (shallow history), the fallback picks the globally highest tag rather than the highest tag reachable from `HEAD`. A branch cut before a release landed, then built after it, is compared against a schema it never contained and can report spurious removals. Rebase on `main` — the same rule that already governs branching here.
 

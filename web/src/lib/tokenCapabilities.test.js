@@ -32,6 +32,14 @@ describe('presetToCapabilities', () => {
     expect(PACKAGE_PRESETS).not.toContain('sbom')
   })
 
+  it('scanner → scan:oci only, a privileged preset no package preset grants', () => {
+    // scan:oci is in AdminCaps, so the scanner preset is offered only where the privileged ones are.
+    expect(presetToCapabilities('scanner')).toEqual(['scan:oci'])
+    for (const p of PACKAGE_PRESETS) expect(presetToCapabilities(p)).not.toContain('scan:oci')
+    expect(PRIVILEGED_PRESETS).toContain('scanner')
+    expect(capabilitiesToLabel('["scan:oci"]')).toBe('scanner')
+  })
+
   it('admin → tenant configure + read tenant', () => {
     expect(presetToCapabilities('admin')).toEqual(['tenant:configure', 'read:tenant'])
   })

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure.Identity;
 
@@ -53,8 +54,13 @@ public interface IMfaEnrollmentService
 internal sealed class MfaEnrollmentService : IMfaEnrollmentService
 {
     private readonly UserManager<DependablyUser> _users;
+    private readonly ILogger<MfaEnrollmentService> _logger;
 
-    public MfaEnrollmentService(UserManager<DependablyUser> users) => _users = users;
+    public MfaEnrollmentService(UserManager<DependablyUser> users, ILogger<MfaEnrollmentService>? logger = null)
+    {
+        _users = users;
+        _logger = logger ?? NullLogger<MfaEnrollmentService>.Instance;
+    }
 
     public async Task ResetKeyAsync(string userId, CancellationToken ct = default)
     {
@@ -82,11 +88,30 @@ internal sealed class MfaEnrollmentService : IMfaEnrollmentService
         return user?.TenantId;
     }
 
+    /// <summary>
+    /// Verifies a TOTP code against the stored key. No usable key — none enrolled, or a stored
+    /// key that does not decrypt (the store logs which account) — is an invalid code, never an
+    /// error. A key the token provider cannot read as Base32 is treated the same way.
+    /// </summary>
     public async Task<bool> VerifyTotpAsync(string userId, string code, CancellationToken ct = default)
     {
         var user = await _users.FindByIdAsync(userId);
-        return user is not null
-            && await _users.VerifyTwoFactorTokenAsync(user, TokenOptions.DefaultAuthenticatorProvider, code);
+        if (user is null || string.IsNullOrEmpty(await _users.GetAuthenticatorKeyAsync(user)))
+        {
+            return false;
+        }
+
+        try
+        {
+            return await _users.VerifyTwoFactorTokenAsync(user, TokenOptions.DefaultAuthenticatorProvider, code);
+        }
+        catch (FormatException)
+        {
+            _logger.LogWarning(
+                "The TOTP key of user {AccountId} is not a valid Base32 key; treating the code as invalid.",
+                user.Id);
+            return false;
+        }
     }
 
     public async Task<bool> RedeemRecoveryCodeAsync(string userId, string code, CancellationToken ct = default)

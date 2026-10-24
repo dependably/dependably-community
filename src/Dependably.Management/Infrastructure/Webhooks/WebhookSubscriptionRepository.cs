@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Dapper;
 using Dependably.Infrastructure.Identity;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure.Webhooks;
 
@@ -9,19 +10,26 @@ namespace Dependably.Infrastructure.Webhooks;
 /// on <c>org_id</c> to enforce tenant isolation. The HMAC signing secret is
 /// envelope-encrypted at rest via <see cref="EnvelopeProtector"/> when
 /// <c>DEPENDABLY_MASTER_KEY</c> is configured; the API layer enforces that a secret
-/// can only be stored when the key is present.
+/// can only be stored when the key is present. A secret that does not decrypt takes only its own
+/// subscription out of delivery, never the org's other subscriptions.
 /// </summary>
 public sealed class WebhookSubscriptionRepository
 {
     private readonly IMetadataStore _db;
     private readonly EnvelopeProtector _envelope;
     private readonly TimeProvider _time;
+    private readonly ILogger<WebhookSubscriptionRepository> _logger;
 
-    public WebhookSubscriptionRepository(IMetadataStore db, EnvelopeProtector envelope, TimeProvider time)
+    public WebhookSubscriptionRepository(
+        IMetadataStore db,
+        EnvelopeProtector envelope,
+        TimeProvider time,
+        ILogger<WebhookSubscriptionRepository>? logger = null)
     {
         _db = db;
         _envelope = envelope;
         _time = time;
+        _logger = logger ?? NullLogger<WebhookSubscriptionRepository>.Instance;
     }
 
     /// <summary>All subscriptions for an org, ordered by creation date.</summary>
@@ -65,7 +73,10 @@ public sealed class WebhookSubscriptionRepository
 
     /// <summary>
     /// All enabled subscriptions for an org that include the given event type.
-    /// Used by the delivery fan-out path; returns the decrypted secret for signing.
+    /// Used by the delivery fan-out path; returns the decrypted secret for signing. Secrets are
+    /// decrypted one subscription at a time: one that does not decrypt is left out with a warning
+    /// naming it and recorded as a delivery failure on that subscription, and the rest are returned. It
+    /// is never delivered unsigned.
     /// </summary>
     internal async Task<IReadOnlyList<WebhookSubscriptionDelivery>> ListEnabledForEventAsync(
         string orgId, string eventType, CancellationToken ct = default)
@@ -83,17 +94,58 @@ public sealed class WebhookSubscriptionRepository
 
         // Filter event types in application layer so we can parse JSON without raw SQL
         // and avoid injecting user-supplied event type strings into a SQL query.
-        return rows
-            .Where(r => ParseEventTypes(r.EventTypesJson).Contains(eventType, StringComparer.Ordinal))
-            .Select(r => new WebhookSubscriptionDelivery(
+        var deliveries = new List<WebhookSubscriptionDelivery>();
+        foreach (var r in rows)
+        {
+            var eventTypes = ParseEventTypes(r.EventTypesJson);
+            if (!eventTypes.Contains(eventType, StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            string? secret = null;
+            if (r.SecretStored is not null
+                && !_envelope.TryUnprotect(r.SecretStored, out secret, out string? failureReason))
+            {
+                _logger.LogWarning(
+                    "Stored secret {Kind} in {Table} row {RowId} (org {OrgId}) does not decrypt: {Reason}. "
+                    + "Skipping that subscription for event {EventType}; the org's other subscriptions are delivered.",
+                    ProtectedSecretKinds.WebhookSecret, "webhook_subscription", r.Id, r.OrgId, failureReason, eventType);
+                await RecordUndecryptableSecretAsync(r.OrgId, r.Id, ct);
+                continue;
+            }
+
+            deliveries.Add(new WebhookSubscriptionDelivery(
                 r.Id,
                 r.OrgId,
                 r.Url,
-                r.SecretStored is null ? null : _envelope.Unprotect(r.SecretStored),
-                ParseEventTypes(r.EventTypesJson),
+                secret,
+                eventTypes,
                 (int)r.ConsecutiveFailures,
-                r.FailingSince))
-            .ToList();
+                r.FailingSince));
+        }
+
+        return deliveries;
+    }
+
+    // A subscription left out of delivery because its secret does not decrypt is recorded as a
+    // delivery failure, so the subscription list shows it failing (and the usual auto-disable
+    // applies) instead of reading healthy while it sends nothing.
+    private async Task RecordUndecryptableSecretAsync(string orgId, string id, CancellationToken ct)
+    {
+        try
+        {
+            await RecordFailureAsync(
+                orgId, id,
+                "The stored signing secret cannot be decrypted; the subscription is not being delivered. Re-enter the secret to restore delivery.",
+                WebhookDispatchQueue.AutoDisableAfterFailures, WebhookDispatchQueue.AutoDisableAfterDuration, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "{ExceptionType} recording the undecryptable secret of webhook subscription {SubId} as a delivery failure.",
+                ex.GetType().Name, id);
+        }
     }
 
     /// <summary>

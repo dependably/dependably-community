@@ -83,7 +83,8 @@ public sealed class AlertSettingsRepository
     /// <summary>
     /// Decrypted Slack webhook URL for delivery. Null when Slack is disabled, unset, or the org
     /// has no settings row. Called only by the delivery queue and the slack/test endpoint — never
-    /// by a response-serializing path.
+    /// by a response-serializing path. A stored URL that does not decrypt throws
+    /// <see cref="ProtectedSecretUnreadableException"/> naming the org's row.
     /// </summary>
     public async Task<string?> GetDecryptedSlackWebhookUrlAsync(string orgId, CancellationToken ct = default)
     {
@@ -92,7 +93,10 @@ public sealed class AlertSettingsRepository
             "SELECT slack_enabled AS SlackEnabled, slack_webhook_url AS Stored FROM alert_settings WHERE org_id = @orgId",
             new { orgId });
 
-        return slackEnabled == 0 || stored is null ? null : _envelope.Unprotect(stored);
+        return slackEnabled == 0 || stored is null
+            ? null
+            : _envelope.Unprotect(stored, new ProtectedSecretRow(
+                ProtectedSecretKinds.AlertSlackWebhookUrl, "alert_settings", orgId, orgId));
     }
 
     /// <summary>

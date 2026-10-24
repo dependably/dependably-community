@@ -246,8 +246,8 @@ public partial class NuGetController : ControllerBase
 
     // ── Shared utilities ─────────────────────────────────────────────────────
 
-    private string CurrentTenantId() =>
-        ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+    // Not an OrgScopedControllerBase, so it reads the tenant through the same throwing guard.
+    private string CurrentTenantId() => HttpContext.RequireTenantId();
 }
 
 // DI-injected dependency aggregate for NuGetController. Single param avoids S107.

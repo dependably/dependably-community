@@ -69,10 +69,26 @@ public static class PurlParser
         // Qualifiers (?arch=…, ?repository_url=…) are never part of the version the producers
         // store on cache_artifact.version, so drop everything from the first '?'.
         string version = parsed.Version;
+        string? qualifiers = null;
         int qmark = version.IndexOf('?');
         if (qmark >= 0)
         {
+            qualifiers = version[(qmark + 1)..];
             version = version[..qmark];
+        }
+
+        // PurlNormalizer.Oci emits pkg:oci/{last-segment}@{digest with ':' encoded}?repository_url={repository};
+        // the OCI cache plane stores the full repository as the name and the bare digest as the version.
+        if (parsed.Ecosystem == "oci")
+        {
+            string? repository = qualifiers?.Split('&')
+                .Select(q => q.Split('=', 2))
+                .Where(kv => kv.Length == 2 && kv[0] == "repository_url")
+                .Select(kv => kv[1])
+                .FirstOrDefault();
+            return repository is null
+                ? null
+                : new ParsedPurl(parsed.Ecosystem, repository, Uri.UnescapeDataString(version));
         }
 
         // Map the purl name segment to the exact form each producer writes to cache_artifact.name.

@@ -119,3 +119,28 @@ public sealed class OciBlobDigestMismatchException : OciBlobRefusedException
         + "so it was discarded rather than cached. The bytes were truncated or altered in transit; "
         + "nothing was written to the cache.";
 }
+
+/// <summary>
+/// An upstream manifest is larger than a manifest may be while the org enforces OCI scan
+/// results. Refused as a delivery failure rather than a miss: the bytes exist upstream, but the
+/// pull gate cannot judge a body this registry would not recognise as a manifest.
+/// </summary>
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S3925:\"ISerializable\" should be implemented correctly",
+    Justification = "Binary serialization (SerializationInfo/StreamingContext) is obsolete in .NET 8+ and disabled by default; this exception is never serialized across processes.")]
+public sealed class OciManifestTooLargeException : OciBlobRefusedException
+{
+    public OciManifestTooLargeException(string reference, string upstreamHost, long capBytes)
+        : base(reference, upstreamHost,
+            $"OCI manifest {reference} from {upstreamHost} exceeds the {capBytes}-byte manifest cap applied under scan enforcement.")
+        => CapBytes = capBytes;
+
+    /// <summary>The manifest size ceiling that was exceeded.</summary>
+    public long CapBytes { get; }
+
+    public override string Fault => "manifest_too_large";
+
+    public override string OperatorMessage =>
+        $"Upstream '{UpstreamHost}' has this manifest, but it exceeds the {CapBytes}-byte manifest limit "
+        + "applied while the organization's OCI scan enforcement is warn or block, so it was not cached. "
+        + "Set OCI scan enforcement to off to proxy it unscanned.";
+}

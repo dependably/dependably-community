@@ -132,6 +132,103 @@ public sealed class HexTarballTests
         Assert.Throws<HexProtocolException>(() => HexTarball.Parse(TarOf(entries.ToArray()), ContentsCap));
     }
 
+    [Fact]
+    public void DirectoryEntriesBetweenTheRequiredOnes_AreSkipped()
+    {
+        byte[] contents = TinyContents();
+        byte[] meta = "{}."u8.ToArray();
+        byte[] checksum = Encoding.ASCII.GetBytes(Convert.ToHexString(HexTarball.ComputeInnerChecksum("3"u8.ToArray(), meta, contents)));
+        using var ms = new MemoryStream();
+        using (var tw = new TarWriter(ms, TarEntryFormat.Ustar, leaveOpen: true))
+        {
+            tw.WriteEntry(new UstarTarEntry(TarEntryType.Directory, "lib/"));
+            foreach (var (name, data) in new[] { ("VERSION", "3"u8.ToArray()), ("CHECKSUM", checksum), ("metadata.config", meta), ("contents.tar.gz", contents) })
+            {
+                tw.WriteEntry(new UstarTarEntry(TarEntryType.RegularFile, name) { DataStream = new MemoryStream(data) });
+            }
+        }
+
+        var parsed = HexTarball.Parse(ms.ToArray(), ContentsCap);
+
+        Assert.Equal("3", parsed.Version);
+        Assert.Equal(contents.LongLength, parsed.ContentsBytes);
+    }
+
+    [Fact]
+    public void SeveralMissingEntries_AreAllNamed()
+    {
+        byte[] tar = TarOf(("VERSION", "3"u8.ToArray()));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexTarball.Parse(tar, ContentsCap));
+
+        Assert.Equal("Package tarball is missing CHECKSUM, metadata.config, contents.tar.gz.", ex.Message);
+    }
+
+    [Fact]
+    public void ChecksumThatIsNotHex_IsRefusedAsNotHexEncoded()
+    {
+        byte[] tar = TarOf(
+            ("VERSION", "3"u8.ToArray()), ("CHECKSUM", "not-a-hex-digest"u8.ToArray()),
+            ("metadata.config", "{}."u8.ToArray()), ("contents.tar.gz", TinyContents()));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexTarball.Parse(tar, ContentsCap));
+
+        Assert.Equal("Package tarball CHECKSUM is not hex-encoded.", ex.Message);
+        Assert.IsType<FormatException>(ex.InnerException);
+    }
+
+    [Fact]
+    public void ChecksumOfTheWrongLength_IsRefusedEvenWhenItIsAPrefixOfTheRealOne()
+    {
+        byte[] contents = TinyContents();
+        byte[] meta = "{}."u8.ToArray();
+        string full = Convert.ToHexString(HexTarball.ComputeInnerChecksum("3"u8.ToArray(), meta, contents));
+        byte[] tar = TarOf(
+            ("VERSION", "3"u8.ToArray()), ("CHECKSUM", Encoding.ASCII.GetBytes(full[..62])),
+            ("metadata.config", meta), ("contents.tar.gz", contents));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexTarball.Parse(tar, ContentsCap));
+
+        Assert.Contains("CHECKSUM does not match", ex.Message);
+    }
+
+    [Fact]
+    public void VersionWithTrailingWhitespace_IsAccepted_AndReportedTrimmed()
+    {
+        byte[] contents = TinyContents();
+        byte[] meta = "{}."u8.ToArray();
+        byte[] version = "3\n"u8.ToArray();
+        byte[] checksum = Encoding.ASCII.GetBytes(Convert.ToHexString(HexTarball.ComputeInnerChecksum(version, meta, contents)));
+        byte[] tar = TarOf(("VERSION", version), ("CHECKSUM", checksum), ("metadata.config", meta), ("contents.tar.gz", contents));
+
+        Assert.Equal("3", HexTarball.Parse(tar, ContentsCap).Version);
+    }
+
+    [Fact]
+    public void OversizedVersionEntry_IsRefusedBeforeItIsRead()
+    {
+        byte[] tar = TarOf(
+            ("VERSION", new byte[HexTarball.MaxVersionBytes + 1]), ("CHECKSUM", "00"u8.ToArray()),
+            ("metadata.config", "{}."u8.ToArray()), ("contents.tar.gz", TinyContents()));
+
+        var ex = Assert.Throws<HexProtocolException>(() => HexTarball.Parse(tar, ContentsCap));
+
+        Assert.Contains("VERSION exceeds its 32-byte limit", ex.Message);
+    }
+
+    [Fact]
+    public void MetadataThatIsNotUtf8_IsReadAsLatin1()
+    {
+        byte[] contents = TinyContents();
+        byte[] meta = { (byte)'{', (byte)'<', (byte)'<', (byte)'"', 0xE9, (byte)'"', (byte)'>', (byte)'>', (byte)'}', (byte)'.' };
+        byte[] checksum = Encoding.ASCII.GetBytes(Convert.ToHexString(HexTarball.ComputeInnerChecksum("3"u8.ToArray(), meta, contents)));
+        byte[] tar = TarOf(("VERSION", "3"u8.ToArray()), ("CHECKSUM", checksum), ("metadata.config", meta), ("contents.tar.gz", contents));
+
+        var parsed = HexTarball.Parse(tar, ContentsCap);
+
+        Assert.Equal("{<<\"é\">>}.", parsed.MetadataText);
+    }
+
     private static byte[] TinyContents()
     {
         using var ms = new MemoryStream();

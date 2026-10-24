@@ -27,28 +27,39 @@ internal static class TestMetadataInvalidation
     {
         var harness = Build();
         return new MetadataInvalidationCoordinator(
-            harness.Npm, harness.PyPi, harness.NuGet, maven, harness.RpmLocal, harness.RpmMerged, harness.Bus);
+            harness.Npm, harness.PyPi, harness.NuGet, maven, harness.RpmLocal, harness.RpmMerged,
+            harness.OrgWide, harness.Bus);
     }
 
     /// <summary>
     /// Builds a coordinator plus every cache it evicts through, all over one
-    /// <see cref="IMemoryCache"/>. <paramref name="bus"/> defaults to the no-op bus.
+    /// <see cref="IMemoryCache"/>. <paramref name="bus"/> defaults to the no-op bus;
+    /// <paramref name="orgWide"/> defaults to an org-wide expansion over a private reservation
+    /// list cache only. <paramref name="epoch"/>, when given, binds every cache to that org epoch
+    /// store, as the host does.
     /// </summary>
-    internal static TestInvalidationHarness Build(IMemoryCache? memory = null, IMetadataInvalidationBus? bus = null)
+    internal static TestInvalidationHarness Build(
+        IMemoryCache? memory = null,
+        IMetadataInvalidationBus? bus = null,
+        OrgWideCacheEviction? orgWide = null,
+        OrgCacheEpochStore? epoch = null)
     {
         var cache = memory ?? new MemoryCache(new MemoryCacheOptions { SizeLimit = 8 * 1024 * 1024 });
-        var npm = new RenderedResponseCache<NpmPackumentKey>(cache, MetadataCacheKeys.NpmPackument);
-        var pypi = new RenderedResponseCache<PyPiSimpleIndexKey>(cache, MetadataCacheKeys.PyPiSimpleIndex);
-        var nuget = new RenderedResponseCache<NuGetRegistrationKey>(cache, MetadataCacheKeys.NuGetRegistration);
-        var maven = new RenderedResponseCache<MavenMetadataKey>(cache, MetadataCacheKeys.MavenMetadata);
-        var rpmLocal = new RenderedResponseCache<RpmLocalRepodataKey>(cache, MetadataCacheKeys.RpmLocalRepodata);
+        var npm = new RenderedResponseCache<NpmPackumentKey>(cache, MetadataCacheKeys.NpmPackument, epoch);
+        var pypi = new RenderedResponseCache<PyPiSimpleIndexKey>(cache, MetadataCacheKeys.PyPiSimpleIndex, epoch);
+        var nuget = new RenderedResponseCache<NuGetRegistrationKey>(cache, MetadataCacheKeys.NuGetRegistration, epoch);
+        var maven = new RenderedResponseCache<MavenMetadataKey>(cache, MetadataCacheKeys.MavenMetadata, epoch);
+        var rpmLocal = new RenderedResponseCache<RpmLocalRepodataKey>(cache, MetadataCacheKeys.RpmLocalRepodata, epoch);
         var rpmMerged = new MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache>(
-            cache, MetadataCacheKeys.RpmMergedRepodata);
+            cache, MetadataCacheKeys.RpmMergedRepodata, epoch);
 
         var effectiveBus = bus ?? new NullMetadataInvalidationBus();
+        var effectiveOrgWide = orgWide
+            ?? new OrgWideCacheEviction(new Dependably.Protocol.ReservedNamespaceListCache(cache));
         return new TestInvalidationHarness(
-            new MetadataInvalidationCoordinator(npm, pypi, nuget, maven, rpmLocal, rpmMerged, effectiveBus),
-            cache, npm, pypi, nuget, maven, rpmLocal, rpmMerged, effectiveBus);
+            new MetadataInvalidationCoordinator(
+                npm, pypi, nuget, maven, rpmLocal, rpmMerged, effectiveOrgWide, effectiveBus),
+            cache, npm, pypi, nuget, maven, rpmLocal, rpmMerged, effectiveOrgWide, effectiveBus);
     }
 }
 
@@ -62,6 +73,7 @@ internal sealed record TestInvalidationHarness(
     RenderedResponseCache<MavenMetadataKey> Maven,
     RenderedResponseCache<RpmLocalRepodataKey> RpmLocal,
     MetadataResponseCache<RpmMergedRepodataKey, MergedRepodataCache> RpmMerged,
+    OrgWideCacheEviction OrgWide,
     IMetadataInvalidationBus Bus);
 
 /// <summary>

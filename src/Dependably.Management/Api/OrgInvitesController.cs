@@ -177,7 +177,7 @@ public sealed class OrgInvitesController : OrgScopedControllerBase
         // never written to any log property; only the org/invite-id correlation is logged.
         try
         {
-            string orgSlug = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantSlug ?? orgId;
+            string orgSlug = (HttpContext.Items[TenantContext.HttpItemsKey] as TenantContext)?.TenantSlug ?? orgId;
             // The invitee has no account (and no language preference) yet — the tenant's
             // default language is the best signal for the email locale.
             var settings = await _orgs.GetSettingsAsync(orgId, ct);

@@ -7,6 +7,7 @@ using Dependably.Infrastructure.Alerts;
 using Dependably.Infrastructure.Identity;
 using Dependably.Tests.Infrastructure;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
@@ -84,45 +85,100 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
     /// <summary>
     /// Polls the DURABLE end state (the persisted alert/settings row) rather than the queue's
-    /// in-memory counters. <see cref="AlertSlackQueue"/> increments <c>DeliveredCount</c>/
-    /// <c>FailedCount</c> BEFORE its two DB writes complete — waiting on the counter and then
-    /// immediately cancelling the token races those writes and can leave the row's
-    /// <c>SlackStatus</c>/<c>SlackLastStatus</c> unset even though the counter says "delivered".
-    /// Waiting on the row itself only returns once the write has actually landed.
+    /// in-memory counters. <see cref="AlertSlackQueue"/> bumps <c>DeliveredCount</c>/
+    /// <c>FailedCount</c> after its outcome write returns, but that write swallows its own
+    /// failures (an outcome that reached Slack must not be retried), so a counter can say
+    /// "delivered" over a row that never changed. Only the row proves the outcome landed.
+    ///
+    /// <paramref name="queueLog"/>, when given, makes a skipped delivery fail at once and say why.
+    /// The queue treats a delivery it could not even attempt — an org or settings read that threw
+    /// — as a conclusion and logs a warning, so the row never changes and a bare poll can only
+    /// time out with nothing to go on. The real-time ceiling is a backstop for a hang, never the
+    /// expected way out of the loop.
     /// </summary>
-    private static async Task WaitAsync(Func<Task<bool>> condition, TimeSpan? timeout = null)
+    private static async Task WaitAsync(
+        Func<Task<bool>> condition, TimeSpan? timeout = null, CapturingLogger<AlertSlackQueue>? queueLog = null)
     {
         // now-ok: polling deadline awaiting real async completion of the durable write path
         var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
         while (!await condition() && DateTimeOffset.UtcNow < deadline)
         {
+            if (queueLog?.SkippedDeliveries() is { Count: > 0 } skipped)
+            {
+                throw new InvalidOperationException(
+                    "The queue skipped a delivery, so the awaited row will never change: " + string.Join(" | ", skipped));
+            }
+
             await Task.Delay(20);
         }
 
         if (!await condition())
         {
-            throw new TimeoutException("Condition never satisfied.");
+            string log = queueLog is null ? "" : " Queue warnings: " + string.Join(" | ", queueLog.Warnings());
+            throw new TimeoutException("Condition never satisfied." + log);
         }
+    }
+
+    /// <summary>
+    /// Records what the queue logs at warning level and above, exception included. Tests that run
+    /// the queue on <see cref="NullLogger{T}"/> discard the one line that explains a delivery the
+    /// queue decided not to make.
+    /// </summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _warnings = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (IsEnabled(logLevel))
+            {
+                _warnings.Enqueue(exception is null
+                    ? formatter(state, exception)
+                    : $"{formatter(state, exception)} ({exception.GetType().Name}: {exception.Message})");
+            }
+        }
+
+        public IReadOnlyList<string> Warnings() => [.. _warnings];
+
+        /// <summary>The queue's "could not resolve where to deliver" warnings.</summary>
+        public IReadOnlyList<string> SkippedDeliveries() =>
+            [.. _warnings.Where(w => w.Contains("skipping delivery", StringComparison.Ordinal))];
     }
 
     /// <summary>Routes by URL substring: "good" → 200, "bad" → 502. Captures the last request body,
     /// and every (url, body) pair — the latter lets cross-tenant tests assert exactly which
-    /// destination(s) were called, not just an aggregate count.</summary>
+    /// destination(s) were called, not just an aggregate count. The queue serves orgs on
+    /// concurrent workers, so one handler is called from several threads at once; the recording
+    /// is locked so a concurrent fan-out cannot lose or tear a request.</summary>
     private sealed class RoutingHandler : DelegatingHandler
     {
-        public string? LastBody { get; private set; }
-        public int Calls { get; private set; }
-        public List<(string Url, string Body)> Requests { get; } = [];
+        private readonly Lock _gate = new();
+        private readonly List<(string Url, string Body)> _requests = [];
+        private int _calls;
+
+        public string? LastBody { get { lock (_gate) { return _requests.Count == 0 ? null : _requests[^1].Body; } } }
+        public int Calls => Volatile.Read(ref _calls);
+        public IReadOnlyList<(string Url, string Body)> Requests { get { lock (_gate) { return [.. _requests]; } } }
 
         public RoutingHandler() : base(new HttpClientHandler()) { }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Calls++;
-            LastBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+            Interlocked.Increment(ref _calls);
+            string? body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             string url = request.RequestUri?.ToString() ?? "";
-            Requests.Add((url, LastBody ?? ""));
+            lock (_gate)
+            {
+                _requests.Add((url, body ?? ""));
+            }
+
             return url.Contains("good")
                 ? new HttpResponseMessage(HttpStatusCode.OK)
                 : new HttpResponseMessage(HttpStatusCode.BadGateway);
@@ -157,8 +213,8 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
         await queue.NotifyAsync(alert);
         // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
-        // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
-        // waiting on the counter and then cancelling races the write.
+        // DeliveredCount — the outcome write swallows its own failures, so only the row proves
+        // the outcome landed.
         await WaitAsync(async () => (await alerts.GetByIdAsync("org1", alert.Id))?.SlackStatus is not null);
 
         // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
@@ -196,8 +252,8 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
         await queue.NotifyAsync(alert);
         // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
-        // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
-        // waiting on the counter and then cancelling races the write.
+        // DeliveredCount — the outcome write swallows its own failures, so only the row proves
+        // the outcome landed.
         await WaitAsync(async () => (await alerts.GetByIdAsync("org1", alert.Id))?.SlackStatus is not null);
 
         // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
@@ -395,9 +451,10 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         // stopping token is in by the time BackgroundService.StopAsync signals cancellation.
         var executeTask = queue.ExecuteAsyncForTests(new CancellationToken(canceled: true));
 
-        // Wait on the DURABLE end state (both persisted rows), not the in-memory counters, which
-        // are incremented before the DB writes complete. The failing alert exhausts its retry
-        // budget inside the drain itself; on NoBackoff that costs no time, real or virtual.
+        // Wait on the DURABLE end state (both persisted rows), not the in-memory counters — the
+        // outcome write swallows its own failures, so only the rows prove it landed. The failing
+        // alert exhausts its retry budget inside the drain itself; on NoBackoff that costs no
+        // time, real or virtual.
         await WaitAsync(async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
@@ -468,6 +525,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         var handler = new RoutingHandler();
         var client = BuildClient(handler);
         var slackClock = new FakeTimeProvider(Clock.GetUtcNow());
+        var queueLog = new CapturingLogger<AlertSlackQueue>();
 
         await EnableSlackAsync(settings, "org1", "https://good.example.com/hook");
         await EnableSlackAsync(settings, "org2", "https://bad.example.com/hook");
@@ -476,7 +534,7 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
         var queue = new AlertSlackQueue(
                         new AlertSlackQueueServices(
-                        settings, alerts, client, new OrgRepository(_db), slackClock, BuildCfg(), NullLogger<AlertSlackQueue>.Instance),
+                        settings, alerts, client, new OrgRepository(_db), slackClock, BuildCfg(), queueLog),
                         NoBackoff);
         using var cts = new CancellationTokenSource();
         _ = queue.StartAsync(cts.Token);
@@ -485,15 +543,18 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         await queue.NotifyAsync(badAlert);
 
         // Wait on the DURABLE end state (both persisted rows) rather than the queue's in-memory
-        // DeliveredCount/FailedCount — the queue increments those counters BEFORE its DB writes
-        // complete, so waiting only until the counter changes and then cancelling races the write.
-        // No clock is driven: the retry chain has no intervals left to wait out.
+        // DeliveredCount/FailedCount — the outcome write swallows its own failures, so only the
+        // rows prove it landed. The two orgs are served by different workers at the same moment,
+        // so both decrypt their webhook URL through the one shared protector concurrently; a
+        // delivery the queue skipped because that read threw fails here at once, naming the
+        // cause, instead of leaving the row NULL until the ceiling. No clock is driven: the retry
+        // chain has no intervals left to wait out.
         await WaitAsync(async () =>
         {
             var good = await alerts.GetByIdAsync("org1", goodAlert.Id);
             var bad = await alerts.GetByIdAsync("org2", badAlert.Id);
             return good?.SlackStatus is not null && bad?.SlackStatus is not null;
-        });
+        }, queueLog: queueLog);
 
         // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the
         // time we get here both durable writes have already landed, so there is nothing
@@ -515,6 +576,11 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
         Assert.Equal(1, badSettings.SlackConsecutiveFailures);
         // A single failure does not yet auto-disable (threshold is 20).
         Assert.True(badSettings.SlackEnabled);
+
+        // The only warning is org2's own terminal failure; nothing about org1's delivery, or
+        // about either org's settings read, was swallowed along the way.
+        string onlyWarning = Assert.Single(queueLog.Warnings());
+        Assert.StartsWith("Slack delivery failed after 4 attempts", onlyWarning);
     }
 
     // ── Cross-tenant fairness ────────────────────────────────────────────────
@@ -686,8 +752,8 @@ public sealed class AlertSlackQueueTests : IAsyncLifetime
 
         await queue.NotifyAsync(org1Alert!);
         // Waits on the DURABLE end state (the persisted alert row), not the queue's in-memory
-        // DeliveredCount — the queue increments that counter BEFORE its DB writes complete, so
-        // waiting on the counter and then cancelling races the write.
+        // DeliveredCount — the outcome write swallows its own failures, so only the row proves
+        // the outcome landed.
         await WaitAsync(async () => (await alerts.GetByIdAsync("org1", org1Alert!.Id))?.SlackStatus is not null);
 
         // Graceful drain — StopAsync signals ExecuteAsync's stopping token itself, but by the

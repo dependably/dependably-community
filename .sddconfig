@@ -14,14 +14,14 @@
 
 scm:
   # gitlab | github. GitLab is the tested path: skills use this to pick
-  # terminology (MR vs PR, iid vs number) and which forge MCP to look for.
+  # terminology (MR vs PR, iid vs number) and which SCM MCP to look for.
   # Any other value and a skill will say the path is untested rather than
   # quietly behave as if it were GitLab.
   type: gitlab
 
-  # Path of THIS source repo on the forge. Also the key your developer settings
+  # Path of THIS source repo on the SCM. Also the key your developer settings
   # are filed under in ~/.config/sdd/config, so it must stay the stable SCM
-  # identity — renaming the project on the forge means re-running `sdd init`.
+  # identity — renaming the project on the SCM means re-running `sdd init`.
   project: moonlitlabs/dependably-community
 
 spec_repo:

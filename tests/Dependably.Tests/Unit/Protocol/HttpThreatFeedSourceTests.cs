@@ -3,6 +3,7 @@ using System.Text;
 using Dependably.Protocol;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 
 namespace Dependably.Tests.Unit.Protocol;
 
@@ -18,12 +19,116 @@ public sealed class HttpThreatFeedSourceTests
     // One byte over the source's feed-response cap.
     private const int OverCapSize = (int)HttpThreatFeedSource.MaxFeedResponseBytes + 1;
 
-    private static HttpThreatFeedSource Build(Func<HttpRequestMessage, HttpResponseMessage> responder)
+    private static HttpThreatFeedSource Build(
+        Func<HttpRequestMessage, HttpResponseMessage> responder,
+        TimeProvider? time = null,
+        IConfiguration? config = null)
     {
         return new HttpThreatFeedSource(
             new SingleHandlerFactory(new DelegateHandler(responder)),
-            new ConfigurationBuilder().Build(),
-            NullLogger<HttpThreatFeedSource>.Instance);
+            config ?? new ConfigurationBuilder().Build(),
+            NullLogger<HttpThreatFeedSource>.Instance,
+            time ?? TimeProvider.System);
+    }
+
+    // Headers arrive at once; the body then sends one byte and goes quiet until the read is cancelled.
+    private static HttpResponseMessage Trickling()
+    {
+        var content = new StreamContent(new TricklingStream());
+        content.Headers.ContentType = new("application/json");
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+    }
+
+    private static async Task<T> CompletesWithin<T>(Task<T> task)
+    {
+        try
+        {
+            return await task.WaitAsync(TimeSpan.FromSeconds(20));
+        }
+        catch (TimeoutException) when (!task.IsCompleted)
+        {
+            throw new InvalidOperationException("The fetch never finished: its read is not bounded in time.");
+        }
+    }
+
+    [Fact]
+    public async Task Kev_BodyThatTricklesAfterHeaders_IsCancelledAtTheDeadline()
+    {
+        var clock = new FakeTimeProvider();
+        var source = Build(_ => Trickling(), clock);
+
+        var fetch = source.GetKevCatalogAsync();
+        Assert.False(fetch.IsCompleted);
+        clock.Advance(HttpThreatFeedSource.DefaultFetchTimeout + TimeSpan.FromSeconds(1));
+
+        await Assert.ThrowsAsync<TimeoutException>(() => CompletesWithin(fetch));
+    }
+
+    [Fact]
+    public async Task EpssBulk_BodyThatTricklesAfterHeaders_IsCancelledAtTheConfiguredDeadline()
+    {
+        var clock = new FakeTimeProvider();
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { [HttpThreatFeedSource.FetchTimeoutSecondsKey] = "30" })
+            .Build();
+        var source = Build(_ => Trickling(), clock, config);
+
+        var fetch = source.GetEpssBulkAsync();
+        clock.Advance(TimeSpan.FromSeconds(29));
+        Assert.False(fetch.IsCompleted);
+        clock.Advance(TimeSpan.FromSeconds(2));
+
+        await Assert.ThrowsAsync<TimeoutException>(() => CompletesWithin(fetch));
+    }
+
+    [Fact]
+    public async Task Epss_OneBatchThatTrickles_FailsOnItsOwn_AndTheOthersStillScore()
+    {
+        var clock = new FakeTimeProvider();
+        var source = Build(req =>
+        {
+            string query = req.RequestUri!.Query;
+            return query.Contains("CVE-2026-0001") ? Trickling() : Json("""{"data":[{"cve":"CVE-2026-5000","epss":"0.5"}]}""");
+        }, clock);
+        var cves = Enumerable.Range(0, 101).Select(i => i == 0 ? "CVE-2026-0001" : $"CVE-2026-{5000 + i - 1}").ToList();
+
+        var fetch = source.GetEpssScoresAsync(cves);
+        clock.Advance(HttpThreatFeedSource.DefaultFetchTimeout + TimeSpan.FromSeconds(1));
+        var result = await CompletesWithin(fetch);
+
+        Assert.True(result.Scores.ContainsKey("CVE-2026-5000"));
+        Assert.DoesNotContain("CVE-2026-0001", result.Queried);
+        Assert.Contains("CVE-2026-5099", result.Queried);
+    }
+
+    private sealed class TricklingStream : Stream
+    {
+        private bool _sent;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (!_sent)
+            {
+                _sent = true;
+                buffer.Span[0] = (byte)'{';
+                return 1;
+            }
+
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     // ── KEV entry context: the fields the catalogue carries beyond membership ──────────────
@@ -253,6 +358,137 @@ public sealed class HttpThreatFeedSourceTests
         });
 
         await Assert.ThrowsAsync<UpstreamResponseTooLargeException>(() => source.GetKevCatalogAsync());
+    }
+
+    // ── EPSS bulk file ───────────────────────────────────────────────────────────────────
+
+    private static byte[] Gzip(string text)
+    {
+        using var output = new MemoryStream();
+        using (var gzip = new System.IO.Compression.GZipStream(output, System.IO.Compression.CompressionMode.Compress))
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(text);
+            gzip.Write(bytes, 0, bytes.Length);
+        }
+
+        return output.ToArray();
+    }
+
+    private static HttpResponseMessage GzipResponse(string csv) =>
+        new(HttpStatusCode.OK) { Content = new ByteArrayContent(Gzip(csv)) };
+
+    [Fact]
+    public async Task EpssBulk_ParsesScoresPercentilesAndTheScoreDate_SkippingUnusableRows()
+    {
+        var source = Build(_ => GzipResponse(
+            "#model_version:v2026.06.15,score_date:2026-10-05T12:00:23Z\n"
+            + "cve,epss,percentile\n"
+            + "CVE-2021-44228,0.97558,0.99995\n"
+            + "cve-2024-0001,0.00043,0.11\n"
+            + "CVE-2024-0002,0.5,\n"
+            + "CVE-2024-0003,1.5,0.2\n"
+            + "CVE-2024-0004,abc,0.2\n"
+            + "NOT-A-CVE,0.5,0.5\n"
+            + "CVE-2024-0005,0.2,7\n"));
+
+        var file = await source.GetEpssBulkAsync();
+
+        Assert.Equal("2026-10-05", file.ScoreDate);
+        Assert.Equal(0.97558, file.Scores["CVE-2021-44228"].Probability);
+        Assert.Equal(0.99995, file.Scores["CVE-2021-44228"].Percentile);
+        Assert.Equal(0.00043, file.Scores["CVE-2024-0001"].Probability);
+        // An unusable percentile drops the rank, not the score.
+        Assert.Null(file.Scores["CVE-2024-0002"].Percentile);
+        Assert.Null(file.Scores["CVE-2024-0005"].Percentile);
+        Assert.Equal(0.2, file.Scores["CVE-2024-0005"].Probability);
+        // Out-of-range, non-numeric and non-CVE rows are skipped.
+        Assert.False(file.Scores.ContainsKey("CVE-2024-0003"));
+        Assert.False(file.Scores.ContainsKey("CVE-2024-0004"));
+        Assert.False(file.Scores.ContainsKey("NOT-A-CVE"));
+        Assert.Equal(4, file.Scores.Count);
+    }
+
+    [Fact]
+    public async Task EpssBulk_ADifferentHeader_IsAFormatChange_NotARowOfData()
+    {
+        var source = Build(_ => GzipResponse("cve,score,rank\nCVE-2021-44228,0.9,0.9\n"));
+        await Assert.ThrowsAsync<InvalidDataException>(() => source.GetEpssBulkAsync());
+    }
+
+    [Fact]
+    public async Task EpssBulk_NoHeaderAtAll_Throws()
+    {
+        var source = Build(_ => GzipResponse("#model_version:v1\n"));
+        await Assert.ThrowsAsync<InvalidDataException>(() => source.GetEpssBulkAsync());
+    }
+
+    [Fact]
+    public async Task EpssBulk_HttpFailure_Throws()
+    {
+        var source = Build(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        await Assert.ThrowsAsync<HttpRequestException>(() => source.GetEpssBulkAsync());
+    }
+
+    [Fact]
+    public async Task EpssBulk_FollowsTheRelativeRedirectToTheDatedFile()
+    {
+        var requested = new List<string>();
+        var source = Build(request =>
+        {
+            requested.Add(request.RequestUri!.AbsolutePath);
+            if (request.RequestUri.AbsolutePath.EndsWith("-current.csv.gz", StringComparison.Ordinal))
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                redirect.Headers.Location = new Uri("epss_scores-2026-10-05.csv.gz", UriKind.Relative);
+                return redirect;
+            }
+
+            return GzipResponse("cve,epss,percentile\nCVE-2021-44228,0.9,0.99\n");
+        });
+
+        var file = await source.GetEpssBulkAsync();
+
+        Assert.Single(file.Scores);
+        Assert.Equal(["/epss_scores-current.csv.gz", "/epss_scores-2026-10-05.csv.gz"], requested);
+    }
+
+    [Fact]
+    public async Task EpssBulk_RedirectToAnotherHost_IsNotFollowed()
+    {
+        int calls = 0;
+        var source = Build(_ =>
+        {
+            calls++;
+            var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+            redirect.Headers.Location = new Uri("https://elsewhere.example/epss.csv.gz");
+            return redirect;
+        });
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => source.GetEpssBulkAsync());
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task EpssBulk_AGzipBombPastTheDecompressedCap_Throws()
+    {
+        var source = Build(_ =>
+        {
+            using var output = new MemoryStream();
+            using (var gzip = new System.IO.Compression.GZipStream(output, System.IO.Compression.CompressionMode.Compress))
+            {
+                byte[] header = Encoding.UTF8.GetBytes("cve,epss,percentile\n");
+                gzip.Write(header, 0, header.Length);
+                byte[] zeros = new byte[1024 * 1024];
+                for (int i = 0; i < 130; i++)
+                {
+                    gzip.Write(zeros, 0, zeros.Length);
+                }
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(output.ToArray()) };
+        });
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => source.GetEpssBulkAsync());
     }
 
     /// <summary>HttpContent that declares a Content-Length but throws if its body is ever read.</summary>

@@ -29,6 +29,7 @@ public sealed class NuGetSymbolProxyFetcher(
     NuGetSymbolIndexRepository symbolIndex,
     CacheArtifactRepository cacheArtifacts,
     TieredBlobStorage blobs,
+    ReservedNamespaceService reserved,
     ILogger<NuGetSymbolProxyFetcher> logger)
 {
     /// <summary>
@@ -54,8 +55,16 @@ public sealed class NuGetSymbolProxyFetcher(
     /// has the PDB, or the fetch is refused.
     ///
     /// <para>
+    /// No symbol server is asked anything when the org proxies nothing (passthrough off, or the
+    /// org air-gapped: <see cref="OrgSettings.ProxyPassthroughEffective"/>) or when the PDB's name
+    /// is reserved in the org's NuGet namespace. A PDB is named after its assembly, which is
+    /// normally the package id, so the request path would otherwise disclose a reserved internal
+    /// id to the symbol server, which no package route does.
+    /// </para>
+    ///
+    /// <para>
     /// Fail-closed by omission: an upstream with no <c>symbol_server_url</c> is skipped entirely
-    /// rather than guessed at. Air-gap and SSRF are enforced inside
+    /// rather than guessed at. Instance air-gap and SSRF are enforced inside
     /// <see cref="UpstreamClient.FetchAndCacheByUrlAsync"/> — an air-gapped instance throws
     /// <see cref="AirGappedException"/> before any socket is opened.
     /// </para>
@@ -63,6 +72,12 @@ public sealed class NuGetSymbolProxyFetcher(
     public async Task<SymbolProxyResult?> TryFetchAsync(
         SymbolProxyRequest request, CancellationToken ct)
     {
+        if (!request.Settings.ProxyPassthroughEffective
+            || await reserved.IsUpstreamNameReservedAsync(request.OrgId, "nuget", PdbAssemblyName(request.PdbName), ct))
+        {
+            return null;
+        }
+
         var sources = await upstreams.ListSourcesForEcosystemAsync(request.OrgId, "nuget", ct);
         foreach (var source in sources)
         {
@@ -80,6 +95,13 @@ public sealed class NuGetSymbolProxyFetcher(
 
         return null;
     }
+
+    // The assembly name a PDB file is named after: "Acme.Core.pdb" -> "Acme.Core". A trailing-glob
+    // reservation ("Acme.*") matches either spelling; an exact one ("Acme.Core") only this one.
+    private static string PdbAssemblyName(string pdbName) =>
+        pdbName.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase) && pdbName.Length > ".pdb".Length
+            ? pdbName[..^".pdb".Length]
+            : pdbName;
 
     private async Task<SymbolProxyResult?> TryFetchFromAsync(
         UpstreamSource source, SymbolProxyRequest request, CancellationToken ct)

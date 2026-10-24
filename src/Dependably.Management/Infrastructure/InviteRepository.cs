@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using Dapper;
@@ -43,13 +44,17 @@ public sealed class InviteRepository
         string expiresStr = expiresAt.ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
-        int inserted = await conn.ExecuteAsync(
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        await TenantMintGate.RequireMintableAsync(conn, _db.Provider, orgId, tx, ct);
+        int inserted = await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO invites (id, org_id, email, role, token_hash, created_by, expires_at)
             VALUES (@id, @orgId, @email, @role, @hash, @createdBy, @expires)
             ON CONFLICT (org_id, email) WHERE accepted_at IS NULL DO NOTHING
             """,
-            new { id, orgId, email, role, hash, createdBy = createdByUserId, expires = expiresStr });
+            new { id, orgId, email, role, hash, createdBy = createdByUserId, expires = expiresStr },
+            transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
 
         return inserted == 0
             ? null
@@ -153,46 +158,75 @@ public sealed class InviteRepository
     }
 
     /// <summary>
-    /// Atomically consumes an invite token. The UPDATE predicate guards both the
-    /// not-yet-accepted and not-yet-expired conditions in one statement, so concurrent
-    /// requests carrying the same token race on the DB write — exactly one wins
-    /// (rowsAffected == 1); all others see rowsAffected == 0 and receive null.
-    /// Returns the invite record on success, null if expired/not found/already accepted.
+    /// Atomically consumes an invite token and nothing else. Returns the invite record on
+    /// success, null if expired/not found/already accepted. See
+    /// <see cref="RedeemAsync{TResult}"/>, which this delegates to.
     /// </summary>
-    public async Task<InviteRecord?> AcceptAsync(string rawToken, CancellationToken ct = default)
+    public async Task<InviteRecord?> AcceptAsync(string rawToken, CancellationToken ct = default) =>
+        (await RedeemAsync(rawToken, static (_, _, _) => Task.FromResult(true), ct))?.Credential;
+
+    /// <summary>
+    /// Consumes an invite token and runs <paramref name="redeem"/> (the write the invite
+    /// authorizes, such as creating the account) in the same transaction, so the invite is spent
+    /// exactly when that write commits.
+    ///
+    /// <para>
+    /// The transaction runs <see cref="TenantMintGate"/> before it consumes anything: a suspension
+    /// deletes only pending invites, so an invite accepted just before the suspension's revoke and
+    /// turned into an account just after it would leave that account, with the invitee's password,
+    /// in place when the tenant is restored. A refused redemption throws
+    /// <see cref="Dependably.Storage.TenantNotReadyException"/> and leaves the invite pending.
+    /// </para>
+    ///
+    /// <para>
+    /// The conditional UPDATE guards both the not-yet-accepted and not-yet-expired conditions in
+    /// one statement, so concurrent requests carrying the same token race on the write and exactly
+    /// one wins; every other caller receives null. Returns null when the token is unknown, expired,
+    /// or already accepted.
+    /// </para>
+    /// </summary>
+    public async Task<CredentialRedemption<InviteRecord, TResult>?> RedeemAsync<TResult>(
+        string rawToken,
+        Func<InviteRecord, DbConnection, DbTransaction, Task<TResult>> redeem,
+        CancellationToken ct = default)
     {
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawToken));
         string hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
         string now = _time.GetUtcNow().ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
 
-        // Single conditional UPDATE: wins the race only when the row is still pending
-        // and unexpired. Concurrent requests with the same token both reach this statement
-        // but at most one will match (SQLite serializes writes); the loser gets 0 rows.
-        // xtenant: keyed by the SHA-256 of the bearer's invite token. The row itself carries
-        // the org the invite grants; an org filter would need an org the acceptor does not yet have.
-        int rowsAffected = await conn.ExecuteAsync(
+        // xtenant: keyed by the SHA-256 of the bearer's invite token. The row itself carries the
+        // org the invite grants; an org filter would need an org the acceptor does not yet have.
+        string? orgId = await conn.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT org_id FROM invites WHERE token_hash = @hash AND accepted_at IS NULL AND expires_at > @now",
+            new { hash, now }, transaction: tx, cancellationToken: ct));
+        if (orgId is null)
+        {
+            return null;
+        }
+
+        await TenantMintGate.RequireMintableAsync(conn, _db.Provider, orgId, tx, ct);
+
+        // xtenant: keyed by the SHA-256 of the bearer's invite token, as above.
+        int rowsAffected = await conn.ExecuteAsync(new CommandDefinition(
             "UPDATE invites SET accepted_at = @now WHERE token_hash = @hash AND accepted_at IS NULL AND expires_at > @now",
-            new { now, hash });
-
+            new { now, hash }, transaction: tx, cancellationToken: ct));
         if (rowsAffected == 0)
         {
             return null;
         }
 
-        // Read the now-immutably-accepted row. The row is race-free at this point because
-        // the winning UPDATE has set accepted_at; no further state change is possible.
-        // token_hash is globally unique so no org_id predicate is required; the returned
-        // org_id is what the caller uses for tenant context.
         // xtenant: token_hash is a globally-unique PK surrogate; the returned org_id enforces
         // tenant scope downstream (same rationale as DeleteAsync).
         var (Id, OrgId, Email, Role, CreatedBy, CreatedAt, ExpiresAt, AcceptedAt) =
             await conn.QuerySingleAsync<(string Id, string OrgId, string Email, string Role, string CreatedBy, string CreatedAt, string ExpiresAt, string AcceptedAt)>(
-            "SELECT id, org_id, email, role, created_by, created_at, expires_at, accepted_at FROM invites WHERE token_hash = @hash",
-            new { hash });
+            new CommandDefinition(
+                "SELECT id, org_id, email, role, created_by, created_at, expires_at, accepted_at FROM invites WHERE token_hash = @hash",
+                new { hash }, transaction: tx, cancellationToken: ct));
 
-        return new InviteRecord
+        var invite = new InviteRecord
         {
             Id = Id,
             OrgId = OrgId,
@@ -203,6 +237,10 @@ public sealed class InviteRepository
             ExpiresAt = DateTimeOffset.Parse(ExpiresAt),
             AcceptedAt = DateTimeOffset.Parse(AcceptedAt)
         };
+
+        var result = await redeem(invite, conn, tx);
+        await tx.CommitAsync(ct);
+        return new CredentialRedemption<InviteRecord, TResult>(invite, result);
     }
 
     /// <summary>

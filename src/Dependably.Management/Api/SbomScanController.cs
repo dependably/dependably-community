@@ -67,7 +67,7 @@ public sealed class SbomScanController : ControllerBase
             return authResult;
         }
 
-        string orgId = ((TenantContext)HttpContext.Items[TenantContext.HttpItemsKey]!).TenantId!;
+        string orgId = HttpContext.RequireTenantId();
 
         await using var conn = await _db.OpenAsync(ct);
 

@@ -1,4 +1,5 @@
 using Dependably.Infrastructure;
+using Microsoft.Extensions.Configuration;
 
 namespace Dependably.Tests.Unit;
 
@@ -22,6 +23,8 @@ public class ReservedSlugsTests
     [InlineData("www")]
     [InlineData("default")]
     [InlineData("localhost")]
+    [InlineData("master")]
+    [InlineData("root")]
     [InlineData("ADMIN")]   // case-insensitive reserved match
     public void Normalize_BuiltinReserved_Rejected(string input)
     {
@@ -113,5 +116,58 @@ public class ReservedSlugsTests
     public void Normalize_EmptyAfterPortStrip_Rejected(string input)
     {
         Assert.Null(ReservedSlugs.Normalize(input));
+    }
+
+    private static IConfiguration Cfg(params (string Key, string? Value)[] entries) =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(entries.Select(e => new KeyValuePair<string, string?>(e.Key, e.Value)))
+            .Build();
+
+    [Fact]
+    public void ForConfig_AddsTheApexLabelToTheOperatorList()
+    {
+        var set = ReservedSlugs.ForConfig(Cfg(
+            ("DEPLOYMENT_MODE", "multi"),
+            ("APEX_HOST", "ops.mydomain.com"), ("TENANT_DOMAIN", "mydomain.com"),
+            ("RESERVED_SUBDOMAINS", "billing")));
+
+        Assert.Contains("ops", set);
+        Assert.Contains("billing", set);
+        Assert.Null(ReservedSlugs.Normalize("ops", set));
+        Assert.Equal("acme", ReservedSlugs.Normalize("acme", set));
+    }
+
+    [Fact]
+    public void ForConfig_WithoutTenantDomain_AddsNoApexLabel()
+    {
+        var set = ReservedSlugs.ForConfig(Cfg(("DEPLOYMENT_MODE", "multi"), ("APEX_HOST", "ops.mydomain.com")));
+
+        Assert.DoesNotContain("ops", set);
+        Assert.Equal("ops", ReservedSlugs.Normalize("ops", set));
+    }
+
+    [Theory]
+    [InlineData("header")]
+    [InlineData("single")]
+    [InlineData(null)]
+    [InlineData("bound")]
+    public void ForConfig_OutsideMultiMode_ReservesNoApexLabel(string? mode)
+    {
+        var set = ReservedSlugs.ForConfig(Cfg(
+            ("DEPLOYMENT_MODE", mode),
+            ("APEX_HOST", "registry.mydomain.com"), ("TENANT_DOMAIN", "mydomain.com")));
+
+        Assert.DoesNotContain("registry", set);
+        Assert.Equal("registry", ReservedSlugs.Normalize("registry", set));
+    }
+
+    [Fact]
+    public void ForConfig_MultiMode_IsCaseAndWhitespaceInsensitive()
+    {
+        var set = ReservedSlugs.ForConfig(Cfg(
+            ("DEPLOYMENT_MODE", "  Multi "),
+            ("APEX_HOST", "registry.mydomain.com"), ("TENANT_DOMAIN", "mydomain.com")));
+
+        Assert.Contains("registry", set);
     }
 }

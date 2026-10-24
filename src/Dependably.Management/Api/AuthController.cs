@@ -3,6 +3,7 @@ using Dependably.Infrastructure;
 using Dependably.Infrastructure.Audit.Events;
 using Dependably.Infrastructure.Identity;
 using Dependably.Security;
+using Dependably.Storage;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -69,12 +70,12 @@ public sealed class AuthController : ControllerBase
             return Ok(new { forms = true, saml = false, samlButtonLabel = (string?)null });
         }
 
-        if (ctx.IsApex)
+        if (ctx.IsApex || ctx.TenantId is not { } tenantId)
         {
             return Ok(new { forms = true, saml = false, samlButtonLabel = (string?)null });
         }
 
-        var cfg = await samlConfig.GetAsync(ctx.TenantId!, ct);
+        var cfg = await samlConfig.GetAsync(tenantId, ct);
         bool samlReady = IsSamlReady(cfg);
         bool formsEnabled = cfg is null || cfg.FormsLoginEnabled || !samlReady;
 
@@ -526,18 +527,21 @@ public sealed class AuthController : ControllerBase
             return BadRequest(new { detail = verdict.ToReason(), field = "password" });
         }
 
-        var invite = await invites.AcceptAsync(req.Token, ct);
-        if (invite is null)
+        // Consuming the invite and creating the account are one transaction that re-reads the
+        // tenant's status first, so a suspension committed after this request was admitted
+        // refuses it (423, invite left pending) rather than leaving an account behind the revoke.
+        var acceptance = await UserService.AcceptInviteAsync(invites, req.Token, req.Password, ct);
+        if (acceptance is null)
         {
             return StatusCode(StatusCodes.Status410Gone, new { detail = "Invite token is invalid, expired, or already used." });
         }
 
         // 1:1 user:tenant — invite carries the tenant the user is joining; UserService inserts
-        // directly with that tenant_id and the invite's stored role. A null result means the
+        // directly with that tenant_id and the invite's stored role. A null user id means the
         // tenant already holds an account for that address (in any casing): the invite is spent,
         // and the answer is "sign in", not a second account resolving to the same login.
-        string? createdUserId = await _users.CreateFromInviteAsync(invite, req.Password, ct);
-        if (createdUserId is null)
+        var invite = acceptance.Invite;
+        if (acceptance.UserId is null)
         {
             return Conflict(new { detail = "An account already exists for this email address. Sign in instead." });
         }
@@ -619,14 +623,28 @@ public sealed class AuthController : ControllerBase
 
         string? userId = await _users.FindIdByEmailAsync(ctx.TenantId, req.Email, ct);
         bool linkIssued = false;
+        bool tenantNotReady = false;
         if (userId is not null && withinBudget)
         {
-            string raw = await resetTokens.IssueAsync(userId, ctx.TenantId, ct);
-            string resetLink = _urls.Absolute(HttpContext, $"/reset?token={raw}");
-            // 30 minutes — kept in lockstep with PasswordResetTokenRepository's own expiry window.
-            var expiresAt = _time.GetUtcNow().AddMinutes(30);
-            mailer.EnqueuePasswordReset(req.Email, resetLink, expiresAt);
-            linkIssued = true;
+            try
+            {
+                string raw = await resetTokens.IssueAsync(userId, ctx.TenantId, ct);
+                string resetLink = _urls.Absolute(HttpContext, $"/reset?token={raw}");
+                // 30 minutes — kept in lockstep with PasswordResetTokenRepository's own expiry window.
+                var expiresAt = _time.GetUtcNow().AddMinutes(30);
+                mailer.EnqueuePasswordReset(req.Email, resetLink, expiresAt);
+                linkIssued = true;
+            }
+            catch (TenantNotReadyException)
+            {
+                // The mint re-read the tenant inside its transaction and found it locked out,
+                // though the status this request was admitted under (a tenant cache entry on this
+                // replica, filled before the suspension) still read it as active. An unknown
+                // address never reaches the mint, so answering this one with the 423 would tell
+                // the caller the address has an account. No link is minted; the audit row below
+                // records the refusal and the response stays the uniform 202.
+                tenantNotReady = true;
+            }
         }
 
         // Single audit pseudonym, computed once, reused for both outcomes so the row stays
@@ -644,6 +662,7 @@ public sealed class AuthController : ControllerBase
                 // Set inside the branch that actually mints and mails the link, so the row records
                 // what happened rather than restating the conditions that led there.
                 link_issued = linkIssued,
+                refused = tenantNotReady ? "tenant_not_ready" : null,
                 email_hash = emailHash,
                 realm = "tenant",
             }, Dependably.Infrastructure.Audit.Events.EventJsonOptions.Detail),
@@ -687,14 +706,16 @@ public sealed class AuthController : ControllerBase
             return BadRequest(new { detail = verdict.ToReason(), field = "newPassword" });
         }
 
-        var consumed = await resetTokens.ConsumeAsync(req.Token, ct);
+        // Consuming the link and writing the password are one transaction that re-reads the
+        // tenant's status first, so a suspension committed after this request was admitted
+        // refuses it (423, link left pending) rather than leaving a password behind the revoke.
+        var consumed = await _users.ResetPasswordWithLinkAsync(resetTokens, req.Token, req.NewPassword, ct);
         if (consumed is null)
         {
             return StatusCode(StatusCodes.Status410Gone,
                 new { detail = "Reset link is invalid, expired, or already used." });
         }
 
-        await _users.ResetPasswordByRecoveryAsync(consumed.UserId, req.NewPassword, ct);
         await lockoutStore.ClearAsync(LoginService.HashLockoutKey("tenant", consumed.OrgId, consumed.Email), ct);
 
         var resetUserCtx = await _users.GetUserContextAsync(consumed.UserId, consumed.OrgId, ct);
@@ -739,18 +760,20 @@ public sealed class AuthController : ControllerBase
             return BadRequest(new { detail = "Confirmation token is required." });
         }
 
-        var consumed = await changeTokens.ConsumeAsync(req.Token, ct);
-        if (consumed is null)
+        // Consuming the link and moving the address are one transaction that re-reads the
+        // tenant's status first, so a suspension committed after this request was admitted
+        // refuses it (423, link left pending) rather than leaving a moved address behind the revoke.
+        var confirmation = await _users.ConfirmEmailChangeAsync(changeTokens, req.Token, ct);
+        if (confirmation is null)
         {
             return StatusCode(StatusCodes.Status410Gone,
                 new { detail = "Confirmation link is invalid, expired, or already used." });
         }
 
-        long? newVersion = await _users.ApplyVerifiedEmailChangeAsync(consumed.UserId, consumed.NewEmail, ct);
-        if (newVersion is null)
+        if (confirmation.Token is not { } consumed || confirmation.NewTokenVersion is null)
         {
-            // Claimed by someone else between the request and this redemption. The token is spent
-            // either way — the user asks again, against whatever the roster looks like now.
+            // Claimed by someone else between the request and this redemption. The user asks
+            // again, against whatever the roster looks like now.
             return Conflict(new { detail = "That address is already in use in this organization." });
         }
 

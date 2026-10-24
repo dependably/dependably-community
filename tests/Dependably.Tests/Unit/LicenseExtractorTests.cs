@@ -231,6 +231,34 @@ public class LicenseExtractorTests
         Assert.NotEmpty(result.Spdx);
     }
 
+    [Fact]
+    public void Npm_ScopedPackageTarball_PackageJsonAfterLargeEntries_ExtractsLicense()
+    {
+        // package.json sorts after the declaration files in a real @types tarball, so extraction
+        // has to stream past them to reach it.
+        using var raw = new MemoryStream();
+        using (var gzip = new GZipStream(raw, CompressionLevel.Optimal, leaveOpen: true))
+        using (var tar = new System.Formats.Tar.TarWriter(gzip, leaveOpen: true))
+        {
+            var big = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "package/index.d.ts")
+            {
+                DataStream = new MemoryStream(new byte[2 * 1024 * 1024]),
+            };
+            tar.WriteEntry(big);
+            byte[] json = Encoding.UTF8.GetBytes(
+                """{"name":"@types/react","version":"19.2.17","license":"MIT"}""");
+            tar.WriteEntry(new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "package/package.json")
+            {
+                DataStream = new MemoryStream(json),
+            });
+        }
+        raw.Position = 0;
+
+        var result = LicenseExtractor.FromNpmTarballPackageJson(raw);
+
+        Assert.Equal(new[] { "MIT" }, result.Spdx);
+    }
+
     // ── npm: JsonNode shapes ─────────────────────────────────────────────────
 
     [Fact]
@@ -707,6 +735,171 @@ public class LicenseExtractorTests
             </project>
             """));
         Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, result);
+    }
+
+    // ── PyPI: JSON API info object (FromPyPiJsonInfo) ────────────────────────
+
+    private static JsonElement ParseJson(string json) => JsonDocument.Parse(json).RootElement;
+
+    [Fact]
+    public void PyPiJsonInfo_LicenseExpression_WinsOverTheLegacyLicenseField()
+    {
+        var result = LicenseExtractor.FromPyPiJsonInfo(ParseJson(
+            """{"license_expression":" MIT OR Apache-2.0 ","license":"BSD-3-Clause"}"""));
+
+        Assert.Equal(new[] { "MIT OR Apache-2.0" }, result.Spdx);
+        Assert.Null(result.Deprecated);
+    }
+
+    [Fact]
+    public void PyPiJsonInfo_FallsBackToTheLegacyLicenseField_WhenNoPlausibleExpressionIsPresent()
+    {
+        Assert.Equal(
+            new[] { "BSD-3-Clause" },
+            LicenseExtractor.FromPyPiJsonInfo(ParseJson("""{"license":"BSD-3-Clause"}""")).Spdx);
+        Assert.Equal(
+            new[] { "Apache-2.0" },
+            LicenseExtractor.FromPyPiJsonInfo(ParseJson(
+                """{"license_expression":"not an spdx: expression!","license":"Apache-2.0"}""")).Spdx);
+        Assert.Equal(
+            new[] { "Apache-2.0" },
+            LicenseExtractor.FromPyPiJsonInfo(ParseJson("""{"license_expression":null,"license":"Apache-2.0"}""")).Spdx);
+    }
+
+    [Theory]
+    [InlineData("""{}""")]
+    [InlineData("""{"license":null,"license_expression":42}""")]
+    [InlineData("""{"license":"   "}""")]
+    [InlineData("""{"license":"Permission is hereby granted, free of charge, to any person"}""")]
+    [InlineData("""{"license":"MIT\nLicense text follows"}""")]
+    public void PyPiJsonInfo_UnusableLicenseFields_YieldNoLicence(string info)
+    {
+        Assert.Empty(LicenseExtractor.FromPyPiJsonInfo(ParseJson(info)).Spdx);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("\"MIT\"")]
+    [InlineData("null")]
+    public void PyPiJsonInfo_NonObjectInfo_IsEmpty(string info)
+    {
+        Assert.Equal(LicenseExtractor.ExtractedMetadata.Empty, LicenseExtractor.FromPyPiJsonInfo(ParseJson(info)));
+    }
+
+    // ── PyPI: presentation headers ───────────────────────────────────────────
+
+    [Fact]
+    public void PyPi_Presentation_ReadsHomepageSourceSummaryAndAuthor()
+    {
+        byte[] bytes = BuildWheel("""
+            Metadata-Version: 2.1
+            Name: requests
+            Version: 2.31.0
+            Home-page: https://requests.readthedocs.io
+            Summary: Python HTTP for Humans.
+            Author: Kenneth Reitz
+            Author-email: me@kennethreitz.org
+            Project-URL: Documentation, https://requests.readthedocs.io
+            Project-URL: Source, git+https://github.com/psf/requests.git
+            Project-URL: Repository, https://example.com/second
+
+            body
+            """);
+
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "requests-2.31.0-py3-none-any.whl");
+
+        Assert.Equal("https://requests.readthedocs.io", result.Homepage);
+        Assert.Equal("https://github.com/psf/requests", result.Repository);
+        Assert.Equal("Python HTTP for Humans.", result.Description);
+        Assert.Equal("Kenneth Reitz", result.Author);
+    }
+
+    [Fact]
+    public void PyPi_Presentation_FallsBackToProjectUrlHomepageAndToAuthorEmail()
+    {
+        byte[] bytes = BuildWheel("""
+            Metadata-Version: 2.1
+            Name: flask
+            Version: 3.0.0
+            Author-email: Pallets <contact@palletsprojects.com>
+            Project-URL: Homepage, https://palletsprojects.com/p/flask
+            Project-URL: Source Code, https://github.com/pallets/flask
+
+            body
+            """);
+
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "flask-3.0.0-py3-none-any.whl");
+
+        Assert.Equal("https://palletsprojects.com/p/flask", result.Homepage);
+        Assert.Equal("https://github.com/pallets/flask", result.Repository);
+        Assert.Equal("Pallets <contact@palletsprojects.com>", result.Author);
+        Assert.Null(result.Description);
+    }
+
+    [Fact]
+    public void PyPi_Presentation_SkipsBlankHeadersAndMalformedProjectUrls()
+    {
+        byte[] bytes = BuildWheel("""
+            Metadata-Version: 2.1
+            Name: flask
+            Version: 3.0.0
+            Home-page:
+            Summary:
+            Project-URL: no-comma-here
+            Project-URL: , https://leading-comma.example
+            Project-URL: Source,
+            Project-URL: Changelog, https://example.com/changes
+            Home-page: javascript:alert(1)
+
+            body
+            """);
+
+        var result = LicenseExtractor.FromPyPiPackageBytes(new MemoryStream(bytes), "flask-3.0.0-py3-none-any.whl");
+
+        Assert.Null(result.Homepage);
+        Assert.Null(result.Repository);
+        Assert.Null(result.Description);
+        Assert.Null(result.Author);
+    }
+
+    // ── repository URL normalisation ─────────────────────────────────────────
+
+    [Theory]
+    [InlineData("git+https://github.com/lodash/lodash.git", "https://github.com/lodash/lodash")]
+    [InlineData("scm:git:https://github.com/apache/commons-lang.git", "https://github.com/apache/commons-lang")]
+    [InlineData("scm:git:git://github.com/apache/commons-lang.git", "https://github.com/apache/commons-lang")]
+    [InlineData("git://github.com/lodash/lodash.git", "https://github.com/lodash/lodash")]
+    [InlineData("ssh://git@github.com/lodash/lodash.git", "https://github.com/lodash/lodash")]
+    [InlineData("github:lodash/lodash", "https://github.com/lodash/lodash")]
+    [InlineData("gitlab:gitlab-org/gitlab", "https://gitlab.com/gitlab-org/gitlab")]
+    [InlineData("bitbucket:atlassian/aui", "https://bitbucket.org/atlassian/aui")]
+    [InlineData("GITHUB:lodash/lodash", "https://github.com/lodash/lodash")]
+    [InlineData("  https://github.com/lodash/lodash.GIT  ", "https://github.com/lodash/lodash")]
+    [InlineData("https://github.com/lodash/lodash", "https://github.com/lodash/lodash")]
+    public void PresentationOnly_NormalisesRepositoryUrlsToBrowsableHttps(string repository, string expected)
+    {
+        Assert.Equal(expected, LicenseExtractor.PresentationOnly(null, repository, null).Repository);
+    }
+
+    [Theory]
+    [InlineData("git@github.com:lodash/lodash.git")]
+    [InlineData("lodash/lodash")]
+    [InlineData("ftp://example.com/repo")]
+    [InlineData("   ")]
+    public void PresentationOnly_DropsRepositoryValuesThatAreNotHttpAfterNormalisation(string repository)
+    {
+        Assert.Null(LicenseExtractor.PresentationOnly(null, repository, null).Repository);
+    }
+
+    [Fact]
+    public void PresentationOnly_HomepageMustBeHttp_AndTextIsTrimmed()
+    {
+        var kept = LicenseExtractor.PresentationOnly(" HTTPS://example.com ", null, "  A summary.  ", "  Ada  ");
+        Assert.Equal("HTTPS://example.com", kept.Homepage);
+        Assert.Equal("A summary.", kept.Description);
+        Assert.Equal("Ada", kept.Author);
+
+        Assert.Null(LicenseExtractor.PresentationOnly("mailto:ada@example.com", null, null).Homepage);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

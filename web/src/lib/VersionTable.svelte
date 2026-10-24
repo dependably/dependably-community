@@ -28,9 +28,12 @@
   import VulnerabilityRow from './VulnerabilityRow.svelte'
   import RowActionsMenu from './RowActionsMenu.svelte'
   import { formatDate, formatBytes, formatNumber } from './format.js'
+  import { installScriptBadge } from './installScriptBadge.js'
   import { sortIndicator } from './sortIndicator.js'
   import { rememberedRowCount, rememberRowCount } from './tableSize.js'
   import { fileRowKey } from './versionFiles.js'
+  import { isOciDigest, showsLinkedFindings, worstOciSecurity } from './ociScan.js'
+  import OciScanPanel from './OciScanPanel.svelte'
   import { versionInstallCommand } from './installCommand.js'
   import { compareVersions, defaultSortColumn } from './versionOrder.js'
 
@@ -86,11 +89,15 @@
   $: if (!sortTouched && pkg) sortCol = defaultSortColumn(pkg.ecosystem)
   let expandedKey = null
   let openActionsId = null
+  // OCI scan detail already fetched on this page, keyed by digest and request. Lives here rather
+  // than in the panel so collapsing a row keeps it. Never read reactively.
+  const ociScanCache = new Map()
 
   // Worst-first rank for collapsing several files' statuses into the version's overall status.
   // no_feed outranks unscanned: an unscanned artefact is waiting for the next pass, one whose
-  // ecosystem has no advisory feed will never be covered at all.
-  const STATUS_RANK = { blocked: 0, vulnerable: 1, deprecated: 2, no_feed: 3, unscanned: 4, allowed: 5, clean: 6 }
+  // ecosystem has no advisory feed will never be covered at all. partial (an OCI image scanned
+  // with coverage gaps and no advisories) sits between them: screened, but not all of it.
+  const STATUS_RANK = { blocked: 0, vulnerable: 1, deprecated: 2, no_feed: 3, partial: 4, unscanned: 5, allowed: 6, clean: 7 }
 
   // Collapse the flat per-file list into one display group per version. A single-file group
   // renders exactly like the old flat row; a multi-file group aggregates the file-level columns
@@ -151,6 +158,8 @@
       indexedPdbCount: files.reduce((n, f) => Math.max(n, f.indexedPdbCount ?? 0), 0),
       isMalicious: files.some(f => f.isMalicious),
       status: worstStatus,
+      // The org's scan state for an OCI image; null for every other ecosystem.
+      ociSecurity: worstOciSecurity(files),
       // Single-checksum / integrity belong to one file; null them out for multi-file groups
       // (the per-file checksums live in the expanded panel).
       checksumSha256: single ? rep.checksumSha256 : null,
@@ -325,7 +334,8 @@
       {@const isExpanded = expandedKey === g.key}
       {@const verShort = shortVersion(g.version)}
       {@const hasFlags = !g.single || g.yanked || g.deprecated || g.revokedAt || g.hasInstallScript
-        || g.provenanceStatus !== null || g.hasSymbolPackage || vulns.length > 0}
+        || g.provenanceStatus !== null || g.hasSymbolPackage || vulns.length > 0
+        || g.ociSecurity?.kind === 'vulnerable'}
       <tr
         class:first-fetch-row={g.firstFetch}
         class:expanded-row={isExpanded}
@@ -342,13 +352,23 @@
               {#if g.yanked}<span class="badge yanked">{$t('versionDetail.badges.yanked')}</span>{/if}
               {#if g.deprecated}<span class="badge deprecated" title={g.deprecated}>{$t('versionDetail.badges.deprecated')}</span>{/if}
               {#if g.revokedAt}<span class="badge revoked" title={$t('versionDetail.badges.revokedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.revoked')}</span>{/if}
-              {#if g.hasInstallScript}<span class="badge install-script" title={$t('versionDetail.badges.installScriptHelp', { values: { kind: g.installScriptKind || '' } })}>{$t('versionDetail.badges.installScript')}</span>{/if}
+              {#if g.hasInstallScript}
+                {@const isb = installScriptBadge(g.installScriptKind)}
+                <span class="badge install-script" title={$t(isb.helpKey, { values: { kind: g.installScriptKind || '' } })}>{$t(isb.labelKey)}</span>
+              {/if}
               {#if g.provenanceStatus === 'verified'}<span class="badge prov-verified" title={$t('versionDetail.badges.provenanceVerifiedHelp', { values: { signer: g.provenanceSigner || '' } })}>{$t('versionDetail.badges.provenanceVerified')}</span>{/if}
               {#if g.provenanceStatus === 'failed'}<span class="badge prov-failed" title={$t('versionDetail.badges.provenanceFailedHelp')}>{$t('versionDetail.badges.provenanceFailed')}</span>{/if}
               {#if g.provenanceStatus === 'unsigned'}<span class="badge prov-unsigned" title={$t('versionDetail.badges.provenanceUnsignedHelp')}>{$t('versionDetail.badges.provenanceUnsigned')}</span>{/if}
               {#if g.hasSymbolPackage && g.indexedPdbCount > 0}<span class="badge symbols" title={$t('versionDetail.badges.symbolsHelp', { values: { count: g.indexedPdbCount } })}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-bug"/></svg>{$t('versionDetail.badges.symbols', { values: { count: g.indexedPdbCount } })}</span>{/if}
               {#if g.hasSymbolPackage && g.indexedPdbCount === 0}<span class="badge symbols-unindexed" title={$t('versionDetail.badges.symbolsUnindexedHelp')}><svg width="11" height="11" aria-hidden="true"><use href="/icons.svg#icon-alert"/></svg>{$t('versionDetail.badges.symbolsUnindexed')}</span>{/if}
-              {#if vulns.length > 0}
+              {#if g.ociSecurity?.kind === 'vulnerable'}
+                <span class="inline-vulns">
+                  <span
+                    class="sev sev-{(g.ociSecurity.severity ?? "unknown").toLowerCase()}"
+                    aria-label={$t('versionDetail.detail.ociFindings', { values: { count: g.ociSecurity.count } })}
+                  >{g.ociSecurity.count}</span>
+                </span>
+              {:else if vulns.length > 0}
                 {@const critical = vulns.filter(v => v.severity === 'CRITICAL').length}
                 {@const high     = vulns.filter(v => v.severity === 'HIGH').length}
                 {@const medium   = vulns.filter(v => v.severity === 'MEDIUM').length}
@@ -413,7 +433,8 @@
           {#if g.status}
             <span
               class="status-badge status-{g.status}"
-              title={g.status === 'no_feed' ? $t('versionDetail.status.noFeedHelp') : ''}
+              title={g.status === 'no_feed' ? $t(pkg?.ecosystem === 'oci' ? 'versionDetail.detail.ociNoFeed' : 'versionDetail.status.noFeedHelp')
+                : g.status === 'partial' ? $t('versionDetail.status.partialHelp') : ''}
             >{$t(`versionDetail.status.${g.status}`)}</span>
           {/if}
         </td>
@@ -466,8 +487,13 @@
         <tr class="detail-row">
           <td colspan={colCount}>
             <div class="detail-panel">
-              <!-- First in the panel: "how do I get this exact version" outranks "what is
-                   its identifier" for a reader who just expanded the row. -->
+              <!-- An OCI image's scan detail leads the panel, so a partial image's coverage gaps
+                   are the first thing the reader sees. -->
+              {#if pkg?.ecosystem === 'oci' && isOciDigest(g.version)}
+                <OciScanPanel name={pkg?.purlName ?? pkg?.name ?? ''} digest={g.version} cache={ociScanCache} />
+              {/if}
+              <!-- Then "how do I get this exact version", which outranks "what is its
+                   identifier" for a reader who just expanded the row. -->
               {#if cmd}
                 <div class="detail-section">
                   <span class="detail-label">{$t(`versionDetail.install.${cmd.labelKey}`)}</span>
@@ -609,7 +635,38 @@
 
               <div class="detail-section">
                 <span class="detail-label">{$t('versionDetail.detail.vulns')}</span>
-                {#if vulns.length === 0}
+                {#if g.ociSecurity && g.ociSecurity.kind !== 'clean'}
+                  <!-- An OCI image's findings live in the org's scan result, not in linked
+                       advisories, so every state but a full clean scan gets its own wording
+                       and never the clean line. -->
+                  {#if g.ociSecurity.kind === 'vulnerable'}
+                    <span class="detail-value">
+                      {$t('versionDetail.detail.ociFindings', { values: { count: g.ociSecurity.count } })}
+                      {#if g.ociSecurity.gapCount > 0}{$t('versionDetail.detail.ociGapsNote', { values: { count: g.ociSecurity.gapCount } })}{/if}
+                    </span>
+                    {#if vulns.length > 0}
+                      <div class="vuln-list">
+                        {#each vulns as v (v.osvId)}
+                          <VulnerabilityRow vuln={v} />
+                        {/each}
+                      </div>
+                    {/if}
+                  {:else if g.ociSecurity.kind === 'partial'}
+                    <span class="detail-value text-muted">{$t('versionDetail.detail.ociPartial', { values: { count: g.ociSecurity.gapCount } })}</span>
+                  {:else if g.ociSecurity.kind === 'unscanned'}
+                    <span class="detail-value text-muted">{$t('versionDetail.detail.ociUnscanned')}</span>
+                  {:else}
+                    <span class="detail-value text-muted">{$t('versionDetail.detail.ociNoFeed')}</span>
+                  {/if}
+                  {#if showsLinkedFindings(g.ociSecurity, vulns.length)}
+                    <!-- Linked advisories are known findings; no scan state hides them. -->
+                    <div class="vuln-list">
+                      {#each vulns as v (v.osvId)}
+                        <VulnerabilityRow vuln={v} />
+                      {/each}
+                    </div>
+                  {/if}
+                {:else if vulns.length === 0}
                   <span class="detail-empty">{$t('versionDetail.detail.noVulns')}</span>
                 {:else}
                   <div class="vuln-list">
@@ -748,6 +805,7 @@
   .status-clean      { background: var(--badge-hosted-bg); color: var(--badge-hosted-text); }
   .status-unscanned  { background: var(--badge-warning-bg);  color: var(--badge-warning-text); }
   .status-no_feed    { background: var(--badge-warning-bg);  color: var(--badge-warning-text); }
+  .status-partial    { background: var(--badge-warning-bg);  color: var(--badge-warning-text); }
   /* Known-malicious: the strongest danger signal in the table. A filled red pill (not the
      muted --badge-red-bg tint) so it dominates whatever gate status sits beside it. */
   .status-malicious {

@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Dependably.Configuration;
 using Dependably.Infrastructure;
+using Dependably.Security;
 using Microsoft.Extensions.Options;
 
 namespace Dependably.Protocol;
@@ -185,15 +186,15 @@ public sealed class OciUpstreamAuthService : IDisposable
             }
 
             // The realm comes verbatim from the upstream's challenge. Refuse the exchange
-            // unless it is HTTPS and exactly on the upstream's own host, or exactly matches
+            // unless it is HTTPS and exactly on the upstream's own host and port, or exactly matches
             // the operator-pinned TokenEndpoint — otherwise a MITM'd or hostile upstream
             // could redirect credentials to an attacker host by returning a forged realm.
             if (!IsTrustedRealm(realm, upstream))
             {
                 _logger.LogWarning(
                     "OCI token exchange refused for upstream {Host}: challenge realm {Realm} is not HTTPS " +
-                    "on the upstream's own host. Set the entry's TokenEndpoint to pin an auth realm " +
-                    "hosted on a different domain (e.g. https://auth.docker.io/token for Docker Hub).",
+                    "on the upstream's own host and port. Set the entry's TokenEndpoint to pin an auth realm " +
+                    "hosted on a different domain or port (e.g. https://auth.docker.io/token for Docker Hub).",
                     upstream.Host, realm);
                 throw new OciUnauthorizedException(
                     $"Token exchange realm '{realm}' is not trusted for upstream {upstream.Host}");
@@ -299,7 +300,8 @@ public sealed class OciUpstreamAuthService : IDisposable
     /// The realm must be an absolute HTTPS URL and either:
     /// <list type="bullet">
     ///   <item>exactly match the operator-pinned <see cref="OciUpstreamRegistryOptions.TokenEndpoint"/>; or</item>
-    ///   <item>be on exactly the upstream's own host (no registrable-domain fallback).</item>
+    ///   <item>be on exactly the upstream's own origin — host and port, the port defaulting to 443
+    ///   when the upstream Host names none (no registrable-domain fallback).</item>
     /// </list>
     /// Registrable-domain matching is intentionally absent. A Www-Authenticate challenge
     /// redirecting to a sibling domain (e.g. <c>auth.docker.io</c> for
@@ -323,10 +325,12 @@ public sealed class OciUpstreamAuthService : IDisposable
             return true;
         }
 
-        // Upstream Host config may carry a port (e.g. "registry.internal:5000") — compare hosts only.
-        string realmHost = realmUri.Host;
-        string upstreamHost = upstream.Host.Split(':')[0];
-        return string.Equals(realmHost, upstreamHost, StringComparison.OrdinalIgnoreCase);
+        // Otherwise the realm must be on the upstream's own origin: the same host AND the same
+        // port the registry is pulled from (the upstream Host may carry one, e.g.
+        // "registry.internal:5000"; without one it is HTTPS's default 443, matching how every pull
+        // URL is built). A different port on the same host is a different service and does not
+        // inherit the credential; an operator whose token service lives there pins TokenEndpoint.
+        return UpstreamHostPin.IsSameOrigin($"https://{upstream.Host}", realm);
     }
 
     private static (string? Realm, string? Service, string? Scope) ParseWwwAuthenticate(

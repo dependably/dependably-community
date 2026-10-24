@@ -121,6 +121,38 @@ public sealed class MetadataCacheTests
     }
 
     [Fact]
+    public async Task StaleServe_IsFlaggedStale_WhileLiveAnswersAndInTtlHitsAreNot()
+    {
+        var handler = new ScriptedHandler();
+        handler.Enqueue(Reply.Ok("cached"));
+        var clock = TestTime.Frozen();
+        var (client, _) = Build(handler, clock, ttlSeconds: 60, maxStaleSeconds: 3600);
+
+        Assert.False((await client.GetOrFetchMetadataAsync(Url)).IsStale);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        Assert.False((await client.GetOrFetchMetadataAsync(Url)).IsStale);
+
+        // Past the TTL, a 503 and then a transport fault each serve the cached 200 unchanged,
+        // flagged as stale.
+        clock.Advance(TimeSpan.FromSeconds(31));
+        handler.Enqueue(Reply.WithStatus(HttpStatusCode.ServiceUnavailable, "err"));
+        var on5xx = await client.GetOrFetchMetadataAsync(Url);
+        Assert.Equal((200, true, "cached", true), (on5xx.StatusCode, on5xx.IsSuccessStatusCode, on5xx.BodyAsString(), on5xx.IsStale));
+
+        handler.Enqueue(Reply.Throw(new HttpRequestException("connection refused")));
+        var onFault = await client.GetOrFetchMetadataAsync(Url);
+        Assert.Equal((200, true, "cached", true), (onFault.StatusCode, onFault.IsSuccessStatusCode, onFault.BodyAsString(), onFault.IsStale));
+
+        // The cached entry itself is never flagged: once the upstream answers again the live body
+        // is not stale, and neither is a hit on it inside the TTL.
+        handler.Enqueue(Reply.Ok("recovered"));
+        var recovered = await client.GetOrFetchMetadataAsync(Url);
+        Assert.Equal(("recovered", false), (recovered.BodyAsString(), recovered.IsStale));
+        Assert.False((await client.GetOrFetchMetadataAsync(Url)).IsStale);
+        Assert.Equal(4, handler.CallCount);
+    }
+
+    [Fact]
     public async Task NotFound_IsNegativeCached_ThenReFetched_ThenReplacedByOk()
     {
         var handler = new ScriptedHandler();

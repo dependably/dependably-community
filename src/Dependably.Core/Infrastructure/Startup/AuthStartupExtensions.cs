@@ -34,6 +34,13 @@ internal static class AuthStartupExtensions
         // The non-caching resolvers (Single/Header/Bound) stay Scoped — they hold no state that
         // needs to outlive a request; a fresh instance per request is fine either way.
         string tenancyMode = (builder.Configuration["DEPLOYMENT_MODE"] ?? "single").Trim().ToLowerInvariant();
+        if (tenancyMode != "multi" && BaseUrlHostHelper.IsTenantDomainConfigured(builder.Configuration))
+        {
+            Serilog.Log.Warning(
+                "TENANT_DOMAIN is set but DEPLOYMENT_MODE is not multi, so it has no effect. "
+                + "Tenant domains apply only to subdomain tenancy.");
+        }
+
         switch (tenancyMode)
         {
             case "multi":
@@ -59,18 +66,30 @@ internal static class AuthStartupExtensions
                 // resolver mints, not a second copy of them.
                 builder.Services.AddSingleton<ITenantSlugCacheInvalidator>(
                     sp => (SubdomainTenantResolver)sp.GetRequiredService<ITenantResolver>());
-                // Multi mode resolves tenants by subdomain under the apex host (APEX_HOST, else the
-                // host of BASE_URL). Without a real (non-localhost) apex, every bare/IP/non-subdomain request
-                // falls to apex/uninitialized and per-tenant login methods (forms, SAML) never render.
+                // Multi mode resolves tenants by subdomain under the tenant domain (TENANT_DOMAIN,
+                // else the apex: APEX_HOST, else the host of BASE_URL). Without a real
+                // (non-localhost) tenant domain, every bare/IP/non-subdomain request falls to
+                // apex/uninitialized and per-tenant login methods (forms, SAML) never render.
                 // Warn so the misconfig is visible instead of silently hiding the login page.
-                if (BaseUrlHostHelper.ResolveUsableApexHost(builder.Configuration) is null)
+                if (BaseUrlHostHelper.ResolveUsableTenantDomain(builder.Configuration) is null)
                 {
                     Serilog.Log.Warning(
-                        "DEPLOYMENT_MODE=multi but neither APEX_HOST nor BASE_URL names a non-localhost host. "
-                        + "Tenants are reached at slug.apexhost; non-subdomain hosts resolve to apex/uninitialized "
-                        + "and per-tenant login methods such as SAML will not appear. Set BASE_URL to a "
-                        + "non-localhost URL (e.g. https://repo.example.com), or use "
-                        + "DEPLOYMENT_MODE=single for a single-tenant appliance.");
+                        "DEPLOYMENT_MODE=multi but none of TENANT_DOMAIN, APEX_HOST, or BASE_URL names a "
+                        + "non-localhost host. Tenants are reached at slug.tenantdomain; non-subdomain "
+                        + "hosts resolve to apex/uninitialized and per-tenant login methods such as SAML "
+                        + "will not appear. Set BASE_URL to a non-localhost URL "
+                        + "(e.g. https://repo.example.com), or use DEPLOYMENT_MODE=single for a "
+                        + "single-tenant appliance.");
+                }
+
+                // An explicit TENANT_DOMAIN that cannot serve as a real domain fails closed rather
+                // than silently falling back to the apex. A blank value is "unset" and falls back.
+                if (!BaseUrlHostHelper.IsTenantDomainValueUsable(builder.Configuration))
+                {
+                    throw new InvalidOperationException(
+                        "TENANT_DOMAIN is set but is not a usable host (unparseable or a loopback name). "
+                        + "Set it to the parent domain tenants are served under (e.g. example.com), "
+                        + "or unset it to serve tenants under the apex host.");
                 }
 
                 break;
@@ -181,6 +200,12 @@ internal static class AuthStartupExtensions
             // Apex fleet-usage reports are per-caller with their own budget: the CSV export and
             // the long-range per-tenant series are the most expensive reads on the management plane.
             AddUsageReportLimiter(builder.Configuration, o, ipv6Prefix);
+
+            // The OCI scan API is driven by an out-of-process scanner rather than a person.
+            AddOciScanLimiter(builder.Configuration, o, ipv6Prefix);
+
+            // Stored-secret verification sweeps every protected table on the instance per call.
+            AddSecretsVerifyLimiter(builder.Configuration, o, ipv6Prefix);
 
             // Global default covers authenticated management endpoints (/api/v1/*) that
             // carry no endpoint-specific policy. The SPA and CI tooling hit /api/v1 at
@@ -363,6 +388,55 @@ internal static class AuthStartupExtensions
     {
         int limit = int.TryParse(cfg["USAGE_REPORT_RATE_LIMIT_PERMITS"], out int up) ? up : 30;
         o.AddPolicy("usage-report", httpContext =>
+        {
+            string key = RateLimitPartitions.GetManagementPartitionKey(httpContext, ipv6Prefix);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = limit,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = RateLimitWindowSegments,
+                    QueueLimit = 0,
+                });
+        });
+    }
+
+    // OCI scan API (/api/v1/oci-scan/*): one budget per scanner credential, shared by its claims,
+    // reads, heartbeats and results. Default 240 requests/min, which covers pulling an image of a
+    // few dozen layers per second's worth of work; a scanner that hits it backs off and retries.
+    // It stacks under the management default like every endpoint policy under /api/v1/.
+    private static void AddOciScanLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
+    {
+        int limit = int.TryParse(cfg["OCI_SCAN_RATE_LIMIT_PERMITS"], out int permits) && permits > 0 ? permits : 240;
+        o.AddPolicy("oci-scan", httpContext =>
+        {
+            string key = RateLimitPartitions.GetManagementPartitionKey(httpContext, ipv6Prefix);
+            return RateLimitPartition.GetSlidingWindowLimiter(key,
+                _ => new SlidingWindowRateLimiterOptions
+                {
+                    PermitLimit = limit,
+                    Window = TimeSpan.FromMinutes(1),
+                    SegmentsPerWindow = RateLimitWindowSegments,
+                    QueueLimit = 0,
+                });
+        });
+    }
+
+    // Stored-secret verification (POST /api/v1/system/secrets/verify and its single-mode
+    // /api/v1/instance/secrets/verify counterpart). One call reads and decrypts every protected
+    // row on the instance, so the budget is small and per caller, keyed like rescan. 6 calls/min
+    // by default (SECRETS_VERIFY_RATE_LIMIT_PERMITS overrides it): the sweep is a
+    // diagnostic an operator runs a handful of times around a repair, and the verifier also runs
+    // concurrent calls one at a time. Stacks under the 300/min management default like the other
+    // per-caller policies.
+    private const int SecretsVerifyPermitsPerMinuteDefault = 6;
+
+    private static void AddSecretsVerifyLimiter(ConfigurationManager cfg, RateLimiterOptions o, int ipv6Prefix)
+    {
+        int limit = int.TryParse(cfg["SECRETS_VERIFY_RATE_LIMIT_PERMITS"], out int permits) && permits > 0
+            ? permits
+            : SecretsVerifyPermitsPerMinuteDefault;
+        o.AddPolicy("secrets-verify", httpContext =>
         {
             string key = RateLimitPartitions.GetManagementPartitionKey(httpContext, ipv6Prefix);
             return RateLimitPartition.GetSlidingWindowLimiter(key,
@@ -575,9 +649,10 @@ internal static class RateLimitDenialAuditRecorder
             "download" or "push" or "import" or "sbom-upload" =>
                 RateLimitPartitions.GetPartitionKey(ctx, ipv6Prefix),
 
-            // AddRescanLimiter and AddUsageReportLimiter deliberately key like the management
-            // GlobalLimiter — token hash, then user sub, then IP — whatever the request path.
-            "rescan" or "usage-report" => RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix),
+            // AddRescanLimiter, AddUsageReportLimiter and AddSecretsVerifyLimiter deliberately key
+            // like the management GlobalLimiter — token hash, then user sub, then IP — whatever
+            // the request path.
+            "rescan" or "usage-report" or "secrets-verify" => RateLimitPartitions.GetManagementPartitionKey(ctx, ipv6Prefix),
 
             // AddMetadataLimiter and AddAnonymousProbeLimiter are always in-process, keyed on the
             // bare source IP with no "ip:" prefix — authentication never changes their bucket.

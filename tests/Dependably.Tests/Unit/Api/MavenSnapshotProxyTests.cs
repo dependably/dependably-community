@@ -392,6 +392,89 @@ public sealed class MavenSnapshotProxyTests : IAsyncLifetime
         Assert.Equal("MISS", ctl2.Response.Headers["X-Cache"].ToString());
     }
 
+    private async Task ReserveMavenNamespaceAsync(string pattern)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO reserved_namespace (id, org_id, ecosystem, pattern)
+            VALUES (@id, @org, 'maven', @pattern)
+            """,
+            new { id = Guid.NewGuid().ToString("N"), org = _orgId, pattern });
+    }
+
+    /// <summary>
+    /// A literal SNAPSHOT cached before its groupId was reserved keeps serving the cached alias
+    /// once the name is reserved, and the freshness re-check never asks upstream about it — even
+    /// though upstream has since published a newer build. The adversarial twin is
+    /// <see cref="Snapshot_LiteralRequest_ServesFreshBuild_WhenUpstreamPublishesNewerBuild"/>,
+    /// where the same sequence without a reservation does go upstream and serves the new build.
+    /// </summary>
+    [Fact]
+    public async Task Snapshot_LiteralRequest_ReservedGroup_ServesCachedAlias_WithoutConsultingUpstream()
+    {
+        const string groupPath = "com/example/reservedsnap";
+        const string artifactId = "reservedsnap";
+        const string version = "8.0-SNAPSHOT";
+
+        byte[] bytesN = Encoding.UTF8.GetBytes("reserved-snapshot-build-N");
+        const string timestampN = "20240101.100000";
+        string artifactPathN = $"{groupPath}/{artifactId}/{version}/{artifactId}-8.0-{timestampN}-1.jar";
+        byte[] bytesNplus1 = Encoding.UTF8.GetBytes("reserved-snapshot-build-Nplus1");
+        const string timestampNplus1 = "20240102.120000";
+        string artifactPathNplus1 = $"{groupPath}/{artifactId}/{version}/{artifactId}-8.0-{timestampNplus1}-2.jar";
+        string literalPath = $"{groupPath}/{artifactId}/{version}/{artifactId}-{version}.jar";
+
+        StubSnapshotMetadata(groupPath, artifactId, version,
+            SnapshotMetadataXml("com.example.reservedsnap", artifactId, version, timestampN, 1));
+        StubArtifact(artifactPathN, bytesN);
+        StubSha256Sidecar(artifactPathN, Sha256Hex(bytesN));
+        var first = await BuildController(CleanOsv()).Download(literalPath, CancellationToken.None);
+        Assert.Equal(bytesN, Dependably.Tests.Infrastructure.MavenServe.File(first).FileContents);
+
+        await ReserveMavenNamespaceAsync("com.example.reservedsnap");
+        _server.ResetMappings();
+        _server.ResetLogEntries();
+        StubSnapshotMetadata(groupPath, artifactId, version,
+            SnapshotMetadataXml("com.example.reservedsnap", artifactId, version, timestampNplus1, 2));
+        StubArtifact(artifactPathNplus1, bytesNplus1);
+        StubSha256Sidecar(artifactPathNplus1, Sha256Hex(bytesNplus1));
+
+        var second = await BuildController(CleanOsv()).Download(literalPath, CancellationToken.None);
+
+        Assert.Equal(bytesN, Dependably.Tests.Infrastructure.MavenServe.File(second).FileContents);
+        Assert.Empty(_server.LogEntries);
+    }
+
+    /// <summary>
+    /// Hosted content under a reserved name is unaffected: an uploaded SNAPSHOT under a reserved
+    /// groupId serves its local bytes, and upstream is not consulted at all.
+    /// </summary>
+    [Fact]
+    public async Task UploadedSnapshot_UnderReservedGroup_ServesLocalBytes_WithoutConsultingUpstream()
+    {
+        byte[] localBytes = Encoding.UTF8.GetBytes("uploaded-reserved-snapshot-LOCAL");
+        const string groupId = "com.example.reservedhosted";
+        const string artifactId = "hosted-snap";
+        const string version = "2.0-SNAPSHOT";
+        string literalFilename = $"{artifactId}-{version}.jar";
+        string groupPath = groupId.Replace('.', '/');
+        await SeedUploadedSnapshotAsync(groupId, artifactId, version, literalFilename, localBytes);
+        await ReserveMavenNamespaceAsync(groupId);
+        StubSnapshotMetadata(groupPath, artifactId, version,
+            SnapshotMetadataXml(groupId, artifactId, version, "20240101.120000", 1));
+
+        string rawToken = await IssueReadArtifactTokenAsync();
+        var ctl = BuildController(CleanOsv(), BasicAuthHeader(rawToken));
+        var result = await ctl.Download($"{groupPath}/{artifactId}/{version}/{literalFilename}", CancellationToken.None);
+
+        var file = Assert.IsType<FileStreamResult>(result);
+        using var ms = new MemoryStream();
+        await file.FileStream.CopyToAsync(ms);
+        Assert.Equal(localBytes, ms.ToArray());
+        Assert.Empty(_server.LogEntries);
+    }
+
     /// <summary>
     /// CACHE-EFFICIENCY: when upstream metadata reports the same SNAPSHOT build on two
     /// consecutive literal <c>-SNAPSHOT.jar</c> requests, the second request must NOT

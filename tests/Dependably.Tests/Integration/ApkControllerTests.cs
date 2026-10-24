@@ -253,30 +253,29 @@ public sealed class ApkControllerTests : IClassFixture<DependablyFactory>, IAsyn
         }
     }
 
-    // ── never-500 on a non-matching filename ─────────────────────────────────
+    // ── a non-matching filename is refused, never fetched ────────────────────
 
     [Fact]
-    public async Task GetPackage_NonMatchingFilename_StillProxiesWithoutError_NoGlobalPlaneRecording()
+    public async Task GetPackage_NonMatchingFilename_NotInStore_Is404_NoUpstreamCall_NothingRecorded()
     {
         const string release = "v3.22";
         const string repo = "main";
         const string arch = "x86_64";
         const string file = "not-a-nevra-shaped-name.apk"; // no "-r{digits}" release segment
-        byte[] apkBytes = "opaque-bytes"u8.ToArray();
 
         _factory.MockUpstream.Given(
                 Request.Create().WithPath($"/{release}/{repo}/{arch}/{file}").UsingGet())
-            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(apkBytes));
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody("opaque-bytes"u8.ToArray()));
 
         string token = await _factory.CreateToken("pull");
         using var client = _factory.CreateClientWithBearer(token);
 
         var resp = await client.GetAsync($"/apk/{release}/{repo}/{arch}/{file}");
 
-        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
-        Assert.Equal(apkBytes, await resp.Content.ReadAsByteArrayAsync());
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.DoesNotContain(_factory.MockUpstream.LogEntries,
+            e => e.RequestMessage?.Path?.EndsWith(file, StringComparison.Ordinal) == true);
 
-        // No name/version to key a cache_artifact coordinate on — nothing recorded.
         await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
         long count = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM cache_artifact WHERE ecosystem = 'apk' AND filename LIKE @f",

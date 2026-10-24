@@ -102,6 +102,17 @@ public sealed class CargoDownloadUpstreamAuthHostPinningTests : IAsyncLifetime
         Assert.Equal(credential, handler.LastAuthorizationHeader);
     }
 
+    [Theory]
+    [InlineData("http://private-sparse-registry.test/api/v1/crates/widget/1.0.0/download")]
+    [InlineData("https://private-sparse-registry.test:8443/api/v1/crates/widget/1.0.0/download")]
+    public void DownloadAuthorization_SameHostDifferentSchemeOrPort_DropsTheCredential(string downloadUrl)
+    {
+        // Same host, different origin: the credential is pinned to the configured scheme and
+        // port, so it neither crosses the wire in plaintext nor reaches another port's service.
+        Assert.Null(CargoController.ResolveDownloadAuthorizationHeader(
+            "https://private-sparse-registry.test", downloadUrl, "Bearer own-host-secret"));
+    }
+
     private sealed class StubAirGapMode : IAirGapMode
     {
         public bool IsEnabled => false;

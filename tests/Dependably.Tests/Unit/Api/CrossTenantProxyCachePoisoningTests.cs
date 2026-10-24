@@ -45,8 +45,8 @@ public sealed class CrossTenantProxyCachePoisoningTests : IAsyncLifetime
     private const string Version = "4.17.21";
     private const string File = "left-pad-4.17.21.tgz";
 
-    private static readonly byte[] HostileBytes = Encoding.UTF8.GetBytes("attacker-controlled-tarball-payload");
-    private static readonly byte[] GenuineBytes = Encoding.UTF8.GetBytes("genuine-registry-tarball-payload");
+    private static readonly byte[] HostileBytes = NpmFixtures.BuildTarball("attacker-controlled", "1.0.0").Bytes;
+    private static readonly byte[] GenuineBytes = NpmFixtures.BuildTarball("genuine-registry", "1.0.0").Bytes;
 
     private readonly TestMetadataStore _db = new();
     private readonly InMemoryBlobStore _blobs = new();
@@ -341,6 +341,7 @@ public sealed class CrossTenantProxyCachePoisoningTests : IAsyncLifetime
             new NpmFirstFetchMetadataReader(
                 upstreamClient,
                 new NpmProvenanceVerifier(new NpmSignatureKeyStore(new StubPerOrgTrustAnchorStore()))),
+            new CacheOrphanBlobDeleter(cacheArtifact, new CacheBlobKeyLock()),
             TimeProvider.System, NullLogger<NpmTarballHandler>.Instance);
     }
 

@@ -41,6 +41,160 @@ public static class OciManifestParser
         mediaType is not null && AcceptedMediaTypes.Contains(mediaType);
 
     /// <summary>
+    /// The largest blob read back to check whether it is in fact a manifest. Matches the cap on a
+    /// pushed manifest body: a real manifest or index is a few kilobytes.
+    /// </summary>
+    public const long ManifestSniffMaxBytes = 4L * 1024 * 1024;
+
+    /// <summary>
+    /// The manifest media type of <paramref name="bytes"/> when they are an image manifest or an
+    /// image index whatever label they arrived under, or null when they are not. A manifest is a
+    /// JSON object with <c>schemaVersion</c> 2 and either a <c>manifests</c> array (an index) or a
+    /// <c>config</c> object with a <c>layers</c> array; a config blob or a layer is neither. The
+    /// document's own <c>mediaType</c> wins when it is one this registry accepts.
+    /// </summary>
+    public static string? SniffManifestMediaType(byte[] bytes) => SniffManifestMediaType(bytes.AsMemory());
+
+    /// <inheritdoc cref="SniffManifestMediaType(byte[])"/>
+    public static string? SniffManifestMediaType(ReadOnlyMemory<byte> bytes)
+    {
+        if (bytes.Length is 0 or > (int)ManifestSniffMaxBytes)
+        {
+            return null;
+        }
+
+        ReadOnlySpan<byte> bom = [0xEF, 0xBB, 0xBF];
+        if (bytes.Span.StartsWith(bom))
+        {
+            bytes = bytes[bom.Length..];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(bytes);
+            return ClassifyManifestRoot(doc.RootElement);
+        }
+        catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ClassifyManifestRoot(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("schemaVersion", out var version)
+            || version.ValueKind != JsonValueKind.Number || version.GetInt32() != 2)
+        {
+            return null;
+        }
+
+        string? declared = root.TryGetProperty("mediaType", out var mt) && mt.ValueKind == JsonValueKind.String
+            ? mt.GetString()
+            : null;
+        bool isIndex = root.TryGetProperty("manifests", out var manifests) && manifests.ValueKind == JsonValueKind.Array;
+        bool isImage = root.TryGetProperty("config", out var config) && config.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty("layers", out var layers) && layers.ValueKind == JsonValueKind.Array;
+        return !isIndex && !isImage ? null
+            : IsAcceptedMediaType(declared) ? declared
+            : isIndex ? "application/vnd.oci.image.index.v1+json"
+            : "application/vnd.oci.image.manifest.v1+json";
+    }
+
+    /// <summary>What the first non-whitespace byte of a document says about whether it is a JSON object.</summary>
+    public enum JsonLead
+    {
+        /// <summary>Nothing but whitespace (and an optional UTF-8 byte-order mark) so far.</summary>
+        Undecided,
+
+        /// <summary>The document opens a JSON object.</summary>
+        Object,
+
+        /// <summary>The document opens with something other than an object, so it cannot be a manifest.</summary>
+        NotObject,
+    }
+
+    /// <summary>
+    /// Classifies a document by its first non-whitespace byte, so a reader can stop at the first
+    /// chunk of a blob that is plainly not JSON (a compressed layer) instead of reading it whole.
+    /// </summary>
+    public static JsonLead ClassifyLeadingByte(ReadOnlySpan<byte> prefix)
+    {
+        ReadOnlySpan<byte> bom = [0xEF, 0xBB, 0xBF];
+        if (prefix.Length < bom.Length && bom[..prefix.Length].SequenceEqual(prefix))
+        {
+            return JsonLead.Undecided;
+        }
+
+        if (prefix.StartsWith(bom))
+        {
+            prefix = prefix[bom.Length..];
+        }
+
+        foreach (byte b in prefix)
+        {
+            if (b is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')
+            {
+                continue;
+            }
+
+            return b == (byte)'{' ? JsonLead.Object : JsonLead.NotObject;
+        }
+
+        return JsonLead.Undecided;
+    }
+
+    /// <summary>
+    /// Reads <paramref name="stream"/> into memory while it could still be a manifest: it holds no
+    /// more than <see cref="ManifestSniffMaxBytes"/>, and its first non-whitespace byte opens a
+    /// JSON object. Returns null (with the stream partly consumed) as soon as either is false, so
+    /// a compressed layer is read no further than its first chunk. The caller owns the returned
+    /// stream, positioned at its start.
+    /// </summary>
+    public static async Task<MemoryStream?> ReadManifestCandidateAsync(Stream stream, CancellationToken ct)
+    {
+        var buffer = new MemoryStream();
+        byte[] chunk = System.Buffers.ArrayPool<byte>.Shared.Rent(81920);
+        try
+        {
+            bool opensObject = false;
+            int read;
+            while ((read = await stream.ReadAsync(chunk.AsMemory(0, 81920), ct)) > 0)
+            {
+                if (buffer.Length + read > ManifestSniffMaxBytes)
+                {
+                    await buffer.DisposeAsync();
+                    return null;
+                }
+
+                buffer.Write(chunk, 0, read);
+                if (opensObject)
+                {
+                    continue;
+                }
+
+                // Only the bytes before the first non-whitespace one matter, and they are all in
+                // the buffer from its start.
+                var lead = ClassifyLeadingByte(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));
+                if (lead == JsonLead.NotObject)
+                {
+                    await buffer.DisposeAsync();
+                    return null;
+                }
+
+                opensObject = lead == JsonLead.Object;
+            }
+
+            buffer.Position = 0;
+            return buffer;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(chunk);
+        }
+    }
+
+    /// <summary>
     /// Extracts the digests an OCI manifest references. Returns null when the bytes are not
     /// valid JSON or the structure is not a recognizable manifest/index (caller maps null to
     /// <c>MANIFEST_INVALID</c>).

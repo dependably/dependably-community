@@ -88,11 +88,11 @@ public sealed partial class OciController
 
     /// <summary>
     /// Fetches the upstream tag list (attempted when the proxy is enabled), degrading to
-    /// <c>null</c> — a local-only listing — on failure. AirGappedException means upstream is
-    /// intentionally unreachable (deliberate absence, not a failure); any other transport or
-    /// upstream failure also degrades so a network error never 503s a local listing, but is
-    /// reported as <c>UpstreamFailed</c> so a listing with nothing local to fall back on can
-    /// answer 502 rather than claiming the repository is unknown.
+    /// <c>null</c> — a local-only listing — on failure. AirGappedException and
+    /// OciPassthroughOffException mean upstream is intentionally unreachable (deliberate absence,
+    /// not a failure); any other transport or upstream failure also degrades so a network error
+    /// never 503s a local listing, but is reported as <c>UpstreamFailed</c> so a listing with
+    /// nothing local to fall back on can answer 502 rather than claiming the repository is unknown.
     /// </summary>
     private async Task<(List<string>? Tags, bool UpstreamFailed)> FetchUpstreamTagsOrDegradeAsync(
         string name, CancellationToken ct)
@@ -101,9 +101,9 @@ public sealed partial class OciController
         {
             return (await _svc.Upstream.FetchTagsAsync(CurrentTenantId(), name, ct), false);
         }
-        catch (AirGappedException)
+        catch (Exception ex) when (ex is AirGappedException or OciPassthroughOffException)
         {
-            // Air-gap mode: upstream unreachable by design; serve local tags only.
+            // Upstream off by policy (air-gap, or the org's passthrough off): serve local tags only.
             return (null, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

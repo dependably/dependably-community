@@ -138,6 +138,63 @@ public sealed class SchemaUpgradeFromPreviousReleaseTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task Upgrading_SeedsEveryTenantsRefreshStampFromTheSharedStamp()
+    {
+        // The deprecation refresh schedules on the per-tenant refresh_checked_at. Seeding it from
+        // the shared deprecation_checked_at the pass ordered by before keeps every group in the
+        // same place in the queue across the upgrade; a never-checked row stays never-processed.
+        var baseline = ResolveBaselineOrSkip();
+        if (baseline is null)
+        {
+            return;
+        }
+
+        await ApplyBaselineSchemaAsync(baseline.SqliteSql);
+
+        await using (var seed = await _db.OpenAsync())
+        {
+            await seed.ExecuteAsync("INSERT INTO orgs (id, slug) VALUES ('o-a','a'), ('o-b','b')");
+            await seed.ExecuteAsync(
+                """
+                INSERT INTO cache_artifact
+                    (id, ecosystem, name, version, filename, blob_key, content_hash,
+                     first_cached_at, last_accessed_at, deprecation_checked_at)
+                VALUES ('ca-checked','npm','left-pad','1.0.0','left-pad-1.0.0.tgz','proxy/c1','h1',
+                        '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-03-04T05:06:07Z'),
+                       ('ca-never','npm','right-pad','1.0.0','right-pad-1.0.0.tgz','proxy/c2','h2',
+                        '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',NULL)
+                """);
+            await seed.ExecuteAsync(
+                """
+                INSERT INTO tenant_artifact_access
+                    (org_id, cache_artifact_id, first_accessed_at, last_accessed_at, access_count)
+                VALUES ('o-a','ca-checked','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1),
+                       ('o-b','ca-checked','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1),
+                       ('o-a','ca-never','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1)
+                """);
+        }
+
+        await new SchemaInitializer(_db).InitializeAsync();
+
+        await using var conn = await _db.OpenAsync();
+        var stamps = (await conn.QueryAsync<(string OrgId, string CacheArtifactId, string? Stamp)>(
+            """
+            SELECT org_id AS OrgId, cache_artifact_id AS CacheArtifactId, refresh_checked_at AS Stamp
+            FROM tenant_artifact_access
+            ORDER BY cache_artifact_id, org_id
+            """)).ToList();
+
+        Assert.Equal(
+            new (string, string, string?)[]
+            {
+                ("o-a", "ca-checked", "2026-03-04T05:06:07Z"),
+                ("o-b", "ca-checked", "2026-03-04T05:06:07Z"),
+                ("o-a", "ca-never", null),
+            },
+            stamps);
+    }
+
     private static SchemaBaseline? ResolveBaselineOrSkip()
     {
         var resolution = SchemaBaselineResolver.Resolve();
@@ -162,6 +219,17 @@ public sealed class SchemaUpgradeFromPreviousReleaseTests : IAsyncLifetime
     {
         await using var conn = await _db.OpenAsync();
         await conn.ExecuteAsync(sql);
+
+        // A previous-release database has booted that release, so its ledger holds the upgrade-floor
+        // sentinel. Only the sentinel is seeded: every other one-time migration still runs against
+        // the previous release's shape, which is the wider test.
+        await conn.ExecuteAsync(
+            """
+            CREATE TABLE IF NOT EXISTS _applied_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+            INSERT INTO _applied_migrations (name) VALUES ('expand_usage_daily_meter_check_cache_storage');
+            """);
     }
 
     private static async Task<bool> TableExistsAsync(System.Data.Common.DbConnection conn, string table) =>

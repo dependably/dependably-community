@@ -73,6 +73,7 @@ public sealed class BootstrapControllerEndpointTests
         Assert.Equal("multi", Prop<string>(body, "mode"));
         Assert.True(Prop<bool>(body, "isApex"));
         Assert.Equal("dependably.example.com", Prop<string?>(body, "apexHost"));
+        Assert.Equal("dependably.example.com", Prop<string?>(body, "tenantDomain"));
         // tenantSlug intentionally omitted in multi mode — exposing it would turn the
         // public endpoint into an existence oracle for tenants.
         Assert.Null(body.GetType().GetProperty("tenantSlug"));
@@ -139,5 +140,34 @@ public sealed class BootstrapControllerEndpointTests
         Assert.False(Prop<bool>(body, "isApex"));
         Assert.Equal("dependably.example.com", Prop<string?>(body, "apexHost"));
         Assert.Null(body.GetType().GetProperty("tenantSlug"));
+    }
+
+    [Fact]
+    public void MultiMode_TenantDomainSet_ReportsItDistinctFromApexHost()
+    {
+        var result = NewCtrl(Cfg(
+                ("DEPLOYMENT_MODE", "multi"),
+                ("BASE_URL", "https://dependably.example.com"),
+                ("APEX_HOST", "master.example.com"),
+                ("TENANT_DOMAIN", "https://Example.com./")),
+            tenant: TenantContext.ForTenant("o-1", "acme")).Get();
+
+        var body = Body(result);
+        Assert.Equal("master.example.com", Prop<string?>(body, "apexHost"));
+        Assert.Equal("example.com", Prop<string?>(body, "tenantDomain"));
+    }
+
+    [Fact]
+    public void HeaderMode_TenantDomainSet_IgnoresItAndReportsTheApexHost()
+    {
+        var result = NewCtrl(Cfg(
+                ("DEPLOYMENT_MODE", "header"),
+                ("APEX_HOST", "master.example.com"),
+                ("TENANT_DOMAIN", "example.com")),
+            tenant: TenantContext.ForTenant("o-1", "acme")).Get();
+
+        var body = Body(result);
+        Assert.Equal("master.example.com", Prop<string?>(body, "apexHost"));
+        Assert.Equal("master.example.com", Prop<string?>(body, "tenantDomain"));
     }
 }

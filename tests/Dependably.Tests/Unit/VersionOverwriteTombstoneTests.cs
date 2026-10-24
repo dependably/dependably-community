@@ -66,6 +66,27 @@ public sealed class VersionOverwriteTombstoneTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Pypi_DeleteThenRepublishUnderRespelling_UnderBlockPolicy_Refused()
+    {
+        var svc = Build();
+        var first = (PublishResult.Accepted)await svc.StoreAndRecordAsync(
+            Sample("pytomb", "1.0.0rc1") with { Ecosystem = "pypi", Filename = "pytomb-1.0.0rc1.tar.gz", Purl = "pkg:pypi/pytomb@1.0.0rc1" });
+        await DeleteAsync(first.VersionId);
+
+        var respelled = Sample("pytomb", "1.0.0-rc1") with
+        {
+            Ecosystem = "pypi",
+            Filename = "pytomb-1.0.0-rc1.tar.gz",
+            Purl = "pkg:pypi/pytomb@1.0.0-rc1",
+            ArtifactBytes = new byte[] { 9, 9, 9, 9 },
+        };
+        var rej = Assert.IsType<PublishResult.Rejected>(await svc.StoreAndRecordAsync(respelled));
+        Assert.Equal("version_tombstoned", rej.Code);
+        var dry = Assert.IsType<PublishResult.Rejected>(await svc.ValidateAsync(respelled));
+        Assert.Equal("version_tombstoned", dry.Code);
+    }
+
+    [Fact]
     public async Task DeleteThenRepublish_UnderBlockPolicy_RefusedByValidateDryRun()
     {
         // The bulk-import pre-validation surface projects the same refusal, so an operator is

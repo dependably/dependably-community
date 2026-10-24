@@ -151,6 +151,73 @@ public sealed class DependablyUserStoreTests : IAsyncLifetime
         Assert.Null(result);
     }
 
+    // ── authenticator key that does not decrypt ───────────────────────────────
+
+    private DependablyUserStore StoreWithLogger(RecordingLogger<DependablyUserStore> logger)
+    {
+        var httpContext = new DefaultHttpContext();
+        httpContext.Items[TenantContext.HttpItemsKey] = TenantContext.ForTenant("tenantA", "tenantA");
+        var accessor = Substitute.For<IHttpContextAccessor>();
+        accessor.HttpContext.Returns(httpContext);
+        return new DependablyUserStore(_db, accessor, _protector, _recoveryHasher, logger);
+    }
+
+    [Fact]
+    public async Task GetAuthenticatorKeyAsync_CorruptedCiphertext_ReturnsNullAndWarnsNamingTheUserNotTheValue()
+    {
+        var logger = new RecordingLogger<DependablyUserStore>();
+        var store = StoreWithLogger(logger);
+        string corrupted = CorruptCiphertext.Totp(_protector, "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP");
+        var broken = new DependablyUser { Id = "uA", TenantId = "tenantA", AuthenticatorKey = corrupted };
+        var sibling = new DependablyUser { Id = "uB", TenantId = "tenantA" };
+        await store.SetAuthenticatorKeyAsync(sibling, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", CancellationToken.None);
+
+        // The stored bytes are never handed to the token provider as if they were the key.
+        Assert.Null(await store.GetAuthenticatorKeyAsync(broken, CancellationToken.None));
+        Assert.Equal("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            await store.GetAuthenticatorKeyAsync(sibling, CancellationToken.None));
+
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("uA", warning.Message);
+        Assert.Contains(ProtectedSecretKinds.UserTotpKey, warning.Message);
+        Assert.Contains(ProtectedSecretFailureReasons.AuthenticationFailed, warning.Message);
+        Assert.DoesNotContain(corrupted, warning.AllText);
+        Assert.DoesNotContain("JBSWY3DPEHPK3PXP", warning.AllText);
+    }
+
+    [Fact]
+    public async Task GetAuthenticatorKeyAsync_PlaintextBase32Key_IsNeverReturned_AndWarnsUnexpectedPlaintext()
+    {
+        var logger = new RecordingLogger<DependablyUserStore>();
+        var store = StoreWithLogger(logger);
+        var user = new DependablyUser { Id = "uA", TenantId = "tenantA", AuthenticatorKey = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP" };
+
+        Assert.Null(await store.GetAuthenticatorKeyAsync(user, CancellationToken.None));
+
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("uA", warning.Message);
+        Assert.Contains(ProtectedSecretKinds.UserTotpKey, warning.Message);
+        Assert.Contains(ProtectedSecretFailureReasons.UnexpectedPlaintext, warning.Message);
+        Assert.DoesNotContain("JBSWY3DPEHPK3PXP", warning.AllText);
+    }
+
+    [Fact]
+    public async Task RedeemCodeAsync_StillWorks_WhenTheAuthenticatorKeyDoesNotDecrypt()
+    {
+        var store = StoreWithLogger(new RecordingLogger<DependablyUserStore>());
+        var user = new DependablyUser
+        {
+            Id = "uA",
+            TenantId = "tenantA",
+            Email = "alice@example.com",
+            AuthenticatorKey = CorruptCiphertext.Totp(_protector, "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"),
+        };
+        await store.ReplaceCodesAsync(user, ["AAAAA-BBBBB", "CCCCC-DDDDD"], CancellationToken.None);
+
+        Assert.Null(await store.GetAuthenticatorKeyAsync(user, CancellationToken.None));
+        Assert.True(await store.RedeemCodeAsync(user, "AAAAA-BBBBB", CancellationToken.None));
+    }
+
     // ── recovery codes ────────────────────────────────────────────────────────
 
     [Fact]

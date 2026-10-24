@@ -10,7 +10,8 @@ namespace Dependably.Tests.Unit.Api;
 /// (pulls TenantContext out of HttpContext.Items) and GetUserId() (NameIdentifier with
 /// "sub" fallback). Covered branches:
 ///  - CurrentTenantId returns the resolved tenant id when TenantContext is present
-///  - CurrentTenantId throws when TenantContext is missing (Items[..] null → cast NRE)
+///  - CurrentTenantId throws InvalidOperationException when no tenant is resolved (context
+///    missing, apex, or uninitialized) rather than returning a null org id
 ///  - GetUserId returns NameIdentifier claim value when present
 ///  - GetUserId falls back to "sub" claim when NameIdentifier is absent
 ///  - GetUserId returns null when neither claim is present
@@ -48,13 +49,26 @@ public sealed class OrgScopedControllerBaseTests
     [Fact]
     public void CurrentTenantId_TenantContextMissing_Throws()
     {
-        // Items[..] returns null when key absent; the `!` then casts null to TenantContext
-        // and chains .TenantId — NullReferenceException is the documented contract
-        // ("only valid after OrgAccessGuard.AuthorizeCapAsync returned null").
         var ctx = new DefaultHttpContext();
         var sut = NewController(ctx);
 
-        Assert.Throws<NullReferenceException>(() => sut.PublicCurrentTenantId());
+        Assert.Throws<InvalidOperationException>(() => sut.PublicCurrentTenantId());
+    }
+
+    [Fact]
+    public void CurrentTenantId_ApexOrUninitialized_ThrowsInsteadOfReturningNull()
+    {
+        // Both contexts carry a null TenantId. Returning it would let a null org id travel into
+        // a query or a cache key, which is how an unguarded protocol request surfaced as a 500
+        // from deep inside the metadata cache.
+        foreach (var tenant in new[] { TenantContext.Apex, TenantContext.Uninitialized })
+        {
+            var ctx = new DefaultHttpContext();
+            ctx.Items[TenantContext.HttpItemsKey] = tenant;
+            var sut = NewController(ctx);
+
+            Assert.Throws<InvalidOperationException>(() => sut.PublicCurrentTenantId());
+        }
     }
 
     [Fact]

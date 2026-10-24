@@ -234,3 +234,149 @@ describe('focus/visibility re-validation', () => {
     expect(mockNavigate).not.toHaveBeenCalled()
   })
 })
+
+describe('armSessionWatch — input validation', () => {
+  it('ignores an unparseable expiry and arms nothing', () => {
+    armSessionWatch('not-a-date', vi.fn())
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('listener lifecycle', () => {
+  it('a resume handler that outlives disarm does nothing', async () => {
+    const addSpy = vi.spyOn(window, 'addEventListener')
+    const meFn = vi.fn()
+    armSessionWatch(futureIso(60000), meFn)
+    const focusHandler = /** @type {() => Promise<void>} */ (/** @type {any} */ (addSpy.mock.calls.find((c) => c[0] === 'focus'))[1])
+    disarmSessionWatch()
+
+    await focusHandler()
+
+    expect(meFn).not.toHaveBeenCalled()
+    expect(mockSessionExpired.get()).toBe(false)
+  })
+
+  it.each(['document', 'window'])('arms and disarms without listeners when %s is unavailable', (name) => {
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
+    const addSpy = vi.spyOn(window, 'addEventListener')
+    vi.stubGlobal(name, undefined)
+    try {
+      armSessionWatch(futureIso(60000), vi.fn())
+      expect(vi.getTimerCount()).toBe(1)
+      disarmSessionWatch()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(addSpy).not.toHaveBeenCalled()
+    expect(removeSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('resume handling', () => {
+  function setVisibility(state) {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
+  }
+
+  afterEach(() => {
+    delete /** @type {any} */ (document).visibilityState
+  })
+
+  it('expires the session on focus when the clock passed expiry but the timer never fired', async () => {
+    const meFn = vi.fn()
+    armSessionWatch(futureIso(60000), meFn)
+    // Laptop sleep: the wall clock jumps past expiry without the timer callback running.
+    vi.setSystemTime(Date.now() + 120000)
+
+    window.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+
+    expect(meFn).not.toHaveBeenCalled()
+    expect(mockUser.get()).toBeNull()
+    expect(mockSessionExpired.get()).toBe(true)
+    expect(mockNavigate).toHaveBeenCalledWith('login', {}, { replace: true })
+  })
+
+  it('re-validates when the tab becomes visible before expiry', async () => {
+    const iso = futureIso(60000)
+    const meFn = vi.fn().mockResolvedValue({ sessionExpiresAt: iso })
+    armSessionWatch(iso, meFn)
+
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(meFn).toHaveBeenCalledTimes(1)
+    expect(mockUser.get()).not.toBeNull()
+  })
+
+  it('expires the session when the tab becomes visible after expiry', async () => {
+    armSessionWatch(futureIso(60000), vi.fn())
+    vi.setSystemTime(Date.now() + 120000)
+
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+
+    expect(mockSessionExpired.get()).toBe(true)
+  })
+
+  it('ignores visibilitychange while the tab is hidden', async () => {
+    const meFn = vi.fn()
+    armSessionWatch(futureIso(60000), meFn)
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await Promise.resolve()
+
+    expect(meFn).not.toHaveBeenCalled()
+    expect(mockSessionExpired.get()).toBe(false)
+  })
+
+  it('does nothing on focus once the watcher is disarmed', async () => {
+    const meFn = vi.fn()
+    armSessionWatch(futureIso(60000), meFn)
+    disarmSessionWatch()
+
+    window.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+
+    expect(meFn).not.toHaveBeenCalled()
+    expect(mockSessionExpired.get()).toBe(false)
+  })
+
+  it('keeps the existing timer when re-validation returns no new expiry', async () => {
+    const meFn = vi.fn().mockResolvedValue({})
+    armSessionWatch(futureIso(60000), meFn)
+
+    window.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(meFn).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it('swallows a re-validation failure and keeps the timer for the original expiry', async () => {
+    const meFn = vi.fn().mockRejectedValue(new Error('network down'))
+    armSessionWatch(futureIso(60000), meFn)
+
+    window.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mockUser.get()).not.toBeNull()
+    expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it('skips re-validation when armed without a me function', async () => {
+    armSessionWatch(futureIso(60000), null)
+
+    window.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+
+    expect(mockUser.get()).not.toBeNull()
+    expect(mockSessionExpired.get()).toBe(false)
+  })
+})

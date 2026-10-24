@@ -108,6 +108,59 @@ public sealed class ApkControllerProxyTests : IAsyncLifetime
         Assert.Equal(StatusCodes.Status502BadGateway, statusResult.StatusCode);
     }
 
+    private async Task SeedApkReservationAsync(string pattern)
+    {
+        await using var conn = await _db.OpenAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO reserved_namespace (id, org_id, ecosystem, pattern) VALUES (@id, @orgId, 'apk', @pattern)",
+            new { id = Guid.NewGuid().ToString("N"), orgId = _orgId, pattern });
+    }
+
+    [Theory]
+    [InlineData("v3.22/main/x86_64/corp-internal-1.0.apk")]
+    [InlineData("v3.22/main/x86_64/corp-internal.apk")]
+    [InlineData("v3.22/main/x86_64/corp-internal-1.0-rx.apk")]
+    public async Task HandleApkRequest_UnparsableFilename_NotInStore_IsNotFetchedUpstream(string path)
+    {
+        await EnableAnonPullAsync();
+        await SeedApkRegistryAsync();
+        await SeedApkReservationAsync("corp-internal");
+        var ctl = BuildController();
+
+        var result = await ctl.HandleApkRequest(path, default);
+
+        // The blocking validator turns any upstream attempt into a 502; a 404 proves the
+        // request was refused before the fetch loop was entered.
+        Assert.IsType<NotFoundResult>(result);
+    }
+
+    [Fact]
+    public async Task HandleApkRequest_ParsableUnreservedFilename_StillReachesUpstream_WhenOtherNameReserved()
+    {
+        await EnableAnonPullAsync();
+        await SeedApkRegistryAsync();
+        await SeedApkReservationAsync("corp-internal");
+        var ctl = BuildController();
+
+        var result = await ctl.HandleApkRequest("v3.22/main/x86_64/curl-8.9.0-r0.apk", default);
+
+        var statusResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status502BadGateway, statusResult.StatusCode);
+    }
+
+    [Fact]
+    public async Task HandleApkRequest_ParsableReservedFilename_IsNotFetchedUpstream()
+    {
+        await EnableAnonPullAsync();
+        await SeedApkRegistryAsync();
+        await SeedApkReservationAsync("corp-internal");
+        var ctl = BuildController();
+
+        var result = await ctl.HandleApkRequest("v3.22/main/x86_64/corp-internal-1.0-r0.apk", default);
+
+        Assert.IsType<NotFoundResult>(result);
+    }
+
     // ── Controller construction ──────────────────────────────────────────────
 
     private ApkController BuildController()

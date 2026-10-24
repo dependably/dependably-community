@@ -717,4 +717,326 @@ public sealed class OrgAuthConfigControllerTests
         object? thumbprint = ok.Value!.GetType().GetProperty("idpSigningCertThumbprint")!.GetValue(ok.Value);
         Assert.Null(thumbprint);
     }
+
+    // ── Signing cert, cert status, and test-claims projections ───────────────
+
+    private static string GenerateCertBase64(DateTimeOffset notBefore, DateTimeOffset notAfter, string cn = "idp.example.com")
+    {
+        using var rsa = System.Security.Cryptography.RSA.Create(2048);
+        var request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+            $"CN={cn}", rsa, System.Security.Cryptography.HashAlgorithmName.SHA256,
+            System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+        using var cert = request.CreateSelfSigned(notBefore, notAfter);
+        return Convert.ToBase64String(cert.RawData);
+    }
+
+    private static string ThumbprintOf(string certBase64) =>
+        System.Security.Cryptography.X509Certificates.X509CertificateLoader
+            .LoadCertificate(Convert.FromBase64String(certBase64)).Thumbprint;
+
+    private static string ToPem(string certBase64) =>
+        "-----BEGIN CERTIFICATE-----\n" + certBase64 + "\n-----END CERTIFICATE-----\n";
+
+    private static System.Text.Json.JsonElement AsJson(object? value) =>
+        System.Text.Json.JsonSerializer.SerializeToElement(value);
+
+    private static void AssertValidation(IActionResult result, string field)
+    {
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(422, obj.StatusCode);
+        var problem = Assert.IsType<ProblemDetails>(obj.Value);
+        Assert.Equal(field, problem.Extensions["field"]);
+    }
+
+    private static void AssertForbidden(IActionResult result)
+    {
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(403, obj.StatusCode);
+    }
+
+    private static async Task SeedConfigAsync(
+        ControllerScenarioResult b, string? cert = null, string? certOverride = null, string? claims = null)
+    {
+        await using var conn = await b.Db.OpenAsync();
+        await conn.ExecuteAsync(
+            """
+            INSERT INTO tenant_saml_config (org_id, enabled, idp_signing_cert, idp_signing_cert_override, last_test_claims)
+            VALUES (@org, 1, @cert, @certOverride, @claims)
+            """,
+            new { org = b.PrimaryOrgId, cert, certOverride, claims });
+    }
+
+    private static async Task<string?> StoredOverrideAsync(ControllerScenarioResult b)
+    {
+        await using var conn = await b.Db.OpenAsync();
+        return await conn.ExecuteScalarAsync<string?>(
+            "SELECT idp_signing_cert_override FROM tenant_saml_config WHERE org_id = @o",
+            new { o = b.PrimaryOrgId });
+    }
+
+    private static async Task<long> AuditCountAsync(ControllerScenarioResult b, string action)
+    {
+        await using var conn = await b.Db.OpenAsync();
+        return await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE action = @action AND org_id = @o",
+            new { action, o = b.PrimaryOrgId });
+    }
+
+    [Theory]
+    [InlineData(-2, "expired", -2)]
+    [InlineData(3, "expiring", 3)]
+    [InlineData(40, "ok", 40)]
+    public async Task Get_MetadataCert_ReportsStatusFromTheExpiryWindow(int daysUntilExpiry, string status, int daysRemaining)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        var now = s.Clock.GetUtcNow();
+        string cert = GenerateCertBase64(now.AddDays(-400), now.AddDays(daysUntilExpiry).AddHours(1));
+        await SeedConfigAsync(b, cert: cert);
+
+        var ok = Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.Get(CancellationToken.None));
+
+        var block = AsJson(ok.Value).GetProperty("samlIdpCert");
+        Assert.Equal(status, block.GetProperty("status").GetString());
+        Assert.Equal(daysRemaining, block.GetProperty("daysRemaining").GetInt32());
+        Assert.Equal(ThumbprintOf(cert), block.GetProperty("thumbprint").GetString());
+    }
+
+    [Fact]
+    public async Task Get_OverrideCert_TakesPrecedenceOverMetadataCertForStatus()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        var now = s.Clock.GetUtcNow();
+        string metadataCert = GenerateCertBase64(now.AddDays(-30), now.AddDays(300), "metadata.example.com");
+        string overrideCert = GenerateCertBase64(now.AddDays(-30), now.AddDays(-1), "override.example.com");
+        await SeedConfigAsync(b, cert: metadataCert, certOverride: overrideCert);
+
+        var ok = Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.Get(CancellationToken.None));
+
+        var json = AsJson(ok.Value);
+        Assert.Equal("expired", json.GetProperty("samlIdpCert").GetProperty("status").GetString());
+        Assert.Equal(ThumbprintOf(overrideCert), json.GetProperty("idpSigningCertOverrideThumbprint").GetString());
+        Assert.Equal(ThumbprintOf(metadataCert), json.GetProperty("idpSigningCertThumbprint").GetString());
+    }
+
+    [Fact]
+    public async Task Get_NoCertAtAll_OrUnparseableEffectiveCert_HasNullCertStatus()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        await SeedConfigAsync(b);
+
+        var withoutCert = AsJson(Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.Get(CancellationToken.None)).Value);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, withoutCert.GetProperty("samlIdpCert").ValueKind);
+
+        await using (var conn = await b.Db.OpenAsync())
+        {
+            await conn.ExecuteAsync(
+                "UPDATE tenant_saml_config SET idp_signing_cert_override = 'AAAA' WHERE org_id = @o",
+                new { o = b.PrimaryOrgId });
+        }
+
+        var garbled = AsJson(Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.Get(CancellationToken.None)).Value);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, garbled.GetProperty("samlIdpCert").ValueKind);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, garbled.GetProperty("idpSigningCertOverrideThumbprint").ValueKind);
+    }
+
+    [Fact]
+    public async Task Get_LastTestClaims_SurfacesTheNameIdSeparatelyFromTheRealClaims()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        string claims =
+            "[{\"type\":\"mail\",\"values\":[\"admin@acme.test\"]},"
+            + "{\"type\":\"" + Dependably.Infrastructure.Saml.SamlTestClaimTypes.NameId + "\",\"values\":[\"nameid-42\"]},"
+            + "{\"type\":\"groups\",\"values\":[\"ops\",\"dev\"]}]";
+        await SeedConfigAsync(b, claims: claims);
+
+        var json = AsJson(Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.Get(CancellationToken.None)).Value);
+
+        Assert.Equal("nameid-42", json.GetProperty("lastTestNameId").GetString());
+        string?[] listed = json.GetProperty("lastTestClaims").EnumerateArray().Select(c => c.GetProperty("type").GetString()).ToArray();
+        Assert.Equal(new[] { "mail", "groups" }, listed);
+    }
+
+    [Theory]
+    [InlineData("not json at all")]
+    [InlineData("[]")]
+    [InlineData("[{\"type\":\"dependably:nameid\"}]")]
+    [InlineData("[{\"type\":\"dependably:nameid\",\"values\":[]}]")]
+    [InlineData("[{\"type\":\"dependably:nameid\",\"values\":[7]}]")]
+    public async Task Get_LastTestClaims_MalformedOrEmptyNameId_YieldsNoNameId(string claims)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        await SeedConfigAsync(b, claims: claims);
+
+        var json = AsJson(Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.Get(CancellationToken.None)).Value);
+
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, json.GetProperty("lastTestNameId").ValueKind);
+        Assert.Equal(0, json.GetProperty("lastTestClaims").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("emailAddress")]
+    [InlineData("not a uri")]
+    public async Task Put_NameIdFormatThatIsNotAnAbsoluteUri_Returns422AndWritesNothing(string format)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgAuthConfigController.Put(
+            new UpdateAuthConfigRequest(true, true, null, format, null, null, null, null, "member"),
+            CancellationToken.None);
+
+        AssertValidation(result, "nameIdFormat");
+        await using var conn = await b.Db.OpenAsync();
+        Assert.Equal(0, await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM tenant_saml_config WHERE org_id = @o", new { o = b.PrimaryOrgId }));
+    }
+
+    [Fact]
+    public async Task SetSigningCert_PemOrRawBase64_StoresTheOverrideAndAudits()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        var now = s.Clock.GetUtcNow();
+        string pemCert = GenerateCertBase64(now.AddDays(-1), now.AddDays(365), "pem.example.com");
+        string rawCert = GenerateCertBase64(now.AddDays(-1), now.AddDays(365), "raw.example.com");
+
+        var pem = Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.SetSigningCert(
+            new SetSigningCertRequest(ToPem(pemCert)), CancellationToken.None));
+        var (Fingerprint, Subject, Issuer, NotBefore, NotAfter) = ((string Fingerprint, string Subject, string Issuer, string NotBefore, string NotAfter))pem.Value!;
+        Assert.Equal(ThumbprintOf(pemCert), Fingerprint);
+        Assert.Equal("CN=pem.example.com", Subject);
+        Assert.Equal(pemCert, await StoredOverrideAsync(b));
+
+        // Raw base64 DER, wrapped across lines the way an admin pastes it.
+        string wrapped = string.Join("\n", Enumerable.Range(0, (rawCert.Length + 63) / 64)
+            .Select(i => rawCert.Substring(i * 64, Math.Min(64, rawCert.Length - (i * 64)))));
+        var raw = Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.SetSigningCert(
+            new SetSigningCertRequest(wrapped), CancellationToken.None));
+        var rawSummary = ((string Fingerprint, string Subject, string Issuer, string NotBefore, string NotAfter))raw.Value!;
+        Assert.Equal("CN=raw.example.com", rawSummary.Subject);
+        Assert.Equal(rawCert, await StoredOverrideAsync(b));
+        Assert.Equal(2, await AuditCountAsync(b, "saml.signing_cert_set"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not-base64-at-all!!!")]
+    [InlineData("AAAAAAAA")]
+    [InlineData("-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----")]
+    public async Task SetSigningCert_BlankOrUnparseable_Returns422AndStoresNothing(string input)
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        var result = await b.OrgAuthConfigController.SetSigningCert(
+            new SetSigningCertRequest(input), CancellationToken.None);
+
+        AssertValidation(result, "certificate");
+        Assert.Null(await StoredOverrideAsync(b));
+        Assert.Equal(0, await AuditCountAsync(b, "saml.signing_cert_set"));
+    }
+
+    [Fact]
+    public async Task SigningCert_MemberCannotSetOrClear_AndTheOverrideSurvives()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "member");
+        var b = await s.BuildAsync();
+        var now = s.Clock.GetUtcNow();
+        string pinned = GenerateCertBase64(now.AddDays(-1), now.AddDays(365));
+        await SeedConfigAsync(b, certOverride: pinned);
+
+        AssertForbidden(await b.OrgAuthConfigController.SetSigningCert(
+            new SetSigningCertRequest(GenerateCertBase64(now.AddDays(-1), now.AddDays(10))), CancellationToken.None));
+        AssertForbidden(await b.OrgAuthConfigController.ClearSigningCert(CancellationToken.None));
+
+        Assert.Equal(pinned, await StoredOverrideAsync(b));
+        Assert.Equal(0, await AuditCountAsync(b, "saml.signing_cert_set"));
+        Assert.Equal(0, await AuditCountAsync(b, "saml.signing_cert_cleared"));
+    }
+
+    [Fact]
+    public async Task ClearSigningCert_RemovesTheOverrideOnce_ThenIsAnIdempotentNoOp()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+        var now = s.Clock.GetUtcNow();
+        string pinned = GenerateCertBase64(now.AddDays(-1), now.AddDays(365));
+        await SeedConfigAsync(b, certOverride: pinned);
+
+        Assert.IsType<NoContentResult>(await b.OrgAuthConfigController.ClearSigningCert(CancellationToken.None));
+        Assert.Null(await StoredOverrideAsync(b));
+        Assert.Equal(1, await AuditCountAsync(b, "saml.signing_cert_cleared"));
+
+        Assert.IsType<NoContentResult>(await b.OrgAuthConfigController.ClearSigningCert(CancellationToken.None));
+        Assert.Equal(1, await AuditCountAsync(b, "saml.signing_cert_cleared"));
+    }
+
+    [Fact]
+    public async Task ClearSigningCert_WithNoConfigRowAtAll_IsANoOp()
+    {
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        Assert.IsType<NoContentResult>(await b.OrgAuthConfigController.ClearSigningCert(CancellationToken.None));
+
+        Assert.Equal(0, await AuditCountAsync(b, "saml.signing_cert_cleared"));
+    }
+
+    [Fact]
+    public async Task UploadMetadata_WithoutACert_IsRefusedUnlessAnOverrideIsPinned()
+    {
+        string noCertXml = """
+            <?xml version="1.0"?>
+            <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.pinned.test/entity">
+              <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+                <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.pinned.test/sso"/>
+              </IDPSSODescriptor>
+            </EntityDescriptor>
+            """;
+        await using var s = await ControllerScenario.CreateAsync();
+        await s.WithOrgAsync();
+        await s.WithUserAsync(role: "owner");
+        var b = await s.BuildAsync();
+
+        AssertValidation(
+            await b.OrgAuthConfigController.UploadMetadata(new UploadSamlMetadataRequest(noCertXml), CancellationToken.None),
+            "metadataXml");
+        Assert.Equal(0, await AuditCountAsync(b, "saml.metadata_uploaded"));
+
+        var now = s.Clock.GetUtcNow();
+        Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.SetSigningCert(
+            new SetSigningCertRequest(GenerateCertBase64(now.AddDays(-1), now.AddDays(90))), CancellationToken.None));
+        var accepted = Assert.IsType<OkObjectResult>(await b.OrgAuthConfigController.UploadMetadata(
+            new UploadSamlMetadataRequest(noCertXml), CancellationToken.None));
+        Assert.Equal("https://idp.pinned.test/entity", AsJson(accepted.Value).GetProperty("idpEntityId").GetString());
+        Assert.Equal(1, await AuditCountAsync(b, "saml.metadata_uploaded"));
+    }
 }

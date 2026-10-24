@@ -66,6 +66,10 @@ public sealed class SystemBackgroundJobsTests : IClassFixture<DependablyMultiFac
         var jobNames = facets.RootElement.GetProperty("jobNames").EnumerateArray()
             .Select(e => e.GetString()).ToList();
         Assert.Contains(uniqueJob, jobNames);
+
+        var outcomes = facets.RootElement.GetProperty("outcomes").EnumerateArray()
+            .Select(e => e.GetString()).ToList();
+        Assert.Contains("degraded", outcomes);
     }
 
     [Fact]

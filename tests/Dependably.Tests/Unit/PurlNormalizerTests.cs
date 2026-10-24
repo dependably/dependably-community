@@ -180,6 +180,22 @@ public class PurlParserTests
     // producer↔parser contract, not a hand-written purl.
 
     [Fact]
+    public void CacheCoordinate_Oci_RecoversTheRepositoryAndTheBareDigest()
+    {
+        // Producer: pkg:oci/app@sha256%3A…?repository_url=team/app ; cache_artifact stores
+        // name=team/app (the full repository) and version=sha256:… (the bare digest).
+        string digest = "sha256:" + new string('a', 64);
+        foreach (string purl in new[] { PurlNormalizer.Oci("team/app", digest), PurlNormalizer.Oci("team/app", digest, "1.0") })
+        {
+            var parsed = PurlParser.TryParseCacheCoordinate(purl);
+            Assert.NotNull(parsed);
+            Assert.Equal("oci", parsed.Ecosystem);
+            Assert.Equal("team/app", parsed.Name);
+            Assert.Equal(digest, parsed.Version);
+        }
+    }
+
+    [Fact]
     public void CacheCoordinate_Rpm_StripsArchQualifier()
     {
         // Producer: pkg:rpm/bash@5.1.8-1?arch=x86_64 ; cache_artifact stores name=bash,

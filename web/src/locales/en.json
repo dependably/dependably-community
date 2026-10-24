@@ -201,7 +201,14 @@
       "versionLabel": "Latest: {version}"
     },
     "vulns": {
-      "none": "No known vulnerabilities"
+      "none": "No known vulnerabilities",
+      "ociFindings": "{count, plural, one {# vulnerability} other {# vulnerabilities}} found by the image scan",
+      "ociPartial": "Partial scan",
+      "ociPartialHelp": "Scanned, but part of an image was not checked. It is not known to be clean.",
+      "ociUnscanned": "Not scanned",
+      "ociUnscannedHelp": "An image has not been scanned yet. It is not known to be clean.",
+      "ociNoFeed": "No scanner",
+      "ociNoFeedHelp": "No image scanner is running for this organization, so its images have not been checked for vulnerabilities. They are not known to be clean."
     },
     "malicious": {
       "label": "Malicious",
@@ -498,6 +505,9 @@
       "signed": "signed",
       "installScript": "runs install scripts",
       "installScriptHelp": "This version ships an install/lifecycle script that runs automatically on install ({kind}).",
+      "manifestIssue": "manifest needs review",
+      "manifestAmbiguousHelp": "This npm archive has more than one top-level package.json, so Dependably cannot tell which one the client installs. It is not a declared install script.",
+      "manifestUnscannableHelp": "This npm archive could not be read to the end, so Dependably cannot tell what the client installs. It is not a declared install script.",
       "provenanceVerified": "signature verified",
       "provenanceVerifiedHelp": "The npm registry signature on this version verified against a pinned trust anchor (signer: {signer}).",
       "provenanceFailed": "signature failed",
@@ -522,6 +532,8 @@
       "unscanned": "Unscanned",
       "no_feed": "No advisory feed",
       "noFeedHelp": "OSV publishes no advisory feed for this ecosystem, so this artefact has never been screened against one. It is not known to be clean.",
+      "partial": "Partly scanned",
+      "partialHelp": "The image scanner could not inventory or match part of this image, so finding no advisories covers only what it read. It is not known to be clean.",
       "malicious": "Malicious",
       "maliciousHelp": "Linked to a known-malicious package advisory (OSV MAL-)."
     },
@@ -548,6 +560,7 @@
       "license": "Licence",
       "operational": "Operational",
       "noAdvisories": "No advisories",
+      "noScanner": "No scanner",
       "licenseClean": "No risk",
       "licenseBlocked": "Blocked licence",
       "licenseUndeclared": "Not declared",
@@ -587,6 +600,11 @@
       "vulnScan": "Last scan",
       "vulns": "Vulnerabilities",
       "noVulns": "No known vulnerabilities",
+      "ociFindings": "{count, plural, one {# vulnerability} other {# vulnerabilities}} found by the image scan.",
+      "ociGapsNote": "Coverage had {count, plural, one {# gap} other {# gaps}}, so part of the image was not checked.",
+      "ociPartial": "Scanned, but coverage had {count, plural, one {# gap} other {# gaps}}, so part of this image was not checked. It is not known to be clean.",
+      "ociUnscanned": "This image has not been scanned yet. It is not known to be clean.",
+      "ociNoFeed": "No image scanner is running for this organization, so this image has not been checked for vulnerabilities. It is not known to be clean.",
       "copy": "Copy",
       "upstreamIntegrity": {
         "sha256": "Upstream SHA-256",
@@ -609,6 +627,56 @@
       "summary": "{count, plural, one {# application ships this} other {# applications ship this}}",
       "ships": "ships {version}",
       "more": "and {count} more"
+    },
+    "ociScan": {
+      "pendingHold": "Tag {tag} has moved to this image upstream but still serves {serving}: this image has not yet passed the promotion gate (pending since {time}). A long hold usually means the image scanner is not running.",
+      "title": "Image scan",
+      "loading": "Loading the image's scan detail…",
+      "loadError": "The scan detail could not be loaded.",
+      "retry": "Retry",
+      "gapsTitle": "{count, plural, one {# coverage gap} other {# coverage gaps}} on {platform}",
+      "gapsHelp": "Part of this platform was not inventoried or not matched, so the findings below cover only what the scanner read.",
+      "platformsScanned": "Platforms scanned: {platforms}",
+      "scannedAt": "Scanned {time}",
+      "platformTab": "{platform} ({count} affected)",
+      "viewFindings": "Findings",
+      "viewAll": "All components",
+      "zeroFindings": "0 findings among {count, plural, one {# component} other {# components}}",
+      "clean": "The scan found no advisories on the platforms scanned ({platforms}), as last matched {time}.",
+      "unscannedNone": "Not queued for this organization's image scanner yet. There is no scan result, so the image is not known to be clean.",
+      "unscannedPending": "Queued for scanning, with no result yet. The image is not known to be clean.",
+      "unscannedPendingAttempts": "Queued for scanning, with no result after {count, plural, one {# attempt} other {# attempts}}. The image is not known to be clean.",
+      "unscannedFailed": "The scanner gave up after {count, plural, one {# attempt} other {# attempts}}, and the image has no scan result. It is not known to be clean.",
+      "noFeed": "No image scanner is reporting for this organization, so this image has no scan result. It is not known to be clean.",
+      "columns": {
+        "component": "Component",
+        "layer": "Layer",
+        "findings": "Findings"
+      },
+      "layer": "Layer {index}",
+      "layerUnknown": "Layer not recorded",
+      "source": "Source package: {name}",
+      "ownedBy": "Installed by {purl}",
+      "moreFindings": "{count, plural, one {# more finding} other {# more findings}} not listed",
+      "unscored": "UNSCORED",
+      "unscoredHelp": "The advisory carries no severity score. That is not the same as no risk.",
+      "reachability": {
+        "reachable": "Reachable",
+        "not_observed": "Not observed",
+        "unknown": "Reachability unknown"
+      },
+      "notObservedHelp": "The scanner did not observe a path to this code. That does not mean no path exists.",
+      "notObservedBasis": "Basis: {basis}",
+      "confidence": "Confidence: {confidence}",
+      "closure": {
+        "inside": "In entrypoint closure",
+        "outside": "Outside entrypoint closure",
+        "undetermined": "Entrypoint closure not determined"
+      },
+      "range": "{from}–{to} of {total}",
+      "previous": "Previous",
+      "next": "Next",
+      "matchedAt": "findings last matched {time}"
     }
   },
   "activity": {
@@ -760,6 +828,7 @@
     "push": "push only",
     "both": "push & pull",
     "sbom": "SBOM upload",
+    "scanner": "OCI image scanner",
     "admin": "admin",
     "audit": "audit",
     "custom": "custom"
@@ -1492,6 +1561,13 @@
       "blockSsvcExploitationOff": "Off",
       "blockSsvcExploitationWarn": "Warn",
       "blockSsvcExploitationBlock": "Block",
+      "ociScanEnforcement": "OCI image scan enforcement",
+      "ociScanEnforcementHint": "Applies the vulnerability gates above to OCI image pulls, using this organization's own scan of each image. An image with no complete scan is refused as unscanned, so a first pull is refused until the scan lands. Turning this on also enforces your malicious-advisory setting, which blocks by default.",
+      "ociScanEnforcementOff": "Off",
+      "ociScanEnforcementWarn": "Warn",
+      "ociScanEnforcementBlock": "Block",
+      "ociScanEnforcementDisabled": "Image scanning is not enabled on this instance (OCI_SCAN_ENABLED), so this can only be set to Off.",
+      "ociScanEnforcementNoScanner": "No image scanner has connected for this organization yet, so this can only be set to Off. Start a scanner with an OCI image scanner service token first.",
       "maxEpssPercentile": "EPSS percentile ceiling",
       "maxEpssPercentileHint": "Blocks when an advisory ranks above this percentile (0.00–1.00). A rank keeps its meaning when FIRST recalibrates the model, where the probability ceiling above tracks absolute risk. Set either or both — whichever trips first blocks. Empty to disable.",
       "maxEpssPercentilePlaceholder": "e.g. 0.95"
@@ -1511,7 +1587,7 @@
         },
         "block": {
           "label": "Block",
-          "hint": "Versions whose licence violates this policy are blocked at download."
+          "hint": "Versions whose licence is blocklisted or not on the allowlist are blocked at download."
         }
       },
       "review": {
@@ -1534,7 +1610,7 @@
       "allow": {
         "title": "Allowed licences",
         "addEntry": "Add licence",
-        "empty": "No allowed licences configured. When the allowlist is empty, only the blocklist applies."
+        "empty": "No allowed licences configured. In Block mode, an empty allowlist refuses every licence. Off and Warn ignore the allowlist."
       },
       "block": {
         "title": "Blocked licences",
@@ -1848,6 +1924,7 @@
       "emptyNoTraffic": "No pulls were served in this window, so there was nothing to evaluate."
     },
     "gates": {
+      "unscanned": "unscanned",
       "deprecated": "deprecated",
       "release_age": "release age",
       "malicious": "malicious",
@@ -1903,6 +1980,7 @@
       "denied": "Denied"
     },
     "gates": {
+      "unscanned": "unscanned",
       "deprecated": "deprecated",
       "release_age": "release age",
       "malicious": "malicious",
@@ -2071,6 +2149,7 @@
       "vulnerabilities": "Vulnerability scan"
     },
     "airGapped": "Air-gapped — upstream metadata was not checked; advisories and licence came from the local mirror only.",
+    "reserved": "Reserved name — your organization keeps this name for its own packages, so upstream metadata was not checked; the verdict rests on advisories and licence policy only.",
     "notFound": {
       "title": "No such package",
       "hint": "{registry} has no package named {name}. Check the spelling.",
@@ -2173,6 +2252,10 @@
         "name": "Install script",
         "what": "Refuses components that run code during install, a common route to compromising build and developer environments."
       },
+      "unscanned": {
+        "name": "Unscanned OCI images",
+        "what": "Refuses an OCI image this organization holds no complete scan result for, and applies the vulnerability controls above to images using the organization's own scan. Requires image scanning on this instance."
+      },
       "ssvc_exploitation": {
         "name": "Active exploitation (SSVC)",
         "what": "Refuses components whose vulnerability is assessed as under active exploitation. Covers more than the known-exploited list. Requires the vulnerability tracker."
@@ -2199,7 +2282,7 @@
       },
       "license": {
         "name": "Licence",
-        "what": "Enforces your approved-licence policy: refuses components whose declared licence is blocked, or missing where the ecosystem always declares one."
+        "what": "Enforces your licence policy. In Block mode it refuses components whose declared licence is blocklisted, is not on your allowlist, or is missing where the ecosystem always declares one."
       }
     },
     "thresholds": {
@@ -2377,7 +2460,13 @@
         "overallSummary": {
           "healthy": "All systems healthy",
           "degraded": "Degraded — {detail}",
-          "down": "Down — database unreachable"
+          "down": "Down — database unreachable",
+          "detailJobStale": "{count, plural, one {# background job is stale} other {# background jobs are stale}}",
+          "detailJobFailing": "{count, plural, one {# background job is failing} other {# background jobs are failing}}",
+          "detailJobDegraded": "{count, plural, one {# background job is degraded} other {# background jobs are degraded}}",
+          "detailJobsMixed": "{count} background jobs are failing, stale or degraded",
+          "detailStagingLow": "staging disk low",
+          "detailStaleSnapshots": "stale snapshots"
         },
         "depsLabel": "Dependencies",
         "depDatabase": "Database",
@@ -2502,13 +2591,13 @@
       "delete": "Delete",
       "restore": "Restore",
       "deleteModalTitle": "Soft-delete tenant",
-      "deleteConfirm": "Soft-delete tenant {slug}? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days).",
+      "deleteConfirm": "Soft-delete tenant {slug}? It will be inaccessible immediately and hard-deleted after the grace period (default 30 days). Every session ends, and all of its API tokens, pending invites, and unused reset links are revoked for good, even if the tenant is restored.",
       "disableModalTitle": "Disable tenant",
-      "disableConfirm": "Disable {slug}? The tenant will be fully locked out — protocol access, downloads, the management API, and login — until re-enabled. Existing data is preserved.",
+      "disableConfirm": "Disable {slug}? The tenant will be fully locked out — protocol access, downloads, the management API, and login — until re-enabled. Every session ends, and all of its API tokens, pending invites, and unused reset links are revoked for good: after re-enabling, the tenant must issue new tokens, including for any edge node. Existing data is preserved.",
       "readOnlyModalTitle": "Set tenant read-only",
       "readOnlyConfirm": "Set {slug} to read-only? Downloads keep working; uploads and publishes are refused. The management API and login stay reachable. Existing data is preserved.",
       "enableModalTitle": "Re-enable tenant",
-      "enableConfirm": "Re-enable {slug}? Protocol access, downloads, the management API, and login will resume immediately.",
+      "enableConfirm": "Re-enable {slug}? Protocol access, downloads, the management API, and login will resume immediately. Members sign in again, and API tokens revoked by the suspension stay revoked.",
       "statusUpdating": "Updating…",
       "modal": {
         "title": "Create tenant",
@@ -2776,6 +2865,7 @@
       },
       "outcome": {
         "success": "Success",
+        "degraded": "Degraded",
         "server_error": "Error",
         "cancelled": "Cancelled"
       },

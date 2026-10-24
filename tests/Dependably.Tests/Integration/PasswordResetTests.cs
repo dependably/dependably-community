@@ -298,8 +298,10 @@ public sealed class PasswordResetTests : IAsyncLifetime
         Assert.True(string.IsNullOrEmpty(sourceIp) || !sourceIp!.Contains(email));
         var parsed = System.Text.Json.JsonDocument.Parse(detail);
         var props = parsed.RootElement.EnumerateObject().Select(p => p.Name).OrderBy(p => p, StringComparer.Ordinal).ToList();
-        Assert.Equal(new[] { "email_hash", "link_issued", "matched", "realm", "throttled", "via" }, props);
+        Assert.Equal(new[] { "email_hash", "link_issued", "matched", "realm", "refused", "throttled", "via" }, props);
         Assert.Equal("self_serve_reset_link", parsed.RootElement.GetProperty("via").GetString());
+        // Set only when the mint refuses a tenant that turned out to be locked out.
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, parsed.RootElement.GetProperty("refused").ValueKind);
 
         // The throttle outcome is recorded, and a single request is never over its budget. The
         // link_issued flag is stamped inside the branch that mints and mails the link, so it tracks

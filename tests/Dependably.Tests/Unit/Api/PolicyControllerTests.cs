@@ -288,7 +288,7 @@ public sealed class PolicyControllerScenarioTests
         {
             "malicious", "malicious_live", "kev", "kev_ransomware", "deprecated", "revoked",
             "install_script", "ssvc_exploitation", "release_age", "vuln_score", "epss",
-            "epss_percentile", "provenance", "license",
+            "epss_percentile", "provenance", "license", "unscanned",
         })
         {
             Assert.True(controls.ContainsKey(key), $"missing controls.{key}");

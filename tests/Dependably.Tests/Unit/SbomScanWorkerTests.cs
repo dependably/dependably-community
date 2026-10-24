@@ -102,6 +102,7 @@ public sealed class SbomScanWorkerTests : IAsyncLifetime
         }
 
         var osv = Substitute.For<IOsvSource>();
+        osv.HasCoverageFor(Arg.Any<string?>()).Returns(Task.FromResult(true));
         var emptyPerPurl = new Func<IReadOnlyList<string>, List<List<OsvAdvisory>>>(
             purls => purls.Select(_ => new List<OsvAdvisory>()).ToList());
         osv.TryQueryBatchAsync(Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())

@@ -601,4 +601,613 @@ public sealed class SbomDocumentParsingTests
 
         Assert.Equal(SbomParseFailure.WrongDocumentKind, thrown.Failure);
     }
+
+    // ── CycloneDX: malformed and edge-case documents ─────────────────────────────────────────
+
+    private static CycloneDxDocument ParseBom(string componentsJson = "", string extra = "") =>
+        CycloneDxParser.Parse(Json(
+            "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.6\",\"components\":[" + componentsJson + "]" + extra + "}"));
+
+    private static CycloneDxComponent ParseComponent(string componentJson) =>
+        Assert.Single(ParseBom(componentJson).Components);
+
+    private static CycloneDxDocument ParseBomWithMetadata(string metadataJson) =>
+        ParseBom(extra: ",\"metadata\":" + metadataJson);
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("\"CycloneDX\"")]
+    [InlineData("null")]
+    public void CycloneDx_RootThatIsNotAnObject_IsMalformedAndIsNotRecognised(string raw)
+    {
+        var thrown = Assert.Throws<SbomParseException>(() => CycloneDxParser.Parse(Json(raw)));
+
+        Assert.Equal(SbomParseFailure.Malformed, thrown.Failure);
+        Assert.False(CycloneDxParser.IsCycloneDx(Json(raw)));
+    }
+
+    [Theory]
+    [InlineData("""{"bomFormat":"CycloneDX","components":[]}""")]
+    [InlineData("""{"bomFormat":"CycloneDX","specVersion":1.6,"components":[]}""")]
+    [InlineData("""{"bomFormat":"CycloneDX","specVersion":"  ","components":[]}""")]
+    public void CycloneDx_MissingOrNonStringSpecVersion_IsMalformed(string raw)
+    {
+        var thrown = Assert.Throws<SbomParseException>(() => CycloneDxParser.Parse(Json(raw)));
+
+        Assert.Equal(SbomParseFailure.Malformed, thrown.Failure);
+    }
+
+    [Theory]
+    [InlineData("""{"tools":[]}""", null, null)]
+    [InlineData("""{"tools":["not-an-object",{"name":"trivy","version":"0.50.0"}]}""", "trivy", "0.50.0")]
+    [InlineData("""{"tools":"syft"}""", null, null)]
+    [InlineData("""{"tools":{}}""", null, null)]
+    [InlineData("""{"tools":{"components":[],"services":[{"name":"scanner","version":"2.1"}]}}""", "scanner", "2.1")]
+    [InlineData("""{"tools":{"components":["x",{"name":"syft"}]}}""", "syft", null)]
+    [InlineData("""{"tools":{"components":[{"version":"1.0"}],"services":[{"name":"later"}]}}""", null, "1.0")]
+    [InlineData("""{"lifecycles":[]}""", null, null)]
+    public void CycloneDx_ToolIsTheFirstObjectEntryOfWhicheverShapeTheProducerUsed(
+        string metadataJson, string? expectedName, string? expectedVersion)
+    {
+        var document = ParseBomWithMetadata(metadataJson);
+
+        Assert.Equal(expectedName, document.ToolName);
+        Assert.Equal(expectedVersion, document.ToolVersion);
+        Assert.False(document.ToolVersionExplicitlyUnknown);
+    }
+
+    [Theory]
+    [InlineData("withheld", true)]
+    [InlineData("unknown", true)]
+    [InlineData("known", false)]
+    public void CycloneDx_ToolVersionMarker_IsReadFromTheMatchingPropertyOnly(string value, bool expected)
+    {
+        string status = Dependably.Infrastructure.DependablyExportProperties.ToolVersionStatus;
+        var document = ParseBomWithMetadata(
+            "{\"tools\":[{\"name\":\"syft\",\"properties\":[" +
+            "{\"value\":\"unknown\"}," +
+            "{\"name\":\"" + status + "\"}," +
+            "{\"name\":\"dependably:something-else\",\"value\":\"unknown\"}," +
+            "{\"name\":\"" + status + "\",\"value\":\"" + value + "\"}]}]}");
+
+        Assert.Equal(expected, document.ToolVersionExplicitlyUnknown);
+    }
+
+    [Fact]
+    public void CycloneDx_SkipsNonObjectAndBlankNameComponents_KeepingTheRest()
+    {
+        var document = ParseBom("42, null, \"left-pad\", {\"name\":\"  \"}, {\"name\":\"left-pad\",\"version\":\"1.3.0\"}");
+
+        var component = Assert.Single(document.Components);
+        Assert.Equal("left-pad", component.Name);
+        Assert.Equal("1.3.0", component.Version);
+    }
+
+    [Fact]
+    public void CycloneDx_ClipsPresentationFieldsAtTheirBounds_ButNeverBelow()
+    {
+        string description = new('d', 1001);
+        string text = new('t', 401);
+        var component = ParseComponent(
+            "{\"name\":\"lodash\",\"description\":\"" + description + "\",\"author\":\"" + text + "\"," +
+            "\"copyright\":\"" + text + "\",\"group\":\"" + text + "\",\"versionRange\":\"" + text + "\"," +
+            "\"publisher\":\"" + text + "\"}");
+
+        Assert.Equal(1000, component.Description!.Length);
+        Assert.Equal(400, component.Author!.Length);
+        Assert.Equal(400, component.Copyright!.Length);
+        Assert.Equal(400, component.Group!.Length);
+        Assert.Equal(400, component.VersionRange!.Length);
+        Assert.Equal(400, component.Producer!.Length);
+
+        var atBound = ParseComponent("{\"name\":\"lodash\",\"description\":\"" + new string('d', 1000) + "\"}");
+        Assert.Equal(1000, atBound.Description!.Length);
+    }
+
+    [Fact]
+    public void CycloneDx_ExternalReferences_KeepOnlyTheFirstHttpLinkOfEachLinkedType()
+    {
+        var component = ParseComponent("""
+            {
+              "name": "lodash",
+              "externalReferences": [
+                { "type": "website", "url": "http://lodash.com" },
+                { "type": "website", "url": "https://second.example" },
+                { "type": "vcs", "url": "git+https://github.com/lodash/lodash.git" },
+                { "type": "vcs", "url": "https://github.com/lodash/lodash" },
+                { "type": "issue-tracker", "url": "javascript:alert(1)" },
+                { "type": "issue-tracker", "url": "https://github.com/lodash/lodash/issues" },
+                { "type": "distribution", "url": "/relative/path" },
+                { "type": "distribution", "url": "data:text/html,x" },
+                { "type": "documentation", "url": "https://docs.example" },
+                { "type": "vcs" },
+                { "url": "https://nowhere.example" }
+              ]
+            }
+            """);
+
+        Assert.Equal("http://lodash.com", component.WebsiteUrl);
+        Assert.Equal("https://github.com/lodash/lodash", component.VcsUrl);
+        Assert.Equal("https://github.com/lodash/lodash/issues", component.IssueTrackerUrl);
+        Assert.Null(component.DistributionUrl);
+    }
+
+    [Fact]
+    public void CycloneDx_ExternalReferenceUrl_IsClippedToTheTextBound()
+    {
+        string url = "https://example.com/" + new string('a', 500);
+        var component = ParseComponent("{\"name\":\"x\",\"externalReferences\":[{\"type\":\"website\",\"url\":\"" + url + "\"}]}");
+
+        Assert.Equal(url[..400], component.WebsiteUrl);
+    }
+
+    [Fact]
+    public void CycloneDx_Hashes_DropEntriesMissingAnAlgorithmOrContent()
+    {
+        var component = ParseComponent("""
+            { "name": "x", "hashes": [
+                { "alg": "SHA-256", "content": "abc" }, { "alg": "SHA-1" }, { "content": "zzz" } ] }
+            """);
+
+        Assert.Equal("""[{"alg":"SHA-256","content":"abc"}]""", component.HashesJson);
+        Assert.Null(ParseComponent("""{ "name": "x", "hashes": [ { "alg": "SHA-1" } ] }""").HashesJson);
+    }
+
+    [Fact]
+    public void CycloneDx_HashSetTooLargeForTheColumn_IsDroppedWholeRatherThanTruncatedIntoInvalidJson()
+    {
+        string hashes = string.Join(",", Enumerable.Range(0, 20).Select(i =>
+            "{\"alg\":\"SHA-512\",\"content\":\"" + new string((char)('a' + (i % 6)), 128) + "\"}"));
+
+        var component = ParseComponent("{\"name\":\"x\",\"hashes\":[" + hashes + "]}");
+
+        Assert.Null(component.HashesJson);
+    }
+
+    [Fact]
+    public void CycloneDx_NameOnlyLicence_IsFlaggedNamedAndKeepsAnHttpUrl()
+    {
+        var component = ParseComponent("""
+            { "name": "x", "licenses": [ "MIT", { "foo": 1 },
+                { "license": { "id": "  ", "name": "Custom EULA", "url": "https://example.com/eula" } } ] }
+            """);
+
+        Assert.Equal("Custom EULA", component.LicenseSpdx);
+        Assert.True(component.LicenseNamed);
+        Assert.Equal("https://example.com/eula", component.LicenseUrl);
+    }
+
+    [Theory]
+    [InlineData("""{ "license": { "name": "Custom EULA", "url": "javascript:alert(1)" } }""", "Custom EULA", true)]
+    [InlineData("""{ "license": { "name": "Custom EULA" } }""", "Custom EULA", true)]
+    [InlineData("""{ "license": { "id": "Apache-2.0", "name": "ignored" } }""", "Apache-2.0", false)]
+    [InlineData("""{ "expression": "MIT OR Apache-2.0" }""", "MIT OR Apache-2.0", false)]
+    public void CycloneDx_SingleLicenceEntry_NeverCarriesAUrlUnlessItIsANameWithAnHttpOne(
+        string entry, string expectedSpdx, bool expectedNamed)
+    {
+        var component = ParseComponent("{\"name\":\"x\",\"licenses\":[" + entry + "]}");
+
+        Assert.Equal(expectedSpdx, component.LicenseSpdx);
+        Assert.Equal(expectedNamed, component.LicenseNamed);
+        Assert.Null(component.LicenseUrl);
+    }
+
+    [Theory]
+    [InlineData("""{ "license": { "name": "   " } }""")]
+    [InlineData("""{ "expression": "   " }""")]
+    [InlineData("""{ "license": 7 }""")]
+    [InlineData("""7""")]
+    public void CycloneDx_LicenceEntriesThatResolveToNothing_LeaveTheLicenceUnrecorded(string entry)
+    {
+        var component = ParseComponent("{\"name\":\"x\",\"licenses\":[" + entry + "]}");
+
+        Assert.Null(component.LicenseSpdx);
+        Assert.Null(component.LicenseNamed);
+        Assert.Null(component.LicenseUrl);
+    }
+
+    [Fact]
+    public void CycloneDx_SeveralLicenceEntries_AreFoldedWithOrAndNeverCarryANameOrUrl()
+    {
+        var duplicated = ParseComponent("""{ "name": "x", "licenses": [ {"expression":"MIT"}, {"expression":"MIT"} ] }""");
+        Assert.Equal("MIT", duplicated.LicenseSpdx);
+        Assert.False(duplicated.LicenseNamed);
+
+        var nameThenId = ParseComponent("""
+            { "name": "x", "licenses": [
+                { "license": { "name": "Custom EULA", "url": "https://example.com/eula" } },
+                { "license": { "id": "MIT" } } ] }
+            """);
+        Assert.Equal("Custom EULA OR MIT", nameThenId.LicenseSpdx);
+        Assert.False(nameThenId.LicenseNamed);
+        Assert.Null(nameThenId.LicenseUrl);
+    }
+
+    [Fact]
+    public void CycloneDx_ManifestDevMarker_SkipsUnrecognisedPropertiesAndNonBooleanValues()
+    {
+        var declaredDev = ParseComponent("""
+            { "name": "x", "properties": [
+                { "value": "true" },
+                { "name": "other:property", "value": "true" },
+                { "name": "cdx:npm:package:development", "value": "maybe" },
+                { "name": "cdx:pypi:package:development", "value": "FALSE" },
+                { "name": "cdx:gomod:package:development", "value": "true" } ] }
+            """);
+        Assert.False(declaredDev.ManifestDevDeclared);
+
+        var upperTrue = ParseComponent("""
+            { "name": "x", "properties": [ { "name": "cdx:nuget:package:development", "value": "True" } ] }
+            """);
+        Assert.True(upperTrue.ManifestDevDeclared);
+
+        var unknownOnly = ParseComponent("""
+            { "name": "x", "properties": [ { "name": "cdx:npm:package:development", "value": "maybe" } ] }
+            """);
+        Assert.Null(unknownOnly.ManifestDevDeclared);
+    }
+
+    [Fact]
+    public void CycloneDx_ExplicitUnknownMarkers_RequireANameAndAnUnknownOrWithheldValue_AndAreDeduplicated()
+    {
+        string producer = Dependably.Infrastructure.DependablyExportProperties.ProducerStatus;
+        string license = Dependably.Infrastructure.DependablyExportProperties.LicenseStatus;
+        var component = ParseComponent(
+            "{\"name\":\"x\",\"properties\":[" +
+            "{\"value\":\"unknown\"}," +
+            "{\"name\":\"" + license + "\"}," +
+            "{\"name\":\"" + license + "\",\"value\":\"known\"}," +
+            "{\"name\":\"" + producer + "\",\"value\":\"withheld\"}," +
+            "{\"name\":\"" + producer + "\",\"value\":\"unknown\"}]}");
+
+        Assert.Equal("""["producer"]""", component.ExplicitUnknownFieldsJson);
+    }
+
+    [Fact]
+    public void CycloneDx_AdditionalIdentifiers_IgnoreNonStringEntriesAndOverlongValues()
+    {
+        string tooLong = "swh:1:cnt:" + new string('a', 400);
+        var component = ParseComponent(
+            "{\"name\":\"x\",\"swhid\":[\"swh:1:cnt:abc\",7,null,\"" + tooLong + "\"],\"omniborId\":\"not-an-array\"," +
+            "\"externalReferences\":[{\"type\":\"other\",\"url\":\"urn:uuid:123e4567-e89b-12d3-a456-426614174000\"}," +
+            "{\"type\":\"other\",\"url\":\"https://example.com\"},{\"type\":\"other\"}]," +
+            "\"pedigree\":{\"commits\":[{\"uid\":\"a1b2c3\"},{\"url\":\"https://example.com/c\"}]}}");
+
+        Assert.Equal(
+            """[{"kind":"swhid","value":"swh:1:cnt:abc"},{"kind":"commit-hash","value":"a1b2c3"},{"kind":"uuid","value":"urn:uuid:123e4567-e89b-12d3-a456-426614174000"}]""",
+            component.AdditionalIdentifiersJson);
+    }
+
+    [Fact]
+    public void CycloneDx_Lifecycles_KeepDefinedPhasesAndFreeFormNames_AndSkipEverythingElse()
+    {
+        var document = ParseBomWithMetadata("""
+            { "lifecycles": [
+                "build",
+                { "phase": "build" },
+                { "phase": "weird-phase", "name": "Custom Phase", "description": "desc" },
+                { "name": "   " },
+                { "description": "orphan" },
+                { "phase": "operations" } ] }
+            """);
+
+        Assert.Equal(
+            """[{"phase":"build"},{"name":"Custom Phase","description":"desc"},{"phase":"operations"}]""",
+            document.LifecyclesJson);
+    }
+
+    [Fact]
+    public void CycloneDx_Lifecycles_AreNullWhenAbsentEmptyOrTooLargeForTheColumn()
+    {
+        Assert.Null(ParseBom().LifecyclesJson);
+        Assert.Null(ParseBomWithMetadata("""{ "component": { "name": "app" } }""").LifecyclesJson);
+        Assert.Null(ParseBomWithMetadata("""{ "lifecycles": [ { "name": "  " } ] }""").LifecyclesJson);
+
+        string many = string.Join(",", Enumerable.Range(0, 30).Select(i =>
+            "{\"name\":\"" + new string('p', 100) + i + "\"}"));
+        Assert.Null(ParseBomWithMetadata("{\"lifecycles\":[" + many + "]}").LifecyclesJson);
+    }
+
+    [Fact]
+    public void CycloneDx_Lifecycles_ClipTheirTextFields()
+    {
+        string name = new('n', 450);
+        string description = new('d', 1200);
+        var document = ParseBomWithMetadata(
+            "{\"lifecycles\":[{\"name\":\"" + name + "\",\"description\":\"" + description + "\"}]}");
+
+        using var parsed = JsonDocument.Parse(document.LifecyclesJson!);
+        var entry = parsed.RootElement[0];
+        Assert.Equal(400, entry.GetProperty("name").GetString()!.Length);
+        Assert.Equal(1000, entry.GetProperty("description").GetString()!.Length);
+    }
+
+    [Fact]
+    public void CycloneDx_Dependencies_SkipMalformedEntriesAndNonStringTargets()
+    {
+        var document = ParseBom(extra: """
+            ,"dependencies": [
+                "x",
+                { "dependsOn": [ "a" ] },
+                { "ref": "   ", "dependsOn": [ "a" ] },
+                { "ref": "a", "dependsOn": [ "b", 7, null, "c" ] },
+                { "ref": "leaf" } ]
+            """);
+
+        Assert.Equal(2, document.Dependencies.Count);
+        Assert.Equal(new[] { "b", "c" }, document.Dependencies["a"]);
+        Assert.Empty(document.Dependencies["leaf"]);
+    }
+
+    [Fact]
+    public void CycloneDx_Statements_SkipMalformedEntriesAndKeepOnlyUsableAffectsRefs()
+    {
+        var document = ParseBom(extra: """
+            ,"vulnerabilities": [
+                "x",
+                { "affects": [ { "ref": "pkg:npm/a@1" } ] },
+                { "id": "   " },
+                { "id": "CVE-2024-1",
+                  "affects": [ "str", { "ref": "  " }, { "ref": "pkg:npm/a@1" }, { "noref": 1 } ],
+                  "analysis": { "state": "exploitable", "response": "update" } },
+                { "id": "CVE-2024-2" } ]
+            """);
+
+        Assert.Equal(2, document.Statements.Count);
+        var first = document.Statements[0];
+        Assert.Equal("CVE-2024-1", first.VulnId);
+        Assert.Equal("pkg:npm/a@1", Assert.Single(first.ProductRefs));
+        Assert.Equal("exploitable", first.State);
+        Assert.Equal("update", first.Response);
+        Assert.Null(first.Justification);
+        Assert.Null(first.Detail);
+
+        var second = document.Statements[1];
+        Assert.Equal("CVE-2024-2", second.VulnId);
+        Assert.Empty(second.ProductRefs);
+        Assert.Null(second.State);
+        Assert.Null(second.Justification);
+        Assert.Null(second.Response);
+        Assert.Null(second.Detail);
+    }
+
+    private static string RepeatedComponents(int count) =>
+        string.Join(",", Enumerable.Repeat("{\"name\":\"c\"}", count));
+
+    [Fact]
+    public void CycloneDx_ComponentCountAtTheCeiling_IsAccepted_AndOneMoreIsRefused()
+    {
+        int ceiling = SbomDocumentLimits.MaxComponents;
+
+        Assert.Equal(ceiling, ParseBom(RepeatedComponents(ceiling)).Components.Count);
+
+        var thrown = Assert.Throws<SbomParseException>(() => ParseBom(RepeatedComponents(ceiling + 1)));
+        Assert.Equal(SbomParseFailure.TooManyComponents, thrown.Failure);
+        Assert.Equal(ceiling.ToString(System.Globalization.CultureInfo.InvariantCulture), thrown.Diagnostic);
+    }
+
+    [Fact]
+    public void CycloneDx_StatementCeiling_IsChargedPerNamedComponent()
+    {
+        int ceiling = SbomDocumentLimits.MaxComponentStatements;
+        static string Vulnerability(int affects) =>
+            ",\"vulnerabilities\":[{\"id\":\"CVE-2024-1\",\"affects\":[" +
+            string.Join(",", Enumerable.Repeat("{\"ref\":\"a\"}", affects)) + "]}]";
+
+        Assert.Single(ParseBom(extra: Vulnerability(ceiling)).Statements);
+
+        var thrown = Assert.Throws<SbomParseException>(() => ParseBom(extra: Vulnerability(ceiling + 1)));
+        Assert.Equal(SbomParseFailure.TooManyStatements, thrown.Failure);
+        Assert.Equal(ceiling.ToString(System.Globalization.CultureInfo.InvariantCulture), thrown.Diagnostic);
+    }
+
+    // ── dependency graph: unrooted, renamed and cyclic graphs ────────────────────────────────
+
+    [Fact]
+    public void DependencyGraph_WithEdgesButNoRootComponent_PlacesEveryComponentAsUnknown()
+    {
+        var positions = SbomDependencyGraph.Resolve(ParseBom(
+            "{\"bom-ref\":\"a\",\"name\":\"a\",\"version\":\"1\"}",
+            ",\"dependencies\":[{\"ref\":\"app\",\"dependsOn\":[\"a\"]}]"));
+
+        Assert.Equal("graph-unknown", positions["a"].Kind);
+        Assert.Null(positions["a"].PathJson);
+    }
+
+    [Fact]
+    public void DependencyGraph_RootWithNeitherBomRefNorName_LeavesTheGraphUnrooted()
+    {
+        var positions = SbomDependencyGraph.Resolve(ParseBom(
+            "{\"bom-ref\":\"a\",\"name\":\"a\",\"version\":\"1\"}",
+            ",\"metadata\":{\"component\":{\"type\":\"application\"}},\"dependencies\":[{\"ref\":\"app\",\"dependsOn\":[\"a\"]}]"));
+
+        Assert.Equal("graph-unknown", positions["a"].Kind);
+    }
+
+    [Theory]
+    [InlineData("""{"name":"app","version":"1.2.0"}""", "app@1.2.0")]
+    [InlineData("""{"name":"app"}""", "app")]
+    [InlineData("""{"bom-ref":"missing-from-graph","name":"app","version":"1.2.0"}""", "app@1.2.0")]
+    public void DependencyGraph_RootNamedInTheGraphByNameAndVersion_IsStillFound(string rootJson, string graphRef)
+    {
+        var positions = SbomDependencyGraph.Resolve(ParseBom(
+            "{\"bom-ref\":\"a\",\"name\":\"a\",\"version\":\"1\"}",
+            ",\"metadata\":{\"component\":" + rootJson + "},\"dependencies\":[{\"ref\":\"" + graphRef + "\",\"dependsOn\":[\"a\"]}]"));
+
+        Assert.Equal("direct", positions["a"].Kind);
+        Assert.Equal("""["a@1"]""", positions["a"].PathJson);
+    }
+
+    [Fact]
+    public void DependencyGraph_RootBomRefAbsentFromTheGraphAndNoComposedMatch_PlacesEverythingAsUnknown()
+    {
+        var positions = SbomDependencyGraph.Resolve(ParseBom(
+            "{\"bom-ref\":\"a\",\"name\":\"a\",\"version\":\"1\"}",
+            ",\"metadata\":{\"component\":{\"bom-ref\":\"root-0\",\"name\":\"app\",\"version\":\"9\"}}," +
+            "\"dependencies\":[{\"ref\":\"somebody-else\",\"dependsOn\":[\"a\"]}]"));
+
+        Assert.Equal("graph-unknown", positions["a"].Kind);
+    }
+
+    [Fact]
+    public void DependencyGraph_CyclesAndDiamonds_TakeTheShortestRouteAndTerminate()
+    {
+        var positions = SbomDependencyGraph.Resolve(ParseBom(
+            "{\"bom-ref\":\"a\",\"name\":\"a\",\"version\":\"1\"}," +
+            "{\"bom-ref\":\"b\",\"name\":\"b\",\"version\":\"2\"}," +
+            "{\"bom-ref\":\"c\",\"name\":\"c\",\"version\":\"3\"}",
+            ",\"metadata\":{\"component\":{\"bom-ref\":\"app\",\"name\":\"app\"}}," +
+            "\"dependencies\":[" +
+            "{\"ref\":\"app\",\"dependsOn\":[\"a\",\"b\"]}," +
+            "{\"ref\":\"a\",\"dependsOn\":[\"b\",\"c\",\"app\"]}," +
+            "{\"ref\":\"b\",\"dependsOn\":[\"a\"]}," +
+            "{\"ref\":\"c\",\"dependsOn\":[]}]"));
+
+        Assert.Equal("direct", positions["a"].Kind);
+        Assert.Equal("direct", positions["b"].Kind);
+        Assert.Equal("transitive", positions["c"].Kind);
+        Assert.Equal("""["a@1","c@3"]""", positions["c"].PathJson);
+    }
+
+    [Fact]
+    public void DependencyGraph_PathIdentities_FallBackFromPurlToNameAtVersionToName()
+    {
+        var positions = SbomDependencyGraph.Resolve(ParseBom(
+            "{\"bom-ref\":\"p\",\"name\":\"p\",\"version\":\"1\",\"purl\":\"pkg:npm/p@1\"}," +
+            "{\"bom-ref\":\"v\",\"name\":\"versioned\",\"version\":\"2.0\"}," +
+            "{\"bom-ref\":\"n\",\"name\":\"bare\"}," +
+            "{\"bom-ref\":\"leaf\",\"name\":\"leaf\"}",
+            ",\"metadata\":{\"component\":{\"bom-ref\":\"app\",\"name\":\"app\"}}," +
+            "\"dependencies\":[{\"ref\":\"app\",\"dependsOn\":[\"p\"]},{\"ref\":\"p\",\"dependsOn\":[\"v\"]}," +
+            "{\"ref\":\"v\",\"dependsOn\":[\"n\"]},{\"ref\":\"n\",\"dependsOn\":[\"leaf\"]}]"));
+
+        Assert.Equal("""["pkg:npm/p@1","versioned@2.0","bare","leaf"]""", positions["leaf"].PathJson);
+        Assert.Equal("transitive", positions["leaf"].Kind);
+    }
+
+    [Fact]
+    public void DependencyGraph_UndeclaredRefsKeepTheirRawSpelling_AndComponentsWithNoRefAreOmitted()
+    {
+        var positions = SbomDependencyGraph.Resolve(ParseBom(
+            "{\"bom-ref\":\"real\",\"name\":\"real\",\"version\":\"1\",\"purl\":\"pkg:npm/real@1\"}," +
+            "{\"name\":\"anonymous\",\"version\":\"1\"}," +
+            "{\"name\":\"by-purl\",\"purl\":\"pkg:npm/by-purl@3\"}",
+            ",\"metadata\":{\"component\":{\"bom-ref\":\"app\",\"name\":\"app\"}}," +
+            "\"dependencies\":[{\"ref\":\"app\",\"dependsOn\":[\"ghost\",\"pkg:npm/by-purl@3\"]}," +
+            "{\"ref\":\"ghost\",\"dependsOn\":[\"real\"]}]"));
+
+        Assert.Equal(2, positions.Count);
+        Assert.DoesNotContain("anonymous", positions.Keys);
+        Assert.Equal("""["ghost","pkg:npm/real@1"]""", positions["real"].PathJson);
+        Assert.Equal("direct", positions["pkg:npm/by-purl@3"].Kind);
+        Assert.Equal("""["pkg:npm/by-purl@3"]""", positions["pkg:npm/by-purl@3"].PathJson);
+    }
+
+    // ── OpenVEX: malformed and edge-case documents ───────────────────────────────────────────
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("\"https://openvex.dev/ns\"")]
+    [InlineData("""{"statements":[]}""")]
+    [InlineData("""{"@context":7}""")]
+    [InlineData("""{"@context":"https://example.com/openvex"}""")]
+    [InlineData("""{"@context":"HTTPS://OPENVEX.DEV/ns"}""")]
+    public void OpenVex_DocumentWithoutTheOpenVexContext_IsNotRecognised_AndParseRefusesIt(string raw)
+    {
+        Assert.False(OpenVexParser.IsOpenVex(Json(raw)));
+
+        var thrown = Assert.Throws<SbomParseException>(() => OpenVexParser.Parse(Json(raw)));
+        Assert.Equal(SbomParseFailure.WrongDocumentKind, thrown.Failure);
+    }
+
+    [Fact]
+    public void OpenVex_SkipsStatementsThatNameNoUsableVulnerability()
+    {
+        var document = OpenVexParser.Parse(Json("""
+            {
+              "@context": "https://openvex.dev/ns/v0.2.0",
+              "tooling": "vexctl",
+              "statements": [
+                "not-an-object",
+                { "status": "affected" },
+                { "vulnerability": {} },
+                { "vulnerability": { "name": "   " } },
+                { "vulnerability": 7 },
+                { "vulnerability": { "@id": "https://nvd.nist.gov/vuln/detail/CVE-2024-9" }, "status": "fixed" }
+              ]
+            }
+            """));
+
+        Assert.Equal("vexctl", document.ToolName);
+        var statement = Assert.Single(document.Statements);
+        Assert.Equal("https://nvd.nist.gov/vuln/detail/CVE-2024-9", statement.VulnId);
+        Assert.Equal("resolved", statement.State);
+    }
+
+    [Fact]
+    public void OpenVex_ProductsAcceptStringsAndObjectsOfEitherSpelling_AndDropEverythingElse()
+    {
+        var document = OpenVexParser.Parse(Json("""
+            {
+              "@context": "https://openvex.dev/ns/v0.2.0",
+              "statements": [ { "vulnerability": "CVE-2024-1", "status": "affected",
+                "products": [
+                  "pkg:npm/lodash@4.17.21",
+                  "   ",
+                  { "@id": "pkg:npm/left-pad@1.3.0" },
+                  { "purl": "pkg:pypi/requests@2.31.0" },
+                  { "@id": "  ", "purl": "pkg:pypi/flask@3.0.0" },
+                  { "name": "no-identifier" },
+                  42,
+                  null ] } ]
+            }
+            """));
+
+        Assert.Equal(
+            new[] { "pkg:npm/lodash@4.17.21", "pkg:npm/left-pad@1.3.0", "pkg:pypi/requests@2.31.0", "pkg:pypi/flask@3.0.0" },
+            Assert.Single(document.Statements).ProductRefs);
+    }
+
+    [Fact]
+    public void OpenVex_DetailPrefersTheActionStatement_AndFallsBackToTheImpactStatement()
+    {
+        var document = OpenVexParser.Parse(Json("""
+            {
+              "@context": "https://openvex.dev/ns/v0.2.0",
+              "statements": [
+                { "vulnerability": "CVE-1", "status": "affected", "action_statement": "Upgrade.", "impact_statement": "Exposed." },
+                { "vulnerability": "CVE-2", "status": "not_affected", "impact_statement": "Not reachable." },
+                { "vulnerability": "CVE-3", "status": "unheard_of" }
+              ]
+            }
+            """));
+
+        Assert.Equal("Upgrade.", document.Statements[0].Detail);
+        Assert.Equal("Not reachable.", document.Statements[1].Detail);
+        Assert.Null(document.Statements[2].Detail);
+        Assert.Null(document.Statements[2].State);
+        Assert.Null(document.ToolName);
+    }
+
+    private static OpenVexDocument ParseVex(IEnumerable<string> statements) =>
+        OpenVexParser.Parse(Json(
+            "{\"@context\":\"https://openvex.dev/ns/v0.2.0\",\"statements\":[" + string.Join(",", statements) + "]}"));
+
+    [Fact]
+    public void OpenVex_StatementCeiling_ChargesOnePerProductAndOnePerProductlessStatement()
+    {
+        int ceiling = SbomDocumentLimits.MaxComponentStatements;
+
+        Assert.Equal(ceiling, ParseVex(Enumerable.Repeat("{\"vulnerability\":\"CVE-1\"}", ceiling)).Statements.Count);
+
+        var tooManyStatements = Assert.Throws<SbomParseException>(
+            () => ParseVex(Enumerable.Repeat("{\"vulnerability\":\"CVE-1\"}", ceiling + 1)));
+        Assert.Equal(SbomParseFailure.TooManyStatements, tooManyStatements.Failure);
+        Assert.Equal(ceiling.ToString(System.Globalization.CultureInfo.InvariantCulture), tooManyStatements.Diagnostic);
+
+        string products = string.Join(",", Enumerable.Repeat("\"pkg:npm/a@1\"", ceiling + 1));
+        var tooManyProducts = Assert.Throws<SbomParseException>(
+            () => ParseVex(new[] { "{\"vulnerability\":\"CVE-1\",\"products\":[" + products + "]}" }));
+        Assert.Equal(SbomParseFailure.TooManyStatements, tooManyProducts.Failure);
+    }
 }

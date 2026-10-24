@@ -173,6 +173,40 @@ describe('setupI18n - locale resolution', () => {
     expect(document.documentElement.lang).toBe('fr-CA')
   })
 
+  it('leaves html[lang] alone when there is no document to write to', async () => {
+    // setupI18n reads the `document` global twice: the cookie lookup, then the typeof guard.
+    // The second read reports undefined so the guard takes its else branch.
+    getLocaleFromNavigatorSpy.mockReturnValue('fr-CA')
+    document.documentElement.lang = 'en'
+    const realDoc = document
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'document')
+    const { setupI18n } = await import('./index.js')
+    let armed = false
+    let hidden = 0
+    vi.spyOn(realDoc, 'cookie', 'get').mockImplementation(() => { armed = true; return '' })
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      get() {
+        if (armed) {
+          armed = false
+          hidden += 1
+          return undefined
+        }
+        return realDoc
+      },
+    })
+    try {
+      setupI18n()
+    } finally {
+      Object.defineProperty(globalThis, 'document', /** @type {PropertyDescriptor} */ (original))
+      vi.restoreAllMocks()
+    }
+
+    expect(hidden).toBe(1)
+    expect(realDoc.documentElement.lang).toBe('en')
+    expect(initSpy).toHaveBeenCalledWith({ fallbackLocale: 'en', initialLocale: 'fr-CA' })
+  })
+
   it('returns the init() promise to the caller', async () => {
     const sentinel = Promise.resolve('init-done')
     initSpy.mockReturnValueOnce(sentinel)

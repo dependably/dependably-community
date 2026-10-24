@@ -100,6 +100,142 @@ public sealed class CefFormatTests
         Assert.Equal(CefFormat.SeverityLow, CefFormat.Severity("any.unknown"));
     }
 
+    /// <summary>
+    /// Every action the table names, with its exact display name. Each row is one switch arm, so a
+    /// renamed or dropped arm fails here instead of arriving unnamed in a collector.
+    /// </summary>
+    [Theory]
+    [InlineData("auth.saml.login.success", "SAML Login Success")]
+    [InlineData("auth.saml.login.failure", "SAML Login Failure")]
+    [InlineData("mfa.enrolled", "MFA Enrolled")]
+    [InlineData("mfa.disabled", "MFA Disabled")]
+    [InlineData("mfa.recovery_code_used", "MFA Recovery Code Used")]
+    [InlineData("mfa.trusted_device_added", "MFA Trusted Device Added")]
+    [InlineData("auth.capability.denied", "Capability Denied")]
+    [InlineData("ratelimit.rejected", "Rate Limit Rejected")]
+    [InlineData("oci.scope_denied", "OCI Scope Denied")]
+    [InlineData("metrics.scrape_denied", "Metrics Scrape Denied")]
+    [InlineData("allowlist_blocked", "Allowlist Blocked")]
+    [InlineData("invite_accept_blocked", "Invite Acceptance Blocked")]
+    [InlineData("service_token_revoked", "Service Token Revoked")]
+    [InlineData("system_admin.jwt_secret_rotated", "JWT Secret Rotated")]
+    [InlineData("user.password_changed", "Password Changed")]
+    [InlineData("user.password_reset", "Password Reset")]
+    [InlineData("system_admin.admin_created", "Operator Created")]
+    [InlineData("system_admin.admin_deleted", "Operator Deleted")]
+    [InlineData("saml.config_updated", "SAML Config Updated")]
+    [InlineData("saml.signing_cert_set", "SAML Signing Cert Set")]
+    [InlineData("saml.signing_cert_expired", "SAML Signing Cert Expired")]
+    [InlineData("ssrf_blocked", "SSRF Blocked")]
+    [InlineData("provenance_verification_failed", "Provenance Verification Failed")]
+    [InlineData("upstream_source_pin_violation", "Upstream Source Pin Violation")]
+    [InlineData("conflict_resolved", "Dependency Confusion Conflict")]
+    [InlineData("quarantine_decision", "Quarantine Decision")]
+    [InlineData("package.override.set", "Policy Override Set")]
+    [InlineData("package_version_blocked", "Version Blocked")]
+    [InlineData("package_version_unblocked", "Version Unblocked")]
+    [InlineData("trust_anchor_added", "Trust Anchor Added")]
+    [InlineData("trust_anchor_removed", "Trust Anchor Removed")]
+    public void FriendlyName_EveryRemainingMappedAction_ReturnsItsDisplayName(string action, string expected)
+    {
+        Assert.Equal(expected, CefFormat.FriendlyName(action));
+        Assert.NotEqual(action, CefFormat.FriendlyName(action));
+    }
+
+    [Theory]
+    [InlineData("checksum_failure")]
+    [InlineData("ssrf_blocked")]
+    [InlineData("provenance_verification_failed")]
+    [InlineData("upstream_source_pin_violation")]
+    [InlineData("lockout.triggered")]
+    [InlineData("system_admin.jwt_secret_rotated")]
+    public void Severity_IntegrityAndLockoutActions_AreHigh(string action)
+    {
+        Assert.Equal(7, CefFormat.Severity(action));
+    }
+
+    [Theory]
+    [InlineData("auth.capability.denied")]
+    [InlineData("oci.scope_denied")]
+    [InlineData("member_role_changed")]
+    [InlineData("mfa.disabled")]
+    [InlineData("package.override.set")]
+    [InlineData("package_version_unblocked")]
+    [InlineData("trust_anchor_added")]
+    [InlineData("trust_anchor_removed")]
+    [InlineData("saml.config_updated")]
+    [InlineData("saml.signing_cert_set")]
+    [InlineData("system_admin.admin_created")]
+    [InlineData("system_admin.admin_deleted")]
+    public void Severity_PrivilegeAndTrustChanges_AreMediumHigh(string action)
+    {
+        Assert.Equal(6, CefFormat.Severity(action));
+    }
+
+    [Theory]
+    [InlineData("login.failure")]
+    [InlineData("auth.login.failure")]
+    [InlineData("auth.saml.login.failure")]
+    [InlineData("auth.token.rejected")]
+    [InlineData("member_removed")]
+    [InlineData("mfa.recovery_code_used")]
+    [InlineData("user.password_changed")]
+    [InlineData("user.password_reset")]
+    [InlineData("quarantine_decision")]
+    [InlineData("conflict_resolved")]
+    [InlineData("invite_accept_blocked")]
+    [InlineData("saml.signing_cert_expired")]
+    public void Severity_FailedAuthAndCredentialChanges_AreMedium(string action)
+    {
+        Assert.Equal(5, CefFormat.Severity(action));
+    }
+
+    [Theory]
+    [InlineData("token_created")]
+    [InlineData("token_revoked")]
+    [InlineData("service_token_created")]
+    [InlineData("service_token_revoked")]
+    [InlineData("ratelimit.rejected")]
+    [InlineData("metrics.scrape_denied")]
+    [InlineData("allowlist_blocked")]
+    [InlineData("package_version_blocked")]
+    [InlineData("mfa.trusted_device_added")]
+    public void Severity_RoutineCredentialAndRefusalEvents_AreMediumLow(string action)
+    {
+        Assert.Equal(4, CefFormat.Severity(action));
+    }
+
+    [Theory]
+    [InlineData("login.success")]
+    [InlineData("mfa.enrolled")]
+    [InlineData("auth.saml.login.success")]
+    [InlineData("")]
+    public void Severity_UnrankedActions_AreLow(string action)
+    {
+        Assert.Equal(3, CefFormat.Severity(action));
+    }
+
+    [Fact]
+    public void Escape_EmptyString_StaysEmpty()
+    {
+        Assert.Equal("", CefFormat.Escape(""));
+    }
+
+    [Fact]
+    public void Escape_LiteralBackslashThenN_IsNotConfusedWithANewline()
+    {
+        // Two characters, backslash and n: the backslash is doubled and the n stays literal.
+        Assert.Equal(@"a\\nb", CefFormat.Escape(@"a\nb"));
+        // A real newline becomes the two-character escape instead.
+        Assert.Equal(@"a\nb", CefFormat.Escape("a\nb"));
+    }
+
+    [Fact]
+    public void Escape_CrLfPair_BecomesTwoEscapedCharacters()
+    {
+        Assert.Equal(@"line1\r\nline2", CefFormat.Escape("line1\r\nline2"));
+    }
+
     // ── Constant values per ArcSight CEF spec ────────────────────────────────
 
     [Fact]

@@ -279,6 +279,60 @@ public sealed class NpmAdvisoryProjectionTests
     public void ExtractCweIds_MalformedDegradesToEmpty(string rawJson) =>
         Assert.Empty(NpmAdvisoryProjection.ExtractCweIds(Detail(rawJson)?.DatabaseSpecific));
 
+    // ── aliases + fixed version extension properties ──────────────────────────
+
+    private const string TwoLineAdvisory =
+        """
+        {"id":"GHSA-x","affected":[{"package":{"ecosystem":"npm","name":"lodash"},"ranges":[{"type":"SEMVER","events":[
+          {"introduced":"0"},{"fixed":"3.10.2"},{"introduced":"4.0.0"},{"fixed":"4.17.21"}]}]}]}
+        """;
+
+    [Fact]
+    public void Project_CarriesAliasesWithoutOwnId_AndFixForTheRequestedVersion()
+    {
+        var advisory = Advisory("GHSA-x", severity: "HIGH") with { Aliases = ["CVE-2021-1", "GHSA-x", "cve-2021-1"] };
+
+        var projected = NpmAdvisoryProjection.Project(
+            advisory, Detail(TwoLineAdvisory), "lodash", ["4.17.20"]);
+
+        Assert.Equal(["CVE-2021-1"], projected.Aliases);
+        Assert.Equal("4.17.21", projected.FixedVersion);
+    }
+
+    [Fact]
+    public void Project_FixedVersion_IsTheHighestFixAcrossRequestedVersions()
+    {
+        var projected = NpmAdvisoryProjection.Project(
+            Advisory("GHSA-x", severity: "HIGH"), Detail(TwoLineAdvisory), "lodash", ["3.5.0", "4.17.20"]);
+
+        Assert.Equal("4.17.21", projected.FixedVersion);
+    }
+
+    [Fact]
+    public void Project_FixedVersion_NullWhenAnyAffectedVersionHasNoFix_OrNoDetail()
+    {
+        const string openEnded =
+            """{"id":"GHSA-x","affected":[{"package":{"ecosystem":"npm","name":"lodash"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"3.10.2"},{"introduced":"4.0.0"}]}]}]}""";
+        var advisory = Advisory("GHSA-x", severity: "HIGH");
+
+        Assert.Null(NpmAdvisoryProjection.Project(advisory, Detail(openEnded), "lodash", ["3.5.0", "4.1.0"]).FixedVersion);
+        Assert.Null(NpmAdvisoryProjection.Project(advisory, null, "lodash", ["4.17.20"]).FixedVersion);
+        Assert.Empty(NpmAdvisoryProjection.Project(advisory, null, "lodash", ["4.17.20"]).Aliases);
+    }
+
+    [Fact]
+    public void Project_WireShape_UsesSnakeCaseExtensionKeys()
+    {
+        var advisory = Advisory("GHSA-x", severity: "HIGH") with { Aliases = ["CVE-2021-1"] };
+        var projected = NpmAdvisoryProjection.Project(advisory, Detail(TwoLineAdvisory), "lodash", ["4.17.20"]);
+
+        using var json = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(projected));
+
+        Assert.Equal("CVE-2021-1", json.RootElement.GetProperty("aliases")[0].GetString());
+        Assert.Equal("4.17.21", json.RootElement.GetProperty("fixed_version").GetString());
+        Assert.False(json.RootElement.TryGetProperty("fixedVersion", out _));
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static Dependably.Infrastructure.OsvDetail? Detail(string rawJson) =>

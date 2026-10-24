@@ -39,11 +39,12 @@ public static class PathSafeValidator
     [
         (static v => v.Contains('%'), "must not contain percent-encoded sequences"),
         (static v => v.Contains('?') || v.Contains('#'), "must not contain URL delimiters"),
+        (static v => v == ".", "must not be a '.' segment"),
     ];
 
     /// <summary>
     /// Validates a route value that is embedded as a single path segment of an upstream
-    /// proxy URL. Applies all the base path-safety rules plus two bans of its own.
+    /// proxy URL. Applies all the base path-safety rules plus three bans of its own.
     ///
     /// <para><c>%</c>: ASP.NET keeps <c>%2F</c> (and other encoded sequences) undecoded in route
     /// values, so an encoded slash or traversal would survive into the composed upstream request
@@ -59,13 +60,21 @@ public static class PathSafeValidator
     /// the intended path, but requesting a resource the coordinate does not name is wrong on its
     /// own terms and the recorded row would carry an id no ecosystem accepts.</para>
     ///
+    /// <para>A lone <c>.</c>: <see cref="Uri"/> removes <c>.</c> segments when it parses the
+    /// composed URL, so <c>a/./b</c> is requested as <c>a/b</c>. A check run on the
+    /// uncollapsed value (a reserved-namespace match on a module path, say) would then decide
+    /// about a different name than the one upstream is asked for. The base rules already reject
+    /// <c>..</c>; a dot inside a segment (<c>.npmrc</c>, <c>1.0.0</c>) is ordinary content and
+    /// passes.</para>
+    ///
     /// <para>Other URL-reserved characters (<c>&amp;</c>, <c>;</c>, <c>:</c>, <c>@</c>, space) are
     /// deliberately NOT banned: <see cref="Uri"/> percent-encodes them into the same single
     /// segment, so they cannot restructure the request, and banning them would reject legitimate
     /// content in ecosystems that allow them.</para>
     ///
     /// <para>No package ecosystem allows <c>%</c>, <c>?</c> or <c>#</c> in names, versions, or
-    /// filenames, so none of this narrows what a real client can ask for.</para>
+    /// filenames, or a name, version, filename or path element that is just <c>.</c>, so none of
+    /// this narrows what a real client can ask for.</para>
     /// </summary>
     public static ValidationResult ValidateUpstreamSegment(string value, string fieldName)
     {

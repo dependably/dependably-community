@@ -8,6 +8,7 @@ using Dependably.Security;
 using Dependably.Storage;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Primitives;
 
 namespace Dependably.Api.NpmProtocol;
 
@@ -88,6 +89,11 @@ public sealed class NpmPackumentHandler(
             return new NotFoundResult();
         }
 
+        // Capture the org policy epoch before reading the settings both paths render with and the
+        // reservation/claim state that picks the path: a proxy-settings PUT or reservation change
+        // that bumps the epoch after these reads must expire the document rendered from them, not
+        // let it bind to the fresh epoch.
+        var epochToken = cache.CaptureOrgEpochToken(orgId);
         var settings = await orgs.GetSettingsAsync(orgId, ct);
         // Read paths use the org-scoped overload: a token bound to a different tenant is
         // coerced to null so the existing token-null branches respect AnonymousPull
@@ -103,15 +109,18 @@ public sealed class NpmPackumentHandler(
             && await claimResolver.IsProxyFetchAllowedAsync(orgId, "npm", fullName, ct);
 
         return passthroughAllowed
-            ? await ServePassthroughPackumentAsync(httpContext, orgId, fullName, pkg, settings, token, ct)
-            : await ServeLocalPackumentAsync(httpContext, orgId, fullName, pkg, token, settings!, ct);
+            ? await ServePassthroughPackumentAsync(httpContext, orgId, fullName, pkg, settings, token, epochToken, ct)
+            : await ServeLocalPackumentAsync(httpContext, orgId, fullName, pkg, token, settings!, epochToken, ct);
     }
 
     // Passthrough packument path: anonymous-pull gate, then cached bytes, then a
     // single-flight proxy-merged rebuild.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "The parameter list is the call's declared inputs; a bundling type would hide which of them each "
+                        + "caller supplies.")]
     private async Task<IActionResult> ServePassthroughPackumentAsync(
         HttpContext httpContext, string orgId, string fullName,
-        Package? pkg, OrgSettings settings, TokenRecord? token, CancellationToken ct)
+        Package? pkg, OrgSettings settings, TokenRecord? token, IChangeToken? epochToken, CancellationToken ct)
     {
         if (!settings.AnonymousPull && token is null)
         {
@@ -120,8 +129,9 @@ public sealed class NpmPackumentHandler(
         }
 
         // Distinct cache variant from the local-only path (see MetadataCacheKeys.NpmPackument):
-        // a claim flip must not serve the other path's stale body until TTL.
-        var cacheKey = new NpmPackumentKey(orgId, fullName) { IsProxy = true };
+        // a claim flip must not serve the other path's stale body until TTL. Keyed by the
+        // request's public base too, because the tarball URLs inside are built from it.
+        var cacheKey = new NpmPackumentKey(orgId, fullName) { IsProxy = true, PublicBase = urls.BaseUrl(httpContext) };
         if (cache.TryGet(cacheKey, out byte[]? cachedBytes) && cachedBytes is not null)
         {
             return ServePackumentBytes(httpContext, cachedBytes, "private, max-age=60");
@@ -133,6 +143,8 @@ public sealed class NpmPackumentHandler(
         // recycle/pool its HttpContext, so a rebuild that read Request.Host at that point could
         // bake the wrong host into the cached tarball URLs. Capturing the resolved string here
         // and closing over it (never the HttpContext) keeps the rebuild request-lifetime-safe.
+        // Only callers with the same public base share the rebuild, so the URLs it renders are
+        // theirs.
         string tarballBase = NpmTarballBase(httpContext);
 
         // Single-flight rebuild: concurrent rebuilds for the same key collapse onto one shared
@@ -146,7 +158,7 @@ public sealed class NpmPackumentHandler(
                 : null;
             return await BuildProxyPackumentBytesAsync(tarballBase, orgId, fullName, pkg,
                 passthroughTags?.Count > 0 ? passthroughTags : null, settings, rebuildCt);
-        }, ct);
+        }, ct, epochToken);
 
         return bytes is null
             ? new NotFoundResult()
@@ -155,8 +167,12 @@ public sealed class NpmPackumentHandler(
 
     // Local-only packument path (passthrough disabled or claim-local): when AnonymousPull is
     // disabled, a token is required; otherwise anonymous reads are permitted.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "The parameter list is the call's declared inputs; a bundling type would hide which of them each "
+                        + "caller supplies.")]
     private async Task<IActionResult> ServeLocalPackumentAsync(
-        HttpContext httpContext, string orgId, string fullName, Package? pkg, TokenRecord? token, OrgSettings settings, CancellationToken ct)
+        HttpContext httpContext, string orgId, string fullName, Package? pkg, TokenRecord? token, OrgSettings settings,
+        IChangeToken? epochToken, CancellationToken ct)
     {
         // Auth gate before any existence signal — a 404-before-401 would let anonymous
         // callers enumerate which private hosted names exist. Mirrors the passthrough
@@ -172,18 +188,17 @@ public sealed class NpmPackumentHandler(
             return new NotFoundResult();
         }
 
-        var cacheKey = new NpmPackumentKey(orgId, fullName);
+        var cacheKey = new NpmPackumentKey(orgId, fullName) { PublicBase = urls.BaseUrl(httpContext) };
 
-        // Capture the invalidation generation AND the org policy epoch token before reading any
-        // state. A publish/unpublish/deprecate that commits its DB write and evicts this key
-        // between the read below and the Set must not be lost: the Set is discarded when its
-        // snapshot predates that eviction, and the next read rebuilds from the mutated state
-        // instead of serving it stale until the TTL elapses. Same discipline for a concurrent
-        // proxy-settings PUT that invalidates the org's epoch mid-read — mirroring
-        // RenderedResponseCache.GetOrRebuildAsync — so the Set binds to the (already-retired)
-        // token captured here rather than whichever epoch happens to be live once it runs.
+        // Capture the invalidation generation before reading any state. A
+        // publish/unpublish/deprecate that commits its DB write and evicts this key between the
+        // read below and the Set must not be lost: the Set is discarded when its snapshot predates
+        // that eviction, and the next read rebuilds from the mutated state instead of serving it
+        // stale until the TTL elapses. The org policy epoch token was captured by the caller
+        // before it read the settings this document renders with, so a concurrent proxy-settings
+        // PUT binds the Set to the (already-retired) token rather than whichever epoch is live
+        // once it runs.
         long generation = cache.GetGeneration(cacheKey);
-        var epochToken = cache.CaptureEpochToken(cacheKey);
         if (cache.TryGet(cacheKey, out byte[]? localCached) && localCached is not null)
         {
             return ServePackumentBytes(httpContext, localCached, "private, max-age=300");
@@ -779,7 +794,7 @@ public sealed class NpmPackumentHandler(
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsAsync(
         string orgId, string packageId, string fullName, CancellationToken ct)
     {
-        return await inventory.ListServeableVersionsAsync(orgId, packageId, "npm", fullName, ct);
+        return await inventory.ListServeableVersionsAsync(orgId, packageId, "npm", fullName, ct: ct);
     }
 
     /// <summary>

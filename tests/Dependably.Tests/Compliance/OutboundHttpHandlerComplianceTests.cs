@@ -5,7 +5,18 @@ namespace Dependably.Tests.Compliance;
 
 /// <summary>
 /// Fail-closed gate for the outbound-egress invariant: every HTTP handler this process constructs
-/// dials through the SSRF connect gate, follows no redirects, and bypasses any ambient proxy.
+/// dials through the SSRF connect gate, follows no redirects, bypasses any ambient proxy, and keeps
+/// no cookie jar.
+///
+/// <para>
+/// <b>Why cookies are off.</b> <c>UseCookies</c> defaults to <see langword="true"/> with a
+/// <see cref="System.Net.CookieContainer"/> owned by the handler, and <c>IHttpClientFactory</c> pools
+/// one handler per named client across every request and every org. A session cookie an upstream
+/// sets in answer to one org's credential would then be replayed on another org's request to the
+/// same host — a cross-tenant credential — and a cookie without the Secure flag would follow an
+/// <c>http://</c> URL on that host in plaintext, side-stepping the scheme pin on the credential
+/// header. No outbound client here authenticates by cookie, so the jar buys nothing.
+/// </para>
 ///
 /// <para>
 /// <b>Why the proxy clause is part of the same invariant.</b> <see cref="SocketsHttpHandler.ConnectCallback"/>
@@ -58,6 +69,7 @@ public sealed partial class OutboundHttpHandlerComplianceTests
     [
         ("UseProxy", "false"),
         ("AllowAutoRedirect", "false"),
+        ("UseCookies", "false"),
     ];
 
     [GeneratedRegex(@"new\s+(?:[\w.]+\.)?SocketsHttpHandler\b")]

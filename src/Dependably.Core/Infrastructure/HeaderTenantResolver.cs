@@ -38,7 +38,7 @@ public sealed class HeaderTenantResolver : ITenantResolver
         _db = db;
         string? configured = config["TENANT_HEADER_NAME"];
         _headerName = string.IsNullOrWhiteSpace(configured) ? DefaultHeaderName : configured.Trim();
-        _extraReserved = ReservedSlugs.ParseExtra(config["RESERVED_SUBDOMAINS"]);
+        _extraReserved = ReservedSlugs.ForConfig(config);
         var (networks, proxies) = ConfigurationExtensions.ParseTrustedProxies(config["TRUSTED_PROXIES"]);
         _trustedNetworks = networks;
         _trustedProxies = proxies;

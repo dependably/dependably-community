@@ -263,6 +263,27 @@ public sealed class HexReleaseRepository
         return rows > 0;
     }
 
+    /// <summary>
+    /// Sets or clears a proxied release's retirement, as read from the upstream's signed package
+    /// resource by the deprecation refresh — the same reason and message the first fetch wrote
+    /// through <see cref="UpsertCachedAsync"/>, so a release retired (or un-retired) upstream after
+    /// it was cached is advertised that way by this registry's own index.
+    /// </summary>
+    // xtenant: cache_artifact is global and its hex_release row is shared by every org caching the
+    // release, like the cache_artifact.deprecated fact written beside it; the id comes from the
+    // refresh pass's own cache_artifact enumeration, never from a caller-supplied value.
+    public async Task SetCachedRetirementAsync(
+        string cacheArtifactId, HexRetirementReason? reason, string? message, CancellationToken ct = default)
+    {
+        await using var conn = await _db.OpenAsync(ct);
+        await conn.ExecuteAsync(
+            """
+            UPDATE hex_release SET retired_reason = @reason, retired_message = @message
+            WHERE owner_kind = 'cache_artifact' AND cache_artifact_id = @cacheArtifactId
+            """,
+            new { cacheArtifactId, reason = reason is { } r ? ReasonToWire(r) : null, message });
+    }
+
     /// <summary>Marks whether a hosted release has a docs tarball stored beside it.</summary>
     public async Task<bool> SetHasDocsAsync(string orgId, string name, string version, bool hasDocs, CancellationToken ct = default)
     {

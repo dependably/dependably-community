@@ -206,7 +206,7 @@ public sealed class OsvClientTests : IDisposable
     [Fact]
     public async Task QueryBatchAsync_HydrationFailure_FallsBackToStripped()
     {
-        // FetchAdvisoryAsync non-success branch: 404 ⇒ null ⇒ stripped fallback.
+        // An unreached hydration (503) with an unreachable re-query leaves the stripped record.
         string batchJson = """
             {"results":[
               {"vulns":[{"id":"GHSA-MISS","modified":"2026-01-01T00:00:00Z"}]}
@@ -215,7 +215,7 @@ public sealed class OsvClientTests : IDisposable
         _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
         _server.Given(Request.Create().WithPath("/vulns/GHSA-MISS").UsingGet())
-            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.ServiceUnavailable));
 
         var result = await _sut.QueryBatchAsync(new[] { "pkg:npm/a@1.0.0" });
 
@@ -312,7 +312,7 @@ public sealed class OsvClientTests : IDisposable
     [Fact]
     public async Task QueryBatchAsync_StrippedFallback_HasNullRawJson()
     {
-        // Hydration 404s ⇒ stripped record ⇒ IsHydrated false ⇒ RawJson null, so the upsert's
+        // Hydration 503s ⇒ stripped record ⇒ IsHydrated false ⇒ RawJson null, so the upsert's
         // COALESCE can never clobber a previously-stored full advisory with this batch's stub.
         string batchJson = """
             {"results":[
@@ -322,7 +322,7 @@ public sealed class OsvClientTests : IDisposable
         _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
         _server.Given(Request.Create().WithPath("/vulns/GHSA-MISS").UsingGet())
-            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.ServiceUnavailable));
 
         var result = await _sut.QueryBatchAsync(new[] { "pkg:npm/a@1.0.0" });
 
@@ -334,7 +334,7 @@ public sealed class OsvClientTests : IDisposable
     [Fact]
     public async Task QueryBatchAsync_MixedHydration_CapturesRawJsonOnlyForHydrated()
     {
-        // Mixed/partial batch: one advisory hydrates (RawJson set), the other 404s (RawJson null).
+        // Mixed/partial batch: one advisory hydrates (RawJson set), the other 503s (RawJson null).
         string batchJson = """
             {"results":[
               {"vulns":[{"id":"GHSA-OK","modified":"2026-01-01T00:00:00Z"}]},
@@ -347,7 +347,7 @@ public sealed class OsvClientTests : IDisposable
             .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
                 .WithBody("""{"id":"GHSA-OK","summary":"good"}"""));
         _server.Given(Request.Create().WithPath("/vulns/GHSA-FAIL").UsingGet())
-            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.NotFound));
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.ServiceUnavailable));
 
         var result = await _sut.QueryBatchAsync(new[] { "pkg:npm/ok@1.0.0", "pkg:npm/fail@1.0.0" });
 
@@ -359,6 +359,162 @@ public sealed class OsvClientTests : IDisposable
         var fail = Assert.Single(result[1]);
         Assert.False(fail.IsHydrated);
         Assert.Null(fail.RawJson);
+    }
+
+    // ── TryQueryBatchAsync: an incomplete answer is never a clean one ────────────
+
+    [Fact]
+    public async Task TryQueryBatchAsync_BodyWithoutResults_ReportsUnreached()
+    {
+        // A 200 with no results array answers nothing for any purl. Reported reached, every purl
+        // would read as screened and clean.
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody("{}"));
+
+        var result = await _sut.TryQueryBatchAsync(new[] { "pkg:npm/a@1.0.0", "pkg:npm/b@1.0.0" });
+
+        Assert.False(result.Reached);
+        Assert.Equal(2, result.Results.Count);
+        Assert.All(result.Results, Assert.Empty);
+    }
+
+    [Fact]
+    public async Task TryQueryBatchAsync_BodyWithEmptyResults_IsReached()
+    {
+        // Twin: a results array, even one with empty slots, is a real answer.
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody("""{"results":[{},{}]}"""));
+
+        var result = await _sut.TryQueryBatchAsync(new[] { "pkg:npm/a@1.0.0", "pkg:npm/b@1.0.0" });
+
+        Assert.True(result.Reached);
+        Assert.All(result.Results, Assert.Empty);
+    }
+
+    [Fact]
+    public async Task TryQueryBatchAsync_HydrationTimesOut_LeavesThatIdUnhydratedAndKeepsTheBatch()
+    {
+        // The HttpClient timeout surfaces as a TaskCanceledException while the caller's token is
+        // live. It is a failed hydration of one id, not a cancellation of the whole batch.
+        string batchJson = """
+            {"results":[
+              {"vulns":[{"id":"GHSA-FAST","modified":"2026-01-01T00:00:00Z"}]},
+              {"vulns":[{"id":"GHSA-SLOW","modified":"2026-01-01T00:00:00Z"}]}
+            ]}
+            """;
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-FAST").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"id":"GHSA-FAST","summary":"fast"}"""));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-SLOW").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"id":"GHSA-SLOW","summary":"slow"}""")
+                .WithDelay(TimeSpan.FromSeconds(10)));
+        var sut = new OsvClient(
+            new TimeoutHandlerFactory(_server.Urls[0] + "/", TimeSpan.FromSeconds(2)),
+            NullLogger<OsvClient>.Instance);
+
+        var result = await sut.TryQueryBatchAsync(new[] { "pkg:npm/fast@1.0.0", "pkg:npm/slow@1.0.0" });
+
+        Assert.True(result.Reached);
+        Assert.True(Assert.Single(result.Results[0]).IsHydrated);
+        var slow = Assert.Single(result.Results[1]);
+        Assert.Equal("GHSA-SLOW", slow.Id);
+        Assert.False(slow.IsHydrated);
+    }
+
+    [Fact]
+    public async Task TryQueryBatchAsync_MoreIdsThanTheHydrationCap_ResolvesThePurlThroughTheFullQuery()
+    {
+        // The cap takes the same ids in the same order on every pass, so an overflowing purl would
+        // never resolve by hydration alone. It is re-queried through /query, which returns the
+        // complete hydrated list.
+        var ids = Enumerable.Range(0, 600).Select(i => $"GHSA-cap0-{i:D4}").ToList();
+        string batchJson = JsonSerializer.Serialize(new
+        {
+            results = new[] { new { vulns = ids.Select(id => new { id, modified = "2026-01-01T00:00:00Z" }).ToArray() } },
+        });
+        string fullJson = JsonSerializer.Serialize(new { vulns = ids.Select(id => new { id, summary = "full" }).ToArray() });
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath(new RegexMatcher("^/vulns/.*$")).UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody("""{"id":"GHSA-x","summary":"hydrated"}"""));
+        _server.Given(Request.Create().WithPath("/query").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(fullJson));
+
+        var result = await _sut.TryQueryBatchAsync(new[] { "pkg:pypi/tensorflow@1.0.0" });
+
+        Assert.True(result.Reached);
+        Assert.Equal(600, result.Results[0].Count);
+        Assert.All(result.Results[0], a => Assert.True(a.IsHydrated));
+        Assert.Equal(ids.ToHashSet(), result.Results[0].Select(a => a.Id).ToHashSet());
+    }
+
+    [Fact]
+    public async Task TryQueryBatchAsync_HydrationUnreached_PurlResolvedThroughTheFullQuery()
+    {
+        // GET /vulns/{id} answered 503; the purl's own /query still answers in full.
+        string batchJson = """{"results":[{"vulns":[{"id":"GHSA-5030-0001","modified":"2026-01-01T00:00:00Z"}]}]}""";
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-5030-0001").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.ServiceUnavailable));
+        _server.Given(Request.Create().WithPath("/query").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"vulns":[{"id":"GHSA-5030-0001","summary":"full"}]}"""));
+
+        var result = await _sut.TryQueryBatchAsync(new[] { "pkg:npm/a@1.0.0" });
+
+        var advisory = Assert.Single(result.Results[0]);
+        Assert.True(advisory.IsHydrated);
+        Assert.Equal("full", advisory.Summary);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound)]
+    [InlineData(HttpStatusCode.BadRequest)]
+    public async Task TryQueryBatchAsync_HydrationAnsweredUnknown_DropsTheId(HttpStatusCode status)
+    {
+        // OSV saying it holds no such id (a withdrawn record) is a reached answer: the id is
+        // dropped, exactly as TryGetAdvisoryAsync defines it, rather than deferring the purl forever.
+        string batchJson = """
+            {"results":[{"vulns":[
+              {"id":"GHSA-gone-0001","modified":"2026-01-01T00:00:00Z"},
+              {"id":"GHSA-live-0001","modified":"2026-01-01T00:00:00Z"}
+            ]}]}
+            """;
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-gone-0001").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(status));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-live-0001").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody("""{"id":"GHSA-live-0001"}"""));
+
+        var result = await _sut.TryQueryBatchAsync(new[] { "pkg:npm/a@1.0.0" });
+
+        Assert.True(result.Reached);
+        var live = Assert.Single(result.Results[0]);
+        Assert.Equal("GHSA-live-0001", live.Id);
+        Assert.True(live.IsHydrated);
+    }
+
+    [Fact]
+    public async Task TryQueryBatchAsync_CallerCancelsDuringHydration_Propagates()
+    {
+        // Twin: the caller's own cancellation is not a failed hydration and still stops the call.
+        string batchJson = """{"results":[{"vulns":[{"id":"GHSA-SLOW","modified":"2026-01-01T00:00:00Z"}]}]}""";
+        _server.Given(Request.Create().WithPath("/querybatch").UsingPost())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK).WithBody(batchJson));
+        _server.Given(Request.Create().WithPath("/vulns/GHSA-SLOW").UsingGet())
+            .RespondWith(Response.Create().WithStatusCode(HttpStatusCode.OK)
+                .WithBody("""{"id":"GHSA-SLOW"}""")
+                .WithDelay(TimeSpan.FromSeconds(10)));
+        // now-ok: the cancellation has to land while a real HTTP request is in flight.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => _sut.TryQueryBatchAsync(new[] { "pkg:npm/slow@1.0.0" }, cts.Token));
     }
 
     // ── Retry behaviour ────────────────────────────────────────────────────────
@@ -527,6 +683,15 @@ public sealed class OsvClientTests : IDisposable
         private readonly HttpClient _client;
         public SingleHandlerFactory(string baseUrl) =>
             _client = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        public HttpClient CreateClient(string name) => _client;
+    }
+
+    /// <summary>IHttpClientFactory whose client gives up after a timeout, as the registered "osv" client does.</summary>
+    private sealed class TimeoutHandlerFactory : IHttpClientFactory
+    {
+        private readonly HttpClient _client;
+        public TimeoutHandlerFactory(string baseUrl, TimeSpan timeout) =>
+            _client = new HttpClient { BaseAddress = new Uri(baseUrl), Timeout = timeout };
         public HttpClient CreateClient(string name) => _client;
     }
 

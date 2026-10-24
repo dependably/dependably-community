@@ -44,6 +44,8 @@ public sealed class OrgController : OrgScopedControllerBase
     private readonly CacheArtifactRepository _cacheArtifacts;
     private readonly TenantArtifactAccessRepository _tenantAccess;
     private readonly TimeProvider _time;
+    private readonly Dependably.Infrastructure.OciScan.IOciScanCoverage? _ociCoverage;
+    private readonly Dependably.Infrastructure.OciScan.OciScanRepository? _ociScans;
 
     public OrgController(OrgControllerServices svc)
     {
@@ -66,6 +68,8 @@ public sealed class OrgController : OrgScopedControllerBase
         _cacheArtifacts = svc.CacheArtifacts;
         _tenantAccess = svc.TenantAccess;
         _time = svc.Time;
+        _ociCoverage = svc.OciCoverage;
+        _ociScans = svc.OciScans;
     }
 
     // Org CRUD lives on SystemController (/api/v1/system/tenants). Tenant users have no
@@ -105,9 +109,39 @@ public sealed class OrgController : OrgScopedControllerBase
 
         var (items, total) = await _packages.ListPaginatedAsync(
             new PackageListQuery(orgId, limit, offset, ecosystem, search, sortBy, sortDir), ct);
+        await AttachOciScanRollupsAsync(orgId, items, ct);
         var settings = await _orgs.GetSettingsAsync(orgId, ct);
         string versionOverwritePolicy = settings?.VersionOverwritePolicy ?? "block";
         return Ok(new { items, total, limit, offset, versionOverwritePolicy });
+    }
+
+    // An OCI package's findings live in this org's own scan results, not in package_version_vulns,
+    // which a proxied image never gets. The page's OCI packages get the worst scan state across
+    // the images the org holds, from the same facts and coverage the version page reads.
+    private async Task AttachOciScanRollupsAsync(
+        string orgId, IReadOnlyList<Package> items, CancellationToken ct)
+    {
+        var oci = items.Where(p => p.Ecosystem == "oci").ToList();
+        if (oci.Count == 0)
+        {
+            return;
+        }
+
+        bool live = _ociCoverage is { Enabled: true } && _ociScans is not null;
+        bool covered = live && await _ociCoverage!.IsCoveredAsync(orgId, ct);
+        var held = live
+            ? await _ociScans!.GetHeldImageFactsAsync(orgId, oci.Select(p => p.Id).ToList(), ct)
+            : null;
+        foreach (var pkg in oci)
+        {
+            var images = new List<Dependably.Infrastructure.OciScan.OciScanFacts?>();
+            if (held is not null && held.TryGetValue(pkg.Id, out var facts))
+            {
+                images.AddRange(facts);
+            }
+
+            pkg.OciScan = Dependably.Infrastructure.OciScan.OciScanProjection.RollUp(images, covered);
+        }
     }
 
     /// <summary>GET /api/v1/orgs/{org}/packages/{ecosystem}/{name}</summary>
@@ -127,6 +161,22 @@ public sealed class OrgController : OrgScopedControllerBase
         if (pkg is null)
         {
             return NotFound();
+        }
+
+        // The identity query above carries no aggregates, so a package that has only proxied
+        // versions (no package_versions rows) would otherwise serialize zero counts beside a
+        // non-empty versions list. Take them from the projection the packages list uses.
+        var aggregates = await _packages.GetWithAggregatesAsync(orgId, pkg.Id, ct);
+        if (aggregates is not null)
+        {
+            pkg.VersionCount = aggregates.VersionCount;
+            pkg.TotalDownloads = aggregates.TotalDownloads;
+            pkg.CriticalCount = aggregates.CriticalCount;
+            pkg.HighCount = aggregates.HighCount;
+            pkg.MediumCount = aggregates.MediumCount;
+            pkg.LowCount = aggregates.LowCount;
+            pkg.HasMaliciousVersion = aggregates.HasMaliciousVersion;
+            pkg.HasKevVersion = aggregates.HasKevVersion;
         }
 
         var versions = await LoadCombinedVersionsForOrgAsync(orgId, pkg.Id, ecosystem, AsPurlName(ecosystem, name), ct);
@@ -164,9 +214,16 @@ public sealed class OrgController : OrgScopedControllerBase
         // and pass through unchanged.
         var filesByVersion = await _versionFiles.GetByPackageAsync(pkg.Id, ct);
 
+        var ociScan = ecosystem == "oci"
+            ? await LoadOciScanStateAsync(orgId, versions.Select(v => v.Id).ToList(), ct) with
+            {
+                ScoreEnforced = settings?.OciScanEnforcement == "block",
+            }
+            : null;
+
         var viewContext = new PackageVersionViewContext(
             ecosystem, pkg.Name, scoreMap, tolerance, blockDeprecatedMode,
-            uploadedLicenses, proxyLicenses, ociTagsByDigest, symbolFacts);
+            uploadedLicenses, proxyLicenses, ociTagsByDigest, symbolFacts, ociScan);
         var versionsWithLicenses = versions.SelectMany(v =>
             ExpandToFiles(v, filesByVersion).Select(file => ProjectVersionView(v, file, viewContext)));
         return Ok(new { package = pkg, versions = versionsWithLicenses });
@@ -213,7 +270,26 @@ public sealed class OrgController : OrgScopedControllerBase
         ILookup<string, string> UploadedLicenses,
         ILookup<string, string> ProxyLicenses,
         ILookup<string, string>? OciTagsByDigest,
-        SymbolFacts? SymbolFacts);
+        SymbolFacts? SymbolFacts,
+        OciScanState? OciScan);
+
+    /// <summary>
+    /// This org's view of its OCI images: whether its scanner is live, the scan facts of each
+    /// image it has a result for, and whether its pulls are refused on those facts
+    /// (<c>oci_scan_enforcement = block</c>). Null outside OCI.
+    /// </summary>
+    private sealed record OciScanState(
+        bool Covered, IReadOnlyDictionary<string, Dependably.Infrastructure.OciScan.OciScanFacts> Facts,
+        bool ScoreEnforced = false);
+
+    private async Task<OciScanState> LoadOciScanStateAsync(string orgId, List<string> versionIds, CancellationToken ct)
+    {
+        return _ociCoverage is null || _ociScans is null || !_ociCoverage.Enabled
+            ? new OciScanState(false, new Dictionary<string, Dependably.Infrastructure.OciScan.OciScanFacts>())
+            : new OciScanState(
+                await _ociCoverage.IsCoveredAsync(orgId, ct),
+                await _ociScans.GetFactsAsync(orgId, versionIds, ct));
+    }
 
     // Merges per-version OSV scores from uploaded versions (keyed by package_version_id) and proxy
     // versions (keyed by cache_artifact_id) into a single id → max-CVSS map.
@@ -248,8 +324,26 @@ public sealed class OrgController : OrgScopedControllerBase
         PackageVersionViewContext ctx)
     {
         bool hasMax = ctx.ScoreMap.TryGetValue(v.Id, out double maxScore);
-        string status = ComputeVersionStatus(
-            v, ctx.Ecosystem, hasMax ? maxScore : (double?)null, ctx.Tolerance, ctx.BlockDeprecatedMode);
+        string status;
+        string? matchedAt = null;
+        Dependably.Infrastructure.OciScan.OciScanView? ociScanView = null;
+        if (ctx.OciScan is { } oci)
+        {
+            // An OCI image's status comes from this org's own scan of it, never from the version
+            // row: a proxied image's row is shared by every tenant that pulled it.
+            var facts = oci.Facts.GetValueOrDefault(v.Id);
+            matchedAt = facts?.MatchedAt;
+            hasMax = facts?.MaxScore is not null;
+            maxScore = facts?.MaxScore ?? 0;
+            status = PackageVersionStatus.ComputeOciVersionStatus(
+                v, facts, oci.Covered, ctx.Tolerance, ctx.BlockDeprecatedMode, oci.ScoreEnforced);
+            ociScanView = Dependably.Infrastructure.OciScan.OciScanProjection.Project(facts, oci.Covered);
+        }
+        else
+        {
+            status = PackageVersionStatus.ComputeVersionStatus(
+                v, ctx.Ecosystem, hasMax ? maxScore : (double?)null, ctx.Tolerance, ctx.BlockDeprecatedMode);
+        }
         string? redactedUpstreamUrl = UpstreamUrlValidator.StripCredentials(v.UpstreamUrl);
         return new
         {
@@ -293,6 +387,10 @@ public sealed class OrgController : OrgScopedControllerBase
             v.ProvenanceSigner,
             MaxOsvScore = hasMax ? maxScore : (double?)null,
             Status = status,
+            // OCI only: when this org's stored scan of the image was last matched against OSV,
+            // the oldest across its platforms. A stale match leaves the status as stored.
+            MatchedAt = matchedAt,
+            OciScan = ociScanView,
             Licenses = (v.Origin == "proxy" ? ctx.ProxyLicenses[v.Id] : ctx.UploadedLicenses[v.Id]).ToArray(),
             Tags = ctx.OciTagsByDigest != null && ctx.OciTagsByDigest.Contains(v.Version)
                 ? ctx.OciTagsByDigest[v.Version].ToArray()
@@ -324,48 +422,8 @@ public sealed class OrgController : OrgScopedControllerBase
     private async Task<IReadOnlyList<PackageVersion>> LoadCombinedVersionsForOrgAsync(
         string orgId, string packageId, string ecosystem, string purlName, CancellationToken ct)
     {
-        var versions = await _inventory.ListServeableVersionsAsync(orgId, packageId, ecosystem, purlName, ct);
+        var versions = await _inventory.ListServeableVersionsAsync(orgId, packageId, ecosystem, purlName, ct: ct);
         return ArtifactInventoryRepository.CollapseSidecarProxyRows(ecosystem, versions);
-    }
-
-    private static string ComputeVersionStatus(
-        PackageVersion v, string ecosystem, double? maxScore, double tolerance, string blockDeprecatedMode = "off")
-    {
-        if (v.ManualBlockState == "blocked")
-        {
-            return "blocked";
-        }
-        // Only block_all denies an already-cached deprecated version; under block_new the cached
-        // version keeps serving, so it surfaces as "deprecated" below. Legacy 'block' == block_all.
-        if (v.Deprecated is not null && blockDeprecatedMode is "block_all" or "block")
-        {
-            return "blocked";
-        }
-
-        bool autoBlocked = v.VulnCheckedAt is not null && maxScore.HasValue && maxScore.Value > tolerance;
-        return (v.ManualBlockState, autoBlocked) switch
-        {
-            // Manual allow over an advisory the gate would otherwise auto-block.
-            ("allowed", true) => "allowed",
-            // Any non-allowed version above tolerance is auto-blocked.
-            (_, true) => "blocked",
-            _ when v.Deprecated is not null => "deprecated",
-            // OSV publishes no feed this ecosystem's artefacts could match, so neither a stamped
-            // nor an absent vuln_checked_at says anything about them: an empty advisory list is
-            // the only answer a lookup can return. Reported as its own state so the absence of
-            // coverage is visible instead of reading as a clean screening — "nothing to scan
-            // against" and "not scanned yet" call for different operator action. Conditioned on
-            // HasAdvisory so a row that did acquire advisory links keeps its vulnerable label.
-            _ when !v.HasAdvisory && !OsvFeedCoverage.HasAdvisoryFeed(ecosystem)
-                => OsvFeedCoverage.NoFeedStatus,
-            _ when v.VulnCheckedAt is null => "unscanned",
-            // Scanned and servable, but carries at least one advisory below the block
-            // tolerance (or an unscored/MAL advisory the score aggregate never saw). Reported
-            // distinctly so it is never labelled "clean" — only an advisory-free scanned
-            // version earns that label.
-            _ when v.HasAdvisory => "vulnerable",
-            _ => "clean",
-        };
     }
 
     /// <summary>DELETE /api/v1/orgs/{org}/packages/{ecosystem}/{name}/{version}</summary>
@@ -409,7 +467,7 @@ public sealed class OrgController : OrgScopedControllerBase
             return NotFound();
         }
 
-        var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
+        var ver = await _packages.ResolveHostedVersionAsync(pkg.Id, ecosystem, version, ct);
         if (ver is null)
         {
             // Proxy/cache-plane versions have no package_versions row — see DownloadVersion's
@@ -432,7 +490,7 @@ public sealed class OrgController : OrgScopedControllerBase
             // every other repository's image and strand the sidecars.
             await _packages.DeleteVersionAsync(ver.Id, ct);
             string? uploadedManifestBlob = await _packages.ReleaseOciDigestClaimAsync(
-                orgId, pkg.PurlName, version, ct);
+                orgId, pkg.PurlName, ver.Version, ct);
             if (uploadedManifestBlob is not null)
             {
                 await _orphanBlobs.DeleteIfUnreferencedAsync(uploadedManifestBlob, ct);
@@ -461,7 +519,7 @@ public sealed class OrgController : OrgScopedControllerBase
         // Atomic NOT EXISTS guard handles the race against a concurrent publish.
         await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);
 
-        EvictProtocolMetadataCache(orgId, ecosystem, pkg, version);
+        ProtocolMetadataEviction.Evict(_invalidation, orgId, ecosystem, pkg, ver.Version);
 
         // Activity is the right sink for a per-version operator action — audit_log is for
         // tenant-level config/security events. Never dual-write the same event to both.
@@ -507,8 +565,8 @@ public sealed class OrgController : OrgScopedControllerBase
         string orgId, string ecosystem, Package pkg, string version, CancellationToken ct)
     {
         var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, pkg.PurlName, ct);
-        var facts = proxyEntries.FirstOrDefault(
-            e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase));
+        var facts = proxyEntries.FirstOrDefault(e => e.Version == version)
+            ?? proxyEntries.FirstOrDefault(e => VersionIdentity.Equal(ecosystem, e.Version, version));
         if (facts is null)
         {
             return NotFound();
@@ -570,7 +628,7 @@ public sealed class OrgController : OrgScopedControllerBase
 
         await _packages.DeletePackageIfEmptyAsync(pkg.Id, ct);
 
-        EvictProtocolMetadataCache(orgId, ecosystem, pkg, version);
+        ProtocolMetadataEviction.Evict(_invalidation, orgId, ecosystem, pkg, version);
 
         if (facts.Purl is not null)
         {
@@ -579,48 +637,6 @@ public sealed class OrgController : OrgScopedControllerBase
         }
 
         return NoContent();
-    }
-
-    /// <summary>
-    /// Invalidates any cached metadata for <paramref name="pkg"/> so a just-deleted version stops
-    /// being served from cache. Shared by both <see cref="DeleteVersion"/> branches (hosted and
-    /// cache-plane) so eviction never drifts between the two delete paths, and routed through
-    /// <see cref="MetadataInvalidationCoordinator"/> so it expands the identical variant matrix
-    /// the protocol-plane publish paths use — and reaches peer replicas the same way.
-    /// </summary>
-    private void EvictProtocolMetadataCache(string orgId, string ecosystem, Package pkg, string version)
-    {
-        var invalidation = ecosystem switch
-        {
-            "npm" => MetadataInvalidation.ForNpm(orgId, pkg.PurlName),
-            "pypi" => MetadataInvalidation.ForPyPi(orgId, pkg.PurlName),
-            "nuget" => MetadataInvalidation.ForNuGet(orgId, pkg.PurlName),
-            // Maven package rows carry "groupId:artifactId" as their PURL name; a deleted
-            // SNAPSHOT also changes the version-level build-list document.
-            "maven" => MavenInvalidation(orgId, pkg.PurlName, version),
-            "rpm" => MetadataInvalidation.ForRpm(orgId),
-            _ => null,
-        };
-
-        if (invalidation is not null)
-        {
-            _invalidation.Invalidate(invalidation);
-        }
-    }
-
-    // Splits a Maven package row's "groupId:artifactId" PURL name back into its coordinates.
-    // Returns null for a malformed name rather than inventing an empty groupId.
-    private static MetadataInvalidation? MavenInvalidation(string orgId, string purlName, string version)
-    {
-        int separator = purlName.IndexOf(':', StringComparison.Ordinal);
-        if (separator <= 0 || separator == purlName.Length - 1)
-        {
-            return null;
-        }
-
-        bool isSnapshot = version.EndsWith("-SNAPSHOT", StringComparison.Ordinal);
-        return MetadataInvalidation.ForMaven(
-            orgId, purlName[..separator], purlName[(separator + 1)..], isSnapshot ? version : null);
     }
 
     /// <summary>GET /api/v1/packages/{ecosystem}/{name}/{version}/download — stream one artifact to the UI</summary>
@@ -646,7 +662,7 @@ public sealed class OrgController : OrgScopedControllerBase
             return NotFound();
         }
 
-        var ver = await _packages.GetVersionAsync(pkg.Id, version, ct);
+        var ver = await _packages.ResolveHostedVersionAsync(pkg.Id, ecosystem, version, ct);
         // Hosted versions still have a package_versions row; a proxy version that has aged out of
         // it falls back to the global-plane cache_artifact lookup.
         return ver is not null
@@ -699,9 +715,14 @@ public sealed class OrgController : OrgScopedControllerBase
         string orgId, string ecosystem, string name, string version, string? file, CancellationToken ct)
     {
         var proxyEntries = await _cacheArtifacts.ListServeFactsForNameAsync(orgId, ecosystem, AsPurlName(ecosystem, name), ct);
-        var facts = proxyEntries.FirstOrDefault(
-            e => string.Equals(e.Version, version, StringComparison.OrdinalIgnoreCase)
-                 && (string.IsNullOrEmpty(file) || string.Equals(e.Filename, file, StringComparison.OrdinalIgnoreCase)));
+        bool FileMatches(CacheArtifactIndexFacts e) =>
+            string.IsNullOrEmpty(file) || string.Equals(e.Filename, file, StringComparison.OrdinalIgnoreCase);
+
+        // The exact version string wins: two spellings of one PyPI release can be separate rows,
+        // and an action on one must not reach the other. A spelling with no exact row still
+        // resolves through the ecosystem's version identity.
+        var facts = proxyEntries.FirstOrDefault(e => e.Version == version && FileMatches(e))
+            ?? proxyEntries.FirstOrDefault(e => VersionIdentity.Equal(ecosystem, e.Version, version) && FileMatches(e));
         if (facts is null)
         {
             return NotFound();
@@ -869,7 +890,7 @@ public sealed class OrgController : OrgScopedControllerBase
     // that's the form package rows are stored under (PurlNormalizer.PyPiName, applied
     // by every PyPI publish/lookup path) — without it, a non-canonical spelling here
     // resolves to a different (or no) package row than the one a publish matches.
-    private static string AsPurlName(string ecosystem, string name)
+    internal static string AsPurlName(string ecosystem, string name)
     {
         string decoded = NpmRouteHelper.DecodeRouteName(name);
         return ecosystem == "pypi" ? PurlNormalizer.PyPiName(decoded) : decoded;

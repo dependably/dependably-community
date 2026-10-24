@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using Dependably.Api.NuGetProtocol;
 using Dependably.Infrastructure.Observability;
 using Dependably.Infrastructure.Redis;
 using Dependably.Infrastructure.RowLevelSecurity;
@@ -11,25 +12,43 @@ namespace Dependably.Infrastructure;
 /// Background service that refreshes upstream metadata for proxy-cached package versions. Runs on
 /// a cron schedule (<c>DEPRECATION_REFRESH_SCHEDULE</c> env var, default daily at 5am UTC).
 ///
-/// Deprecation is refreshed for npm and PyPI only — they expose a per-version deprecation/yank
-/// signal in a single metadata endpoint; NuGet, Maven, RPM, and OCI do not. For each stale
-/// npm/PyPI package, fetches the upstream packument (npm) or project JSON (PyPI) and updates
-/// <c>deprecated</c>/<c>deprecation_checked_at</c> for every version row under that package.
+/// The refreshed ecosystems are <see cref="DeprecationRefreshEcosystems.All"/>. Deprecation is
+/// refreshed for npm, PyPI, Hex and NuGet — they expose a per-version deprecation, yank,
+/// retirement or listing signal in one metadata resource; Maven, RPM, and OCI do not. For each
+/// stale package, fetches the upstream packument (npm), project JSON (PyPI), signed package
+/// resource (Hex, read only from an upstream with a configured public key) or registration index
+/// (NuGet) and updates <c>deprecated</c>/<c>deprecation_checked_at</c> for every version row under
+/// that package. NuGet's verdict is its listing state, read from each version's registration leaf
+/// with the parser the first fetch uses (<see cref="NuGetUpstreamListingFetcher"/>):
+/// an unlisted version is marked "Unlisted upstream" and a relisted one is cleared. A NuGet version
+/// the answered index does not carry a leaf for gets no verdict that pass. Maven rows keep
+/// whatever their first fetch recorded, because this pass reads no deprecation signal for them.
 ///
-/// Upstream-latest is refreshed for npm, PyPI, NuGet, and Maven: the same npm/PyPI fetch yields
-/// <c>dist-tags.latest</c>/<c>info.version</c>, while NuGet/Maven resolve their latest-stable
-/// release via <see cref="Protocol.IUpstreamLatestVersionResolver"/>. The result is written to
+/// Only a live 2xx upstream answer is a verdict. A body the metadata cache serves past its TTL
+/// because the upstream failed (<see cref="UpstreamMetadataResponse.IsStale"/>) is no answer from
+/// that source, so the next source is asked: it is the last answer the upstream gave, which can
+/// predate the deprecation, yank, unlisting or retirement the group records. The request-serving
+/// path still relays stale bodies; only this pass declines to read them. When no configured source
+/// gives a live answer — every source answers non-2xx (503, 429, 401/403, or 404 for a package no
+/// source lists) or is served stale, or a Hex resource cannot be verified — the group records nothing: its <c>deprecated</c>, upstream-latest and
+/// <c>versions_behind</c> facts stay as recorded and only this org's queue stamps move, so an
+/// upstream outage never unblocks a version held under <c>block_deprecated=block_all</c>.
+///
+/// Upstream-latest is refreshed for npm, PyPI, NuGet, Maven and Hex: the same npm/PyPI/Hex fetch
+/// yields the latest release, while NuGet/Maven resolve their latest-stable release via
+/// <see cref="Protocol.IUpstreamLatestVersionResolver"/>. The result is written to
 /// <c>packages.upstream_latest_version</c>, which drives the packages-list "Latest" indicator and
 /// the package-detail "behind upstream" banner. Newly-proxied packages get their baseline
 /// immediately from the first-fetch recorder, so this pass keeps the baseline current rather than
 /// establishing it.
 ///
-/// The same per-name upstream fetch also yields the full STABLE version set for all four
-/// ecosystems (<see cref="Protocol.UpstreamLatestVersion.StableVersionsDescending"/>), which is
+/// The same per-name upstream fetch also yields the full STABLE version set for every refreshed
+/// ecosystem (<see cref="Protocol.UpstreamLatestVersion.StableVersionsDescending"/>), which is
 /// recomputed into a per-version <c>versions_behind</c> operational-risk count on every
 /// <c>cache_artifact</c> row for the group each pass, and mirrored onto any hosted
 /// (<c>origin='uploaded'</c>) <c>package_versions</c> rows sharing the same package. NULL means
-/// unknown (never 0) — an unreachable/unresolvable upstream this pass, not "up to date".
+/// unknown (never 0) — an answer that enumerates no version set to count against, not "up to
+/// date". A pass with no upstream answer leaves the recorded count as it is.
 ///
 /// The pass enumerates the stale <c>cache_artifact</c> groups first, then a second set of
 /// HOSTED-ONLY groups: packages that were once proxied — hence carry a seeded
@@ -38,6 +57,11 @@ namespace Dependably.Infrastructure;
 /// without this second pass their <c>upstream_latest_version</c> and hosted <c>versions_behind</c>
 /// would freeze at eviction time. A purely-internal name that was never proxied has a NULL
 /// <c>upstream_latest_checked_at</c> and is deliberately never fetched.
+///
+/// A group whose name its org has reserved (<see cref="ReservedNamespaceService.IsUpstreamNameReservedAsync"/>)
+/// is never fetched, whichever ecosystem it is in: no upstream request is made for it, and the
+/// shared <c>cache_artifact</c> rows keep the upstream facts an org that does consult upstream
+/// recorded.
 ///
 /// Both group-enumeration queries — <see cref="CacheArtifactRepository.ListGroupsNeedingDeprecationRefreshAsync"/>
 /// and <see cref="PackageRepository.ListHostedGroupsNeedingUpstreamRefreshAsync"/> — carry an
@@ -54,6 +78,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     private readonly UpstreamClient _upstream;
     private readonly IUpstreamLatestVersionResolver _latestResolver;
     private readonly UpstreamRegistryResolver _registries;
+    private readonly ReservedNamespaceService _reservedNamespaces;
+    private readonly Hex.HexReleaseRepository _hexReleases;
     private readonly Protocol.Hex.HexMasterKeyResolver? _hexMasterKeys;
     private readonly IAirGapMode _airGap;
     private readonly IConfiguration _config;
@@ -83,6 +109,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         ILogger<DeprecationRefreshService> logger,
         TimeProvider time,
         IDistributedLock locks,
+        ReservedNamespaceService reservedNamespaces,
+        Hex.HexReleaseRepository hexReleases,
         Protocol.Hex.HexMasterKeyResolver? hexMasterKeys = null)
         : base(config, logger, time, locks)
     {
@@ -92,6 +120,8 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         _upstream = upstream;
         _latestResolver = latestResolver;
         _registries = registries;
+        _reservedNamespaces = reservedNamespaces;
+        _hexReleases = hexReleases;
         _airGap = airGap;
         _hexMasterKeys = hexMasterKeys;
         _config = config;
@@ -198,6 +228,12 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     /// hosted rows. Serves both the cache-plane groups and the hosted-only groups (a package with
     /// no <c>cache_artifact</c> row) — for the latter the cache-version list is simply empty, so
     /// only the packages row and hosted versions are updated.
+    ///
+    /// Every settled outcome ends by stamping this org's <c>tenant_artifact_access.refresh_checked_at</c>
+    /// for the name, the per-org stamp the cache-plane enumeration selects on. The shared
+    /// <c>cache_artifact</c> rows are stamped only where upstream gave a verdict, and those stamps
+    /// do not schedule anything, so processing one org's group never makes another org's group for
+    /// the same name read as fresh.
     /// </summary>
     private async Task<(int Checked, int Updated)> ProcessGroupAsync(
         (string Ecosystem, string Name, string OrgId) group,
@@ -210,6 +246,14 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             return (0, 0);
         }
 
+        // An org with proxy passthrough off (or air-gapped) sends nothing upstream, whatever
+        // upstream rows it kept. The enumerations already exclude such orgs; this re-reads the
+        // setting so a flip between enumeration and processing is honoured too.
+        if (!await _cacheArtifacts.IsUpstreamAccessAllowedForOrgAsync(orgId, ct))
+        {
+            return (0, 0);
+        }
+
         // Resolving the org's configured upstream sources decrypts every authenticated row's
         // stored secret (EnvelopeProtector.Unprotect), which throws on a missing/rotated master
         // key. That resolve — and the zero-rows "proxying deliberately disabled" check that
@@ -217,34 +261,67 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         // this one org lands in the same catch as any other upstream-fetch failure rather than
         // escaping ProcessGroupAsync uncaught and failing the whole refresh pass for every
         // other org.
-        Dictionary<string, string?> upstreamDeprecated;
+        Dictionary<string, string?>? upstreamDeprecated;
         UpstreamLatestVersion upstreamLatest;
+        IReadOnlyDictionary<string, Protocol.Hex.HexRetirementStatus>? hexRetirements = null;
         try
         {
-            var sources = await _registries.ResolveAsync(orgId, ecosystem, ct);
-
-            // Zero configured upstream sources for this (org, ecosystem) means proxying is
-            // deliberately disabled — the empty=disabled contract UpstreamRegistryResolver
-            // documents. Skip the fetch entirely rather than resolving an ambiguous "no data"
-            // that would overwrite the recorded deprecation/upstream-latest state: yielding the
-            // slot (touch-only, no write) means a later re-enable resumes cleanly instead of the
-            // pass having read a disabled ecosystem as "unknown" upstream.
-            if (sources.Count == 0)
+            // A name this org has reserved is never looked up upstream. Decided before the
+            // per-ecosystem fetch because npm, PyPI and Hex fetch their metadata directly rather
+            // than through the resolver, so the resolver's own gate does not reach them; the
+            // Reserved result is settled below like one the resolver returned.
+            if (await _reservedNamespaces.IsUpstreamNameReservedAsync(orgId, ecosystem, name, ct))
             {
-                _logger.LogInformation(
-                    "Deprecation refresh skipped for {Ecosystem}/{Package}: no upstream configured for this org.",
-                    ecosystem, name);
-                await YieldGroupSlotAsync(ecosystem, name, orgId, ct);
-                return (0, 0);
+                upstreamDeprecated = new Dictionary<string, string?>();
+                upstreamLatest = UpstreamLatestVersion.Reserved;
             }
+            else
+            {
+                var sources = await _registries.ResolveAsync(orgId, ecosystem, ct);
 
-            (upstreamDeprecated, upstreamLatest) = await FetchUpstreamMetadataAsync(ecosystem, orgId, name, sources, ct);
+                // Zero configured upstream sources for this (org, ecosystem) means proxying is
+                // deliberately disabled — the empty=disabled contract UpstreamRegistryResolver
+                // documents. Skip the fetch entirely rather than resolving an ambiguous "no data"
+                // that would overwrite the recorded deprecation/upstream-latest state: yielding the
+                // slot (touch-only, no write) means a later re-enable resumes cleanly instead of the
+                // pass having read a disabled ecosystem as "unknown" upstream.
+                if (sources.Count == 0)
+                {
+                    _logger.LogInformation(
+                        "Deprecation refresh skipped for {Ecosystem}/{Package}: no upstream configured for this org.",
+                        ecosystem, name);
+                    await YieldGroupSlotAsync(ecosystem, name, orgId, ct);
+                    return (0, 0);
+                }
+
+                (upstreamDeprecated, upstreamLatest, hexRetirements) =
+                    await FetchUpstreamMetadataAsync(ecosystem, orgId, name, sources, ct);
+            }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
                 "Failed to fetch upstream deprecation metadata for {Ecosystem}/{Package}: {ExceptionType}",
                 ecosystem, name, ex.GetType().Name);
+            await YieldGroupSlotAsync(ecosystem, name, orgId, ct);
+            return (0, 0);
+        }
+
+        if (upstreamLatest.IsReserved)
+        {
+            await ClearReservedGroupAsync(ecosystem, name, orgId, ct);
+            return (0, 0);
+        }
+
+        // No upstream answer: no source returned a 2xx (every one answered 503, 429, 401/403 or
+        // 404), or, for Hex, no source yielded a verified resource. Nothing is recorded, so a
+        // deprecation or retirement read earlier from a real answer is not cleared, and the
+        // upstream-latest and versions-behind facts are not nulled, by a pass that got none.
+        if (upstreamDeprecated is null)
+        {
+            _logger.LogInformation(
+                "Deprecation refresh recorded nothing for {Ecosystem}/{Package}: no upstream source gave an answer.",
+                ecosystem, name);
             await YieldGroupSlotAsync(ecosystem, name, orgId, ct);
             return (0, 0);
         }
@@ -262,6 +339,11 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         var (checked_, updated, newlyRevoked) = await ProcessVersionsAsync(
             ecosystem, versions, upstreamDeprecated, upstreamLatest.StableVersionsDescending, ct);
 
+        if (hexRetirements is not null)
+        {
+            await ApplyHexRetirementsAsync(versions, hexRetirements, ct);
+        }
+
         // Mirror the versions-behind count onto any hosted (origin='uploaded') package_versions
         // rows under the same package — a private override of an otherwise-proxied name still
         // benefits from knowing how far behind upstream it sits. Uses the same stable-versions
@@ -271,6 +353,13 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
             await UpdateHostedVersionsBehindAsync(pkg.Id, ecosystem, upstreamLatest.StableVersionsDescending, ct);
         }
 
+        // A pass cancelled part-way through the version list leaves the group unstamped so the
+        // next pass re-selects it and reaches the versions this one skipped.
+        if (!ct.IsCancellationRequested)
+        {
+            await _cacheArtifacts.StampRefreshCheckedAtForOrgAsync(orgId, ecosystem, name, _time, ct);
+        }
+
         await LogRevokedActivitiesAsync(orgId, ecosystem, name, newlyRevoked, ct);
         await LogRefreshSummaryAsync(orgId, ecosystem, name, checked_, updated, ct);
 
@@ -278,28 +367,54 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     }
 
     /// <summary>
-    /// Marks a group as attempted after its upstream fetch threw, so it moves to the back of the
-    /// refresh queue instead of holding the head of it.
+    /// Marks a group as attempted after its upstream fetch threw or no configured source gave an
+    /// answer, or when the org has no upstream configured for the ecosystem, so it moves to the
+    /// back of the refresh queue instead of holding the head of it.
     ///
-    /// Both enumerations that feed this pass order by their staleness column ascending and take a
-    /// fixed batch — <c>ListGroupsNeedingDeprecationRefreshAsync</c> by
-    /// <c>MIN(cache_artifact.deprecation_checked_at)</c> (NULLs first), and
+    /// Both enumerations that feed this pass order by a per-org staleness stamp, never-processed
+    /// first, and take a fixed batch — <c>ListGroupsNeedingDeprecationRefreshAsync</c> by
+    /// <c>tenant_artifact_access.refresh_checked_at</c>, and
     /// <c>ListHostedGroupsNeedingUpstreamRefreshAsync</c> by <c>packages.upstream_latest_checked_at</c>.
-    /// A group whose fetch throws every pass is therefore re-selected first every pass, and once
-    /// batch-many such groups exist no other group is ever reached again.
+    /// A group whose fetch throws every pass would otherwise be re-selected first every pass, and
+    /// once batch-many such groups exist no other group is ever reached again.
     ///
-    /// Only the attempt timestamps move. The deprecation verdict and the recorded upstream-latest
-    /// are left untouched — the fetch produced neither, and writing a null for either would turn a
-    /// transient upstream outage into erased state.
+    /// Only this org's attempt timestamps move. The shared <c>cache_artifact</c> rows are not
+    /// written: their <c>deprecation_checked_at</c> records when upstream last gave a verdict, and
+    /// another org caching the same name keeps its own place in the queue. The deprecation verdict
+    /// and the recorded upstream-latest are left untouched — the fetch produced neither, and
+    /// writing a null for either would turn a transient upstream outage into erased state.
     /// </summary>
     private async Task YieldGroupSlotAsync(string ecosystem, string name, string orgId, CancellationToken ct)
     {
-        await _cacheArtifacts.TouchDeprecationCheckedAtForNameAsync(ecosystem, name, _time, ct);
+        await _cacheArtifacts.StampRefreshCheckedAtForOrgAsync(orgId, ecosystem, name, _time, ct);
 
         var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, name, ct);
         if (pkg is not null)
         {
             await _packages.TouchUpstreamLatestCheckedAtAsync(pkg.Id, ct);
+        }
+    }
+
+    /// <summary>
+    /// Settles a group whose name this org has reserved: upstream was not consulted, so no
+    /// upstream fact is recorded and no version is marked deprecated or revoked. The org's own
+    /// packages row and hosted versions read as having no known upstream latest (a baseline
+    /// recorded before the reservation would otherwise keep reporting an upstream answer for a
+    /// reserved name). The <c>cache_artifact</c> rows are shared with every org that caches the
+    /// name, so they are not written at all: their deprecation verdict, its timestamp, and their
+    /// versions-behind counts stay whatever an org that does consult upstream last recorded. Only
+    /// this org's per-org refresh stamp moves, which keeps the group from holding the head of the
+    /// refresh queue without making another org's group for the name read as fresh.
+    /// </summary>
+    private async Task ClearReservedGroupAsync(string ecosystem, string name, string orgId, CancellationToken ct)
+    {
+        await _cacheArtifacts.StampRefreshCheckedAtForOrgAsync(orgId, ecosystem, name, _time, ct);
+
+        var pkg = await _packages.GetByPurlNameAsync(orgId, ecosystem, name, ct);
+        if (pkg is not null)
+        {
+            await _packages.UpdateUpstreamLatestAsync(pkg.Id, null, null, ct);
+            await UpdateHostedVersionsBehindAsync(pkg.Id, ecosystem, null, ct);
         }
     }
 
@@ -338,10 +453,22 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
 
         // Revocation detection runs only for ecosystems whose upstream metadata enumerates the
         // full per-version set (npm `versions`, PyPI `releases`) AND only when that fetch returned
-        // a non-empty set. An empty set means a 404 / transient outage / whole-package removal (or
-        // a NuGet/Maven group, which carries no per-version metadata) — never a per-version removal,
-        // so it must not produce a false revocation.
+        // a non-empty set. An empty set means an answer listing no versions, such as a
+        // whole-package removal (or a Maven group, which carries no per-version metadata) — never
+        // a per-version removal, so it must not produce a false revocation. A pass with no answer
+        // at all never reaches here. NuGet never unpublishes a version, and its listing map can
+        // lack a version only because a page was not read, so it never revokes either.
         bool detectRevocations = ecosystem is "npm" or "pypi" && upstreamDeprecated.Count > 0;
+
+        // Maven answers carry no deprecation signal, so the pass writes no deprecation verdict for
+        // them, rather than clearing a value with an empty map that only means "not read".
+        bool recordsDeprecation = ecosystem is not "maven";
+
+        // For npm, PyPI and Hex the map is the whole answer, so a version absent from it is not
+        // deprecated. NuGet's map holds only the versions whose registration leaf was read this
+        // pass (an index source that failed, or a page that could not be fetched, leaves versions
+        // out), so an absent NuGet version gets no verdict and keeps what is recorded.
+        bool absentIsVerdict = ecosystem is not "nuget";
         var newlyRevoked = new List<(string Version, string? Purl)>();
 
         foreach (var ver in versions)
@@ -351,22 +478,23 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
                 break;
             }
 
-            // Look up the upstream deprecated value for this version.
-            // If the version key isn't present in upstream metadata, treat as not deprecated.
-            upstreamDeprecated.TryGetValue(ver.Version, out string? upstreamValue);
+            // Look up the upstream deprecated value for this version. An absent key is "not
+            // deprecated" except for NuGet, where it is no verdict (see absentIsVerdict).
+            string versionKey = ecosystem == "nuget" ? NuGetNormalization.NormalizeVersion(ver.Version) : ver.Version;
+            bool hasVerdict = upstreamDeprecated.TryGetValue(versionKey, out string? upstreamValue) || absentIsVerdict;
 
             checked_++;
             DependablyMeter.DeprecationRefreshChecked.Add(1,
                 new KeyValuePair<string, object?>("ecosystem", ecosystem));
 
-            if (upstreamValue != ver.Deprecated)
+            if (recordsDeprecation && hasVerdict && upstreamValue != ver.Deprecated)
             {
                 await _cacheArtifacts.UpdateDeprecationAsync(ver.Id, upstreamValue, _time, ct);
                 updated++;
                 DependablyMeter.DeprecationRefreshUpdated.Add(1,
                     new KeyValuePair<string, object?>("ecosystem", ecosystem));
             }
-            else
+            else if (recordsDeprecation && hasVerdict)
             {
                 await _cacheArtifacts.TouchDeprecationCheckedAtAsync(ver.Id, _time, ct);
             }
@@ -480,26 +608,120 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
         }
     }
 
-    private static bool IsSupportedEcosystem(string ecosystem) =>
-        ecosystem is "npm" or "pypi" or "nuget" or "maven" or "hex";
+    // Hex advertises a cached release's retirement from its hex_release row, not from
+    // cache_artifact.deprecated: the signed /packages resource this registry serves is built from
+    // that row, so a retirement (or un-retirement) upstream reaches Mix and Rebar3 only once it is
+    // written there too. Every cached release is set or cleared from the same verified resource
+    // that produced the deprecation map.
+    private async Task ApplyHexRetirementsAsync(
+        IReadOnlyList<(string Id, string Version, string? Deprecated, string? DeprecationCheckedAt, string? RevokedAt, string? Purl)> versions,
+        IReadOnlyDictionary<string, Protocol.Hex.HexRetirementStatus> retirements,
+        CancellationToken ct)
+    {
+        foreach (var ver in versions)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            retirements.TryGetValue(ver.Version, out var retired);
+            await _hexReleases.SetCachedRetirementAsync(ver.Id, retired?.Reason, retired?.Message, ct);
+        }
+    }
+
+    private static bool IsSupportedEcosystem(string ecosystem) => DeprecationRefreshEcosystems.Contains(ecosystem);
+
+    // A body the metadata cache served past its TTL because the upstream failed is the last answer
+    // that source gave, not a current one, so it is no answer from that source and the next one
+    // is asked.
+    private void LogStaleAnswer(string ecosystem, string package) =>
+        _logger.LogWarning(
+            "{Ecosystem} metadata for {Package} was served stale from the metadata cache because the upstream failed; not reading it as an answer.",
+            ecosystem, package);
+
+    // A 2xx body that lacks the per-version object (npm `versions`, PyPI `releases`) is not a
+    // packument or project document at all, such as a mirror's `{}` or error envelope, so it is no
+    // answer from that source and the next one is asked.
+    private void LogUnusableDocument(string ecosystem, string package) =>
+        _logger.LogWarning(
+            "{Ecosystem} metadata for {Package} carried no per-version object; not reading it as an answer.",
+            ecosystem, package);
 
     // Per-version deprecation map plus upstream's declared latest version (and, where the
     // ecosystem's metadata carries one, its publish timestamp). npm/PyPI carry a per-version
-    // deprecation signal AND a latest tag in one document. NuGet and Maven have no deprecation
-    // signal, so the deprecation map is empty (their cache_artifact rows never set deprecated, so
-    // the empty map clears nothing) and only the latest is resolved.
-    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchUpstreamMetadataAsync(
+    // deprecation signal AND a latest tag in one document. NuGet resolves its latest through the
+    // resolver and its per-version listing state from the registration index; Maven has no
+    // deprecation signal the pass reads, so its map is empty and ProcessVersionsAsync writes no
+    // deprecation for it. A null map means no source gave an answer (for Hex, a verified one) and
+    // the group records nothing — for every ecosystem. HexRetirements is the per-release
+    // retirement status for Hex, null for every other ecosystem.
+    private async Task<(Dictionary<string, string?>? Deprecated, UpstreamLatestVersion Latest,
+        IReadOnlyDictionary<string, Protocol.Hex.HexRetirementStatus>? HexRetirements)> FetchUpstreamMetadataAsync(
         string ecosystem, string orgId, string purlName, IReadOnlyList<UpstreamSource> sources, CancellationToken ct)
     {
-        return ecosystem switch
+        switch (ecosystem)
         {
-            "npm" => await FetchNpmMetadataAsync(sources, purlName, ct),
-            "pypi" => await FetchPyPiMetadataAsync(sources, purlName, ct),
-            "nuget" or "maven" =>
-                (new Dictionary<string, string?>(), await _latestResolver.ResolveAsync(ecosystem, orgId, purlName, ct)),
-            "hex" => await FetchHexMetadataAsync(orgId, purlName, ct),
-            _ => (new Dictionary<string, string?>(), UpstreamLatestVersion.None)
-        };
+            case "npm":
+                {
+                    var (deprecated, latest) = await FetchNpmMetadataAsync(sources, purlName, ct);
+                    return (deprecated, latest, null);
+                }
+            case "pypi":
+                {
+                    var (deprecated, latest) = await FetchPyPiMetadataAsync(sources, purlName, ct);
+                    return (deprecated, latest, null);
+                }
+            case "nuget":
+                return await FetchNuGetMetadataAsync(orgId, purlName, sources, ct);
+            case "maven":
+                {
+                    // The resolver returns no version when no source answered with a release
+                    // (every source non-2xx, or none listing one): that is no answer, not a
+                    // verdict that the package has no latest.
+                    var latest = await _latestResolver.ResolveFreshAsync(ecosystem, orgId, purlName, ct);
+                    return latest.IsReserved || latest.Version is not null
+                        ? (new Dictionary<string, string?>(), latest, null)
+                        : (null, UpstreamLatestVersion.None, null);
+                }
+            case "hex":
+                return await FetchHexMetadataAsync(orgId, purlName, ct);
+            default:
+                return (new Dictionary<string, string?>(), UpstreamLatestVersion.None, null);
+        }
+    }
+
+    // NuGet: the latest-stable release comes from the resolver (flatcontainer), and each
+    // version's listing state from one registration-index read per package. Both reads decline a
+    // body the metadata cache served stale. A resolver with no live answer is no answer for the
+    // group, so the index is not read and nothing is recorded. When
+    // the resolver answered but no index source did, the latest and versions-behind facts are
+    // recorded and the empty listing map gives no version a deprecation verdict.
+    private async Task<(Dictionary<string, string?>? Deprecated, UpstreamLatestVersion Latest,
+        IReadOnlyDictionary<string, Protocol.Hex.HexRetirementStatus>? HexRetirements)> FetchNuGetMetadataAsync(
+        string orgId, string purlName, IReadOnlyList<UpstreamSource> sources, CancellationToken ct)
+    {
+        var latest = await _latestResolver.ResolveFreshAsync("nuget", orgId, purlName, ct);
+        if (latest.IsReserved)
+        {
+            return (new Dictionary<string, string?>(), latest, null);
+        }
+
+        if (latest.Version is null)
+        {
+            return (null, UpstreamLatestVersion.None, null);
+        }
+
+        var listing = await NuGetUpstreamListingFetcher.FetchAsync(_upstream, sources, purlName, _logger, ct);
+        if (listing is null)
+        {
+            _logger.LogInformation(
+                "Deprecation refresh recorded no listing state for nuget/{Package}: no registration index source gave an answer.",
+                purlName);
+            return (new Dictionary<string, string?>(), latest, null);
+        }
+
+        return (new Dictionary<string, string?>(listing, StringComparer.OrdinalIgnoreCase), latest, null);
     }
 
     // Fetches the npm packument and extracts deprecated per version plus dist-tags.latest (and its
@@ -513,11 +735,11 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     // handlers and UpstreamLatestVersionResolver use — so a private mirror and the
     // empty=disabled contract are honoured identically here rather than a hardcoded
     // public-registry default bypassing both, without a second decrypt pass over the same rows.
-    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchNpmMetadataAsync(
+    private async Task<(Dictionary<string, string?>? Deprecated, UpstreamLatestVersion Latest)> FetchNpmMetadataAsync(
         IReadOnlyList<UpstreamSource> sources, string purlName, CancellationToken ct)
     {
         // npm scoped packages have purlName encoded as %40scope%2Fpkg; the packument URL uses @scope/pkg.
-        string packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
+        string packageName = PurlNormalizer.NpmPackageName(purlName);
 
         foreach (var source in sources)
         {
@@ -532,14 +754,63 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
                 continue;
             }
 
+            if (response.IsStale)
+            {
+                LogStaleAnswer("npm", packageName);
+                continue;
+            }
+
             using var doc = JsonDocument.Parse(response.Body);
-            return ParseNpmPackument(doc.RootElement);
+            var parsed = ParseNpmPackument(doc.RootElement);
+            if (parsed.Deprecated is null)
+            {
+                LogUnusableDocument("npm", packageName);
+                continue;
+            }
+
+            return parsed;
         }
 
-        // Every configured source was unreachable — never fall back to a hardcoded public
-        // registry. (Zero configured sources is filtered out by the caller before this method is
-        // ever invoked.)
-        return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
+        // No configured source gave a live 2xx answer, so there is no verdict: the null map makes
+        // the caller record nothing. Never fall back to a hardcoded public registry. (Zero
+        // configured sources is filtered out by the caller before this method is ever invoked.)
+        return (null, UpstreamLatestVersion.None);
+    }
+
+    // Hex: the signed package resource carries every release's retirement status — Hex's
+    // deprecation — beside its publish time, so one verified fetch yields both the per-version
+    // deprecation map and the latest stable, non-retired release. Every source is read through
+    // the shared verified fetcher, which skips an upstream with no configured public key and,
+    // asked for a fresh answer, a resource the metadata cache served stale; when no source yields
+    // a live verified resource the map is null, so the caller records nothing.
+    private async Task<(Dictionary<string, string?>? Deprecated, UpstreamLatestVersion Latest,
+        IReadOnlyDictionary<string, Protocol.Hex.HexRetirementStatus>? HexRetirements)> FetchHexMetadataAsync(
+        string orgId, string purlName, CancellationToken ct)
+    {
+        var result = await Protocol.Hex.HexUpstreamPackageFetcher.FetchAsync(
+            _upstream, _registries, orgId, purlName, _logger, _hexMasterKeys, requireFresh: true, ct);
+        if (result.Package is null)
+        {
+            return (null, UpstreamLatestVersion.None, null);
+        }
+
+        var deprecated = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var retirements = new Dictionary<string, Protocol.Hex.HexRetirementStatus>(StringComparer.Ordinal);
+        foreach (var release in result.Package.Releases)
+        {
+            if (release.Retired is { } retired)
+            {
+                deprecated[release.Version] = Protocol.Hex.HexIndexBuilder.RetirementAsDeprecation(retired);
+                retirements[release.Version] = retired;
+            }
+        }
+
+        var stable = Protocol.Hex.HexUpstreamPackageFetcher.StableVersionsDescending(result.Package);
+        var latestRelease = stable.Count == 0 ? null : result.Package.Releases.FirstOrDefault(r => r.Version == stable[0]);
+        var latest = stable.Count == 0
+            ? UpstreamLatestVersion.None
+            : new UpstreamLatestVersion(stable[0], latestRelease?.PublishedAt?.ToDateTimeOffset(), stable);
+        return (deprecated, latest, retirements);
     }
 
     // Fetches the PyPI project JSON and extracts yanked status per release plus info.version (and
@@ -552,36 +823,7 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
     // handlers and UpstreamLatestVersionResolver use — so a private mirror and the
     // empty=disabled contract are honoured identically here rather than a hardcoded
     // public-registry default bypassing both, without a second decrypt pass over the same rows.
-    // Hex: the signed package resource carries every release's retirement status — Hex's
-    // deprecation — beside its publish time, so one verified fetch yields both the per-version
-    // deprecation map and the latest stable, non-retired release.
-    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchHexMetadataAsync(
-        string orgId, string purlName, CancellationToken ct)
-    {
-        var result = await Protocol.Hex.HexUpstreamPackageFetcher.FetchAsync(_upstream, _registries, orgId, purlName, _logger, _hexMasterKeys, ct);
-        if (result.Package is null)
-        {
-            return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
-        }
-
-        var deprecated = new Dictionary<string, string?>(StringComparer.Ordinal);
-        foreach (var release in result.Package.Releases)
-        {
-            if (release.Retired is { } retired)
-            {
-                deprecated[release.Version] = Protocol.Hex.HexIndexBuilder.RetirementAsDeprecation(retired);
-            }
-        }
-
-        var stable = Protocol.Hex.HexUpstreamPackageFetcher.StableVersionsDescending(result.Package);
-        var latestRelease = stable.Count == 0 ? null : result.Package.Releases.FirstOrDefault(r => r.Version == stable[0]);
-        var latest = stable.Count == 0
-            ? UpstreamLatestVersion.None
-            : new UpstreamLatestVersion(stable[0], latestRelease?.PublishedAt?.ToDateTimeOffset(), stable);
-        return (deprecated, latest);
-    }
-
-    private async Task<(Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest)> FetchPyPiMetadataAsync(
+    private async Task<(Dictionary<string, string?>? Deprecated, UpstreamLatestVersion Latest)> FetchPyPiMetadataAsync(
         IReadOnlyList<UpstreamSource> sources, string purlName, CancellationToken ct)
     {
         foreach (var source in sources)
@@ -593,34 +835,57 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
                 continue;
             }
 
+            if (response.IsStale)
+            {
+                LogStaleAnswer("pypi", purlName);
+                continue;
+            }
+
             using var doc = JsonDocument.Parse(response.Body);
-            return ParsePyPiProject(doc.RootElement);
+            var parsed = ParsePyPiProject(doc.RootElement);
+            if (parsed.Deprecated is null)
+            {
+                LogUnusableDocument("pypi", purlName);
+                continue;
+            }
+
+            return parsed;
         }
 
-        // Every configured source was unreachable — never fall back to a hardcoded public
-        // registry. (Zero configured sources is filtered out by the caller before this method is
-        // ever invoked.)
-        return (new Dictionary<string, string?>(), UpstreamLatestVersion.None);
+        // No configured source gave a live 2xx answer, so there is no verdict: the null map makes
+        // the caller record nothing. Never fall back to a hardcoded public registry. (Zero
+        // configured sources is filtered out by the caller before this method is ever invoked.)
+        return (null, UpstreamLatestVersion.None);
     }
 
     // Reads one already-fetched npm packument: per-version "deprecated" strings, dist-tags.latest,
     // and that version's publish time from the time[] map. An abbreviated packument carries no
     // time[] map, which only nulls publishedAt.
-    private static (Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest) ParseNpmPackument(
+    // A document with no object-valued "versions", or an empty one, yields a null map: no answer.
+    // An empty version list cannot be a verdict on versions this registry holds, so it must not
+    // clear their recorded deprecations.
+    internal static (Dictionary<string, string?>? Deprecated, UpstreamLatestVersion Latest) ParseNpmPackument(
         JsonElement root)
     {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("versions", out var versionsEl)
+            || versionsEl.ValueKind != JsonValueKind.Object)
+        {
+            return (null, UpstreamLatestVersion.None);
+        }
+
         string? latest = ReadNonEmptyString(root, "dist-tags", "latest");
         var publishedAt = ReadNpmPublishTime(root, latest);
-        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        if (!root.TryGetProperty("versions", out var versionsEl))
-        {
-            return (result, new UpstreamLatestVersion(latest, publishedAt));
-        }
+        var result = new Dictionary<string, string?>(VersionIdentity.Comparer("npm"));
 
         foreach (var entry in versionsEl.EnumerateObject())
         {
             result[entry.Name] = ReadNonEmptyString(entry.Value, "deprecated");
+        }
+
+        if (result.Count == 0)
+        {
+            return (null, UpstreamLatestVersion.None);
         }
 
         var stableVersions = EcosystemVersionOrdering.OrderStableDescending("npm", result.Keys);
@@ -629,21 +894,31 @@ public sealed class DeprecationRefreshService : ScheduledBackgroundService
 
     // Reads one already-fetched PyPI project document: per-release yank status, info.version, and
     // the latest release's publish time from the top-level urls[] array.
-    private static (Dictionary<string, string?> Deprecated, UpstreamLatestVersion Latest) ParsePyPiProject(
+    // A document with no object-valued "releases", or an empty one, yields a null map: no answer.
+    // An empty release list cannot be a verdict on releases this registry holds, so it must not
+    // clear their recorded yanks.
+    internal static (Dictionary<string, string?>? Deprecated, UpstreamLatestVersion Latest) ParsePyPiProject(
         JsonElement root)
     {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("releases", out var releasesEl)
+            || releasesEl.ValueKind != JsonValueKind.Object)
+        {
+            return (null, UpstreamLatestVersion.None);
+        }
+
         string? latest = ReadNonEmptyString(root, "info", "version");
         var publishedAt = ReadPyPiUploadTime(root);
-        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-        if (!root.TryGetProperty("releases", out var releasesEl))
-        {
-            return (result, new UpstreamLatestVersion(latest, publishedAt));
-        }
+        var result = new Dictionary<string, string?>(VersionIdentity.Comparer("pypi"));
 
         foreach (var release in releasesEl.EnumerateObject())
         {
             result[release.Name] = ExtractYankedDeprecation(release.Value);
+        }
+
+        if (result.Count == 0)
+        {
+            return (null, UpstreamLatestVersion.None);
         }
 
         var stableVersions = EcosystemVersionOrdering.OrderStableDescending("pypi", result.Keys);

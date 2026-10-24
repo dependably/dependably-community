@@ -252,6 +252,77 @@ public sealed class HostFilteringTests
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
     }
 
+    // ── TENANT_DOMAIN: tenants under a parent other than the apex ─────────────
+
+    [Fact]
+    public async Task NoApexMultiMode_TenantDomainSet_SubdomainOfTenantDomainAccepted_OtherDomainRejected()
+    {
+        await using var factory = new HostFilterFactory(new Dictionary<string, string>
+        {
+            ["BASE_URL"] = "http://localhost",
+            ["DEPLOYMENT_MODE"] = "multi",
+            ["TENANT_DOMAIN"] = "example.test",
+        });
+        await factory.InitializeAsync();
+        using var client = factory.CreateClient();
+
+        var goodReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        goodReq.Headers.Host = "acme.example.test";
+        var goodResp = await client.SendAsync(goodReq);
+
+        var badReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        badReq.Headers.Host = "acme.other.test";
+        var badResp = await client.SendAsync(badReq);
+
+        Assert.NotEqual(HttpStatusCode.BadRequest, goodResp.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, badResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task MultiMode_TenantDomainDiffersFromApex_BareTenantDomainRefused_TenantSubdomainAccepted()
+    {
+        await using var factory = new HostFilterFactory(new Dictionary<string, string>
+        {
+            ["BASE_URL"] = $"https://{ApexHost}",
+            ["APEX_HOST"] = "ops.example.test",
+            ["DEPLOYMENT_MODE"] = "multi",
+            ["TENANT_DOMAIN"] = "example.test",
+        });
+        await factory.InitializeAsync();
+        using var client = factory.CreateClient();
+
+        var bareReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        bareReq.Headers.Host = "example.test";
+        var bareResp = await client.SendAsync(bareReq);
+
+        var tenantReq = new HttpRequestMessage(HttpMethod.Get, "/health");
+        tenantReq.Headers.Host = "acme.example.test";
+        var tenantResp = await client.SendAsync(tenantReq);
+
+        Assert.Equal(HttpStatusCode.BadRequest, bareResp.StatusCode);
+        Assert.NotEqual(HttpStatusCode.BadRequest, tenantResp.StatusCode);
+    }
+
+    [Fact]
+    public async Task MultiMode_TenantDomainWithTrailingDot_StillAdmitsTenantSubdomains()
+    {
+        await using var factory = new HostFilterFactory(new Dictionary<string, string>
+        {
+            ["BASE_URL"] = $"https://{ApexHost}",
+            ["APEX_HOST"] = "ops.example.test",
+            ["DEPLOYMENT_MODE"] = "multi",
+            ["TENANT_DOMAIN"] = "example.test.",
+        });
+        await factory.InitializeAsync();
+        using var client = factory.CreateClient();
+
+        var req = new HttpRequestMessage(HttpMethod.Get, "/health");
+        req.Headers.Host = "acme.example.test";
+        var resp = await client.SendAsync(req);
+
+        Assert.NotEqual(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
     // ── Factory helpers ────────────────────────────────────────────────────────
 
     private static HostFilterFactory NewSingleModeFactory() => new(new Dictionary<string, string>

@@ -20,13 +20,25 @@ public sealed class SpanUrlPathScrubProcessor : BaseProcessor<Activity>
     private static readonly string[] PathTags =
         ["url.path", "url.full", "http.target", "http.url"];
 
+    private readonly LogPathScrubber _scrubber;
+
+    public SpanUrlPathScrubProcessor()
+        : this(LogPathScrubber.Default)
+    {
+    }
+
+    public SpanUrlPathScrubProcessor(LogPathScrubber scrubber)
+    {
+        _scrubber = scrubber;
+    }
+
     public override void OnEnd(Activity activity)
     {
         foreach (string tag in PathTags)
         {
             if (activity.GetTagItem(tag) is string value && LogPathScrubber.ContainsEmail(value))
             {
-                activity.SetTag(tag, LogPathScrubber.Scrub(value));
+                activity.SetTag(tag, _scrubber.Scrub(value));
             }
         }
     }

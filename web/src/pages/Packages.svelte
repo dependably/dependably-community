@@ -13,6 +13,7 @@
   import { readQuery, writeQuery } from '../lib/tableState.js'
   import { copyToClipboard } from '../lib/clipboard.js'
   import { packageInstallCommand, registryOrigin } from '../lib/installCommand.js'
+  import { packageVulnCell } from '../lib/ociScan.js'
 
   // Table state lives in the URL query string so it survives navigating into a
   // package's detail page and back (this component is recreated on every route
@@ -202,6 +203,7 @@
     let:row={pkg}
     let:hidden
   >
+    {@const vulnCell = packageVulnCell(pkg)}
     <tr class="cursor-pointer" on:click={() => openPackage(pkg)}>
       <td class="name-cell" title={pkg.name}>
         <strong>{pkg.name}</strong>
@@ -251,11 +253,30 @@
         {/if}
       </td>
       <td class="vuln-cell">
-        {#if (pkg.criticalCount ?? 0) > 0}<span class="sev sev-critical" aria-label="{pkg.criticalCount} critical">{pkg.criticalCount}</span>{/if}
-        {#if (pkg.highCount ?? 0) > 0}<span class="sev sev-high" aria-label="{pkg.highCount} high">{pkg.highCount}</span>{/if}
-        {#if (pkg.mediumCount ?? 0) > 0}<span class="sev sev-medium" aria-label="{pkg.mediumCount} medium">{pkg.mediumCount}</span>{/if}
-        {#if (pkg.lowCount ?? 0) > 0}<span class="sev sev-low" aria-label="{pkg.lowCount} low">{pkg.lowCount}</span>{/if}
-        {#if ((pkg.criticalCount ?? 0) + (pkg.highCount ?? 0) + (pkg.mediumCount ?? 0) + (pkg.lowCount ?? 0)) === 0}<span class="text-muted" aria-label={$t('packages.vulns.none')}>—</span>{/if}
+        {#if vulnCell.oci}
+          <!-- An OCI image's findings live in the org's own scan result, not in linked advisories,
+               so every state but a full clean scan gets its own wording and never the clean line. -->
+          {#if vulnCell.oci.kind === 'vulnerable'}
+            <span
+              class="sev sev-{(vulnCell.oci.severity ?? 'unknown').toLowerCase()}"
+              aria-label={$t('packages.vulns.ociFindings', { values: { count: vulnCell.oci.count } })}
+              title={$t('packages.vulns.ociFindings', { values: { count: vulnCell.oci.count } })}
+            >{vulnCell.oci.count}</span>
+          {:else if vulnCell.oci.kind === 'partial'}
+            <span class="badge oci-scan-state" title={$t('packages.vulns.ociPartialHelp')}>{$t('packages.vulns.ociPartial')}</span>
+          {:else if vulnCell.oci.kind === 'unscanned'}
+            <span class="badge oci-scan-state" title={$t('packages.vulns.ociUnscannedHelp')}>{$t('packages.vulns.ociUnscanned')}</span>
+          {:else if vulnCell.oci.kind === 'no_feed'}
+            <span class="badge oci-scan-state" title={$t('packages.vulns.ociNoFeedHelp')}>{$t('packages.vulns.ociNoFeed')}</span>
+          {/if}
+        {/if}
+        {#if vulnCell.showLinked}
+          {#if (pkg.criticalCount ?? 0) > 0}<span class="sev sev-critical" aria-label="{pkg.criticalCount} critical">{pkg.criticalCount}</span>{/if}
+          {#if (pkg.highCount ?? 0) > 0}<span class="sev sev-high" aria-label="{pkg.highCount} high">{pkg.highCount}</span>{/if}
+          {#if (pkg.mediumCount ?? 0) > 0}<span class="sev sev-medium" aria-label="{pkg.mediumCount} medium">{pkg.mediumCount}</span>{/if}
+          {#if (pkg.lowCount ?? 0) > 0}<span class="sev sev-low" aria-label="{pkg.lowCount} low">{pkg.lowCount}</span>{/if}
+        {/if}
+        {#if vulnCell.showNone}<span class="text-muted" aria-label={$t('packages.vulns.none')}>—</span>{/if}
       </td>
       {#if !hidden.has('created')}
         <td class="nowrap text-muted">{$formatDateShort(pkg.createdAt)}</td>
@@ -330,6 +351,7 @@
 <style>
   .nowrap { white-space: nowrap; }
   .vuln-cell { white-space: nowrap; }
+  .oci-scan-state { background: var(--badge-warning-bg); color: var(--badge-warning-text); }
   .latest-cell { font-weight: 600; }
   .latest-yes { color: var(--success); }
   .latest-no { color: var(--danger); }

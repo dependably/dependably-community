@@ -33,6 +33,7 @@ public sealed class NpmTarballHandler(
     ProxyFetchService proxyFetch,
     UpstreamRegistryResolver registries,
     NpmFirstFetchMetadataReader firstFetch,
+    CacheOrphanBlobDeleter orphanBlobs,
     TimeProvider time,
     ILogger<NpmTarballHandler> logger,
     BlobPresignService? presign = null)
@@ -493,6 +494,37 @@ public sealed class NpmTarballHandler(
         return redirect ?? new FileStreamResult(stream!, "application/octet-stream") { FileDownloadName = file };
     }
 
+    // Scans the just-staged blob. A tarball with no recognisable manifest is not a legitimate npm
+    // artefact either, so it is refused along with an ambiguous or malformed one. A blob that is missing
+    // (deleted by a concurrent refusal) or cannot be opened or read is not a verdict on the bytes: the failure propagates to the unclassified
+    // handler (502, logged) rather than being reported as a malformed tarball.
+    private async Task<bool> IsStagedBlobRefusedAsync(string blobKey, CancellationToken ct)
+    {
+        await using var stream = await blobs.Cache.GetAsync(blobKey, ct)
+            ?? throw new IOException("The staged npm tarball is no longer in the cache store.");
+
+        var outcome = NpmTarballManifestScanner.ScanClassified(stream, leaveOpen: true).Outcome;
+        return outcome switch
+        {
+            NpmManifestScanOutcome.ReadFailed => throw new IOException("The staged npm tarball could not be read for scanning."),
+            NpmManifestScanOutcome.Missing => true,
+            _ => NpmTarballManifestScanner.IsRefusable(outcome),
+        };
+    }
+
+    // Refuses a tarball with several top-level manifests (or one that cannot be scanned to the
+    // end) with 502, the same shape as other malformed-upstream-artifact refusals, and records the
+    // refusal in the activity log and the structured log.
+    private async Task<IActionResult> RefuseUnscannableAsync(
+        HttpContext httpContext, string orgId, string purl, TokenRecord? token, CancellationToken ct)
+    {
+        logger.LogWarning(
+            "npm tarball refused: top-level manifest is ambiguous or the archive is unscannable. Purl={Purl}", purl);
+        await audit.LogActivityAsync(orgId, "npm", purl, "blocked", token?.AuditActorId, actorLabel: token?.AuditActorLabel,
+            actorKind: token?.ActorKind, sourceIp: httpContext.GetNormalizedRemoteIp(), ct: ct);
+        return new StatusCodeResult(StatusCodes.Status502BadGateway);
+    }
+
     // Identifies a proxied npm tarball request: org scope, full package name, short name,
     // and filename. Bundled so cache-hit and cache-miss handlers each take one parameter
     // object instead of four separate identity params, keeping their signatures under S107.
@@ -526,6 +558,17 @@ public sealed class NpmTarballHandler(
             string baseName = key.File.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase) ? key.File[..^4] : key.File;
             string version = baseName.Length > key.ShortName.Length + 1 ? baseName[(key.ShortName.Length + 1)..] : "unknown";
             string purl = PurlNormalizer.Npm(key.FullName, version);
+
+            // The bytes are staged and hashed but not yet recorded: a tarball whose installed
+            // manifest cannot be pinned down is refused here, before any cache_artifact row exists,
+            // so nothing is cached or served. The staged blob is then deleted unless another row
+            // (this tenant's or another's) already points at the same content-addressed key.
+            if (await IsStagedBlobRefusedAsync(fetchResult.BlobKey, ct))
+            {
+                await orphanBlobs.DeleteIfUnreferencedAsync(
+                    fetchResult.BlobKey, string.Empty, BlobKeys.StoreKey(fetchResult.BlobKey), blobs.Cache, ct);
+                return await RefuseUnscannableAsync(httpContext, key.OrgId, purl, token, ct);
+            }
 
             var meta = await firstFetch.TryFetchAsync(upstreamSource, key.FullName, version, ct);
 

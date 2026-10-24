@@ -44,11 +44,17 @@ public sealed class PostgresTestDatabase : IAsyncDisposable
     // default 30 s command timeout is too tight for it. These statements are harness-only.
     internal const int AdminCommandTimeoutSeconds = 300;
 
+    // Every statement this harness runs goes through this property, so the disposable-database
+    // guard sits here rather than at each CREATE/DROP.
     public static string SuperuserConnectionString =>
+        AdminConnectionString(Environment.GetEnvironmentVariable("TEST_POSTGRES_CONNECTION"));
+
+    internal static string AdminConnectionString(string? testPostgresConnection) =>
         new NpgsqlConnectionStringBuilder(
-            Environment.GetEnvironmentVariable("TEST_POSTGRES_CONNECTION")
-            ?? throw new InvalidOperationException(
-                "TEST_POSTGRES_CONNECTION must be set to run tests against Postgres."))
+            DisposableTestDatabaseGuard.EnsureDisposable(
+                testPostgresConnection
+                ?? throw new InvalidOperationException(
+                    "TEST_POSTGRES_CONNECTION must be set to run tests against Postgres.")))
         {
             CommandTimeout = AdminCommandTimeoutSeconds,
         }.ConnectionString;

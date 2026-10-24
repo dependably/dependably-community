@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Dependably.Infrastructure.Identity;
 
@@ -50,8 +51,13 @@ public interface ISystemMfaEnrollmentService
 internal sealed class SystemMfaEnrollmentService : ISystemMfaEnrollmentService
 {
     private readonly UserManager<SystemAdminUser> _admins;
+    private readonly ILogger<SystemMfaEnrollmentService> _logger;
 
-    public SystemMfaEnrollmentService(UserManager<SystemAdminUser> admins) => _admins = admins;
+    public SystemMfaEnrollmentService(UserManager<SystemAdminUser> admins, ILogger<SystemMfaEnrollmentService>? logger = null)
+    {
+        _admins = admins;
+        _logger = logger ?? NullLogger<SystemMfaEnrollmentService>.Instance;
+    }
 
     public async Task ResetKeyAsync(string adminId, CancellationToken ct = default)
     {
@@ -73,11 +79,30 @@ internal sealed class SystemMfaEnrollmentService : ISystemMfaEnrollmentService
         return admin?.Email;
     }
 
+    /// <summary>
+    /// Verifies a TOTP code against the stored key. No usable key — none enrolled, or a stored
+    /// key that does not decrypt (the store logs which account) — is an invalid code, never an
+    /// error. A key the token provider cannot read as Base32 is treated the same way.
+    /// </summary>
     public async Task<bool> VerifyTotpAsync(string adminId, string code, CancellationToken ct = default)
     {
         var admin = await _admins.FindByIdAsync(adminId);
-        return admin is not null
-            && await _admins.VerifyTwoFactorTokenAsync(admin, TokenOptions.DefaultAuthenticatorProvider, code);
+        if (admin is null || string.IsNullOrEmpty(await _admins.GetAuthenticatorKeyAsync(admin)))
+        {
+            return false;
+        }
+
+        try
+        {
+            return await _admins.VerifyTwoFactorTokenAsync(admin, TokenOptions.DefaultAuthenticatorProvider, code);
+        }
+        catch (FormatException)
+        {
+            _logger.LogWarning(
+                "The TOTP key of system admin {AccountId} is not a valid Base32 key; treating the code as invalid.",
+                admin.Id);
+            return false;
+        }
     }
 
     public async Task<bool> RedeemRecoveryCodeAsync(string adminId, string code, CancellationToken ct = default)

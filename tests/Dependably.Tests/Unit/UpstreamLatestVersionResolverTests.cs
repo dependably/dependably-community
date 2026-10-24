@@ -23,6 +23,15 @@ namespace Dependably.Tests.Unit;
 public sealed class UpstreamLatestVersionResolverTests : IAsyncLifetime
 {
     private readonly TestMetadataStore _db = new();
+    private readonly ReservedNamespaceService _reserved;
+
+    public UpstreamLatestVersionResolverTests()
+    {
+        _reserved = new ReservedNamespaceService(
+            _db,
+            new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+            TimeProvider.System);
+    }
 
     public async Task InitializeAsync()
     {
@@ -370,7 +379,7 @@ public sealed class UpstreamLatestVersionResolverTests : IAsyncLifetime
             StagingOptions.Resolve(config),
             NullLogger<UpstreamClient>.Instance);
         var registries = new UpstreamRegistryResolver(new UpstreamRegistryRepository(_db, TimeProvider.System, Dependably.Tests.Infrastructure.TestEnvelope.Unconfigured()));
-        return new UpstreamLatestVersionResolver(upstream, registries);
+        return new UpstreamLatestVersionResolver(upstream, registries, _reserved);
     }
 
     private static string MavenMetadata(string? latest, string? release, string? lastUpdated = null)

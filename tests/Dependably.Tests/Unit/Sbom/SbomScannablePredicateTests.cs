@@ -230,6 +230,7 @@ public sealed class SbomScannablePredicateTests : IAsyncLifetime
     private static IOsvSource ShortAnsweringOsv(int answeredSlots)
     {
         var osv = Substitute.For<IOsvSource>();
+        osv.HasCoverageFor(Arg.Any<string?>()).Returns(Task.FromResult(true));
         osv.TryQueryBatchAsync(Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>())
             .Returns(call => Task.FromResult(new OsvBatchQueryResult(
                 call.ArgAt<IReadOnlyList<string>>(0)

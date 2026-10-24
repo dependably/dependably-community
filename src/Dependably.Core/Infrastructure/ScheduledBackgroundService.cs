@@ -110,6 +110,14 @@ public abstract class ScheduledBackgroundService : BackgroundService
     /// </summary>
     protected virtual TimeSpan LeaderLockTtl => TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Reports that the job has nothing left to do, so the schedule loop ends instead of waking
+    /// forever for a pass that would only observe that. Checked before the startup pass and after
+    /// every tick. A failure to answer counts as "not complete": the loop keeps running. Default is
+    /// false — a recurring job is never complete.
+    /// </summary>
+    protected virtual Task<bool> IsCompleteAsync(CancellationToken ct) => Task.FromResult(false);
+
     private readonly IConfiguration _config;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
@@ -167,32 +175,19 @@ public abstract class ScheduledBackgroundService : BackgroundService
 
     private async Task RunScheduleAsync(CancellationToken stoppingToken)
     {
-        CronExpression schedule;
-        string scheduleText = _config[CronEnvKey] ?? DefaultCron;
-        try
+        if (ParseSchedule() is not { } schedule)
         {
-            schedule = CronExpression.Parse(scheduleText, CronFormat.Standard);
-        }
-        catch (CronFormatException)
-        {
-            if (DisableOnInvalidCron)
-            {
-                _logger.LogInformation(
-                    "{ServiceType} disabled ({EnvKey}='{Schedule}' not parseable as cron).",
-                    GetType().Name, CronEnvKey, scheduleText);
-                return;
-            }
-            throw;
+            return;
         }
 
-        if (RunOnStartup)
+        if (RunOnStartup && !await CompleteAsync(stoppingToken))
         {
             await RunTickGuardedAsync(stoppingToken);
         }
 
         _startupPass.TrySetResult();
 
-        while (!stoppingToken.IsCancellationRequested)
+        while (!stoppingToken.IsCancellationRequested && !await CompleteAsync(stoppingToken))
         {
             var next = schedule.GetNextOccurrence(_time.GetUtcNow(), TimeZoneInfo.Utc);
             if (next is null)
@@ -217,6 +212,35 @@ public abstract class ScheduledBackgroundService : BackgroundService
             }
 
             await RunTickGuardedAsync(stoppingToken);
+        }
+    }
+
+    private CronExpression? ParseSchedule()
+    {
+        string scheduleText = _config[CronEnvKey] ?? DefaultCron;
+        try
+        {
+            return CronExpression.Parse(scheduleText, CronFormat.Standard);
+        }
+        catch (CronFormatException) when (DisableOnInvalidCron)
+        {
+            _logger.LogInformation(
+                "{ServiceType} disabled ({EnvKey}='{Schedule}' not parseable as cron).",
+                GetType().Name, CronEnvKey, scheduleText);
+            return null;
+        }
+    }
+
+    private async Task<bool> CompleteAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await IsCompleteAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "{ServiceType} could not tell whether it is complete: {ExceptionType}", GetType().Name, ex.GetType().Name);
+            return false;
         }
     }
 

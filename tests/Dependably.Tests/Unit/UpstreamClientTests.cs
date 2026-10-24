@@ -851,7 +851,8 @@ public class UpstreamClientTests : IAsyncLifetime
                 .Build(),
             NullLogger<CacheEvictionService>.Instance,
             clock,
-            new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock));
+            new Dependably.Infrastructure.Redis.InProcessDistributedLock(clock),
+            new Dependably.Infrastructure.AirGapMode(new ConfigurationBuilder().Build()));
 
         var summary = await eviction.RunOnceAsync();
 

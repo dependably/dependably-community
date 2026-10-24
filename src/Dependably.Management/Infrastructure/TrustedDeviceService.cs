@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Dapper;
 using Dependably.Security;
 
@@ -39,12 +40,20 @@ public sealed class TrustedDeviceService
         string expiresAt = _time.GetUtcNow().AddDays(TtlDays).ToUtcIso();
 
         await using var conn = await _db.OpenAsync(ct);
-        await conn.ExecuteAsync(
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        if (realm == "tenant" && tenantId is not null)
+        {
+            await TenantMintGate.RequireMintableAsync(conn, _db.Provider, tenantId, tx, ct);
+        }
+
+        await conn.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO mfa_trusted_devices (id, user_id, realm, tenant_id, token_hash, user_agent, created_at, expires_at)
             VALUES (@id, @userId, @realm, @tenantId, @hash, @userAgent, @now, @expiresAt)
             """,
-            new { id, userId, realm, tenantId, hash, userAgent, now, expiresAt });
+            new { id, userId, realm, tenantId, hash, userAgent, now, expiresAt },
+            transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
 
         return raw;
     }
@@ -97,6 +106,19 @@ public sealed class TrustedDeviceService
             "DELETE FROM mfa_trusted_devices WHERE user_id = @userId AND realm = @realm",
             new { userId, realm });
     }
+
+    /// <summary>
+    /// Same delete as <see cref="DeleteAllForUserAsync(string, string, CancellationToken)"/>, run
+    /// on the caller's connection inside its transaction, so a credential change and the drop of
+    /// the remembered devices commit or roll back together. A device left behind by a fault
+    /// between the two would skip the second factor under the new credential.
+    /// </summary>
+    public static Task DeleteAllForUserAsync(
+        DbConnection conn, DbTransaction tx, string userId, string realm, CancellationToken ct = default) =>
+        // xtenant: user_id is FK-bound to the user, already tenant-scoped via the users table
+        conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM mfa_trusted_devices WHERE user_id = @userId AND realm = @realm",
+            new { userId, realm }, transaction: tx, cancellationToken: ct));
 
     /// <summary>Removes expired trusted-device rows (called by RetentionService GC pass).</summary>
     public async Task PruneExpiredAsync(CancellationToken ct = default)

@@ -34,9 +34,27 @@ public sealed record HexUpstreamPackageResult(HexPackage? Package, HexUpstreamOu
 /// </summary>
 public static class HexUpstreamPackageFetcher
 {
-    public static async Task<HexUpstreamPackageResult> FetchAsync(
+    /// <summary>
+    /// Reads <paramref name="name"/> from the org's Hex upstreams. With
+    /// <paramref name="requireFresh"/>, a resource the metadata cache served past its TTL because
+    /// the upstream failed (<see cref="UpstreamMetadataResponse.IsStale"/>) is a fault from that
+    /// source and the next one is asked: the deprecation refresh records retirements from the
+    /// answer, and the last answer can predate a retirement. Without it (the read plane, the
+    /// latest-version resolver, the lookup service) a stale resource is read like a live one, so
+    /// the serve-stale window keeps the index available through an upstream outage.
+    /// </summary>
+    public static Task<HexUpstreamPackageResult> FetchAsync(
         UpstreamClient upstream, UpstreamRegistryResolver registries, string orgId, string name,
         ILogger logger, HexMasterKeyResolver? masterKeys, CancellationToken ct)
+        => FetchAsync(upstream, registries, orgId, name, logger, masterKeys, requireFresh: false, ct);
+
+    /// <inheritdoc cref="FetchAsync(UpstreamClient, UpstreamRegistryResolver, string, string, ILogger, HexMasterKeyResolver?, CancellationToken)"/>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Major Code Smell", "S107:Methods should not have too many parameters",
+        Justification = "The parameter list is the call's declared inputs; a bundling type would hide which of them each "
+                        + "caller supplies.")]
+    public static async Task<HexUpstreamPackageResult> FetchAsync(
+        UpstreamClient upstream, UpstreamRegistryResolver registries, string orgId, string name,
+        ILogger logger, HexMasterKeyResolver? masterKeys, bool requireFresh, CancellationToken ct)
     {
         // On an edge the master's key is read from the master rather than configured on the row;
         // everywhere else — and wherever no resolver is wired — the sources pass through untouched.
@@ -51,7 +69,7 @@ public static class HexUpstreamPackageFetcher
                 continue;
             }
 
-            var attempt = await TryFetchFromSourceAsync(upstream, source, name, logger, ct);
+            var attempt = await TryFetchFromSourceAsync(upstream, source, name, logger, requireFresh, ct);
             if (attempt.Package is not null)
             {
                 return attempt;
@@ -75,7 +93,7 @@ public static class HexUpstreamPackageFetcher
     /// never a silent miss.
     /// </summary>
     private static async Task<HexUpstreamPackageResult> TryFetchFromSourceAsync(
-        UpstreamClient upstream, UpstreamSource source, string name, ILogger logger, CancellationToken ct)
+        UpstreamClient upstream, UpstreamSource source, string name, ILogger logger, bool requireFresh, CancellationToken ct)
     {
         string url = $"{source.Url.TrimEnd('/')}/packages/{Uri.EscapeDataString(name)}";
         try
@@ -88,6 +106,14 @@ public static class HexUpstreamPackageFetcher
 
             if (!response.IsSuccessStatusCode)
             {
+                return new HexUpstreamPackageResult(null, HexUpstreamOutcome.Fault, null);
+            }
+
+            if (requireFresh && response.IsStale)
+            {
+                logger.LogWarning(
+                    "Hex upstream {Url} resource for {Name} was served stale from the metadata cache because the upstream failed; not reading it.",
+                    source.Url, name);
                 return new HexUpstreamPackageResult(null, HexUpstreamOutcome.Fault, null);
             }
 

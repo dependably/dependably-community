@@ -63,7 +63,7 @@ public class AirGapModeTests
     [InlineData(null)]
     [InlineData("yes")]      // only the documented values count as on
     [InlineData("on")]
-    public void FalseOrUnknownValues_NotEnabled(string? v) => Assert.False(Build(v).IsEnabled);
+    public void FalseOrUnknownAirGapValues_NotEnabled(string? v) => Assert.False(Build(v).IsEnabled);
 
     // ── DisabledJobs parsing ─────────────────────────────────────────────────────
 
@@ -114,13 +114,129 @@ public class AirGapModeTests
         Assert.True(mode.IsJobDisabled("vuln-scan"));
     }
 
-    [Fact]
-    public void DisabledJobs_UnknownJobName_StillAddedToSet()
+    // ── Whole-set switch ─────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("true")]
+    [InlineData("True")]
+    [InlineData("TRUE")]
+    [InlineData("1")]
+    [InlineData("all")]
+    [InlineData("ALL")]
+    [InlineData(" true ")]
+    public void WholeSetValue_DisablesEveryKnownJobExceptHousekeeping(string value)
     {
-        // Unknown names are still added to DisabledJobs (with a logged warning).
-        // The set is case-insensitive so the lookup works regardless.
-        var mode = Build(null, "not-a-real-job");
-        Assert.Contains("not-a-real-job", mode.DisabledJobs);
+        var mode = Build(null, value);
+
+        foreach (string job in BackgroundJobs.Known)
+        {
+            bool housekeeping = job is "cache-eviction" or "oci-staging-janitor" or "npm-manifest-rescan";
+            Assert.True(housekeeping != mode.IsJobDisabled(job),
+                $"DISABLE_BACKGROUND_JOBS={value}: '{job}' disabled={mode.IsJobDisabled(job)}");
+        }
+
+        Assert.False(mode.IsEnabled);
+    }
+
+    [Fact]
+    public void HousekeepingExemption_IsExactlyTheLocalJobs()
+    {
+        // Pinned so widening the exemption (which would leave a job running under the whole-set
+        // switch and AIR_GAPPED) is a deliberate, reviewed change.
+        Assert.Equal(
+            new[] { "cache-eviction", "npm-manifest-rescan", "oci-staging-janitor" },
+            BackgroundJobs.HousekeepingExemptFromWholeSet.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void WholeSetValue_DisablesAJobNameOutsideTheRegistryToo()
+    {
+        // A job that forgot to register in BackgroundJobs.Known is still off: the whole-set switch
+        // means "no background job runs", not "every job this build happened to list".
+        var mode = Build(null, "true");
+        Assert.True(mode.IsJobDisabled("a-job-added-later"));
+    }
+
+    [Theory]
+    [InlineData("false")]
+    [InlineData("FALSE")]
+    [InlineData("0")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void OffValue_DisablesNoJob(string? value)
+    {
+        var mode = Build(null, value);
+
+        foreach (string job in BackgroundJobs.Known)
+        {
+            Assert.False(mode.IsJobDisabled(job), $"DISABLE_BACKGROUND_JOBS='{value}' must leave '{job}' running");
+        }
+
+        Assert.Empty(mode.DisabledJobs);
+    }
+
+    [Fact]
+    public void NamedList_DisablesOnlyTheNamedJobs()
+    {
+        // Twin of the whole-set test: a list keeps its per-name meaning and does not spill over.
+        var mode = Build(null, "vuln-scan,threat-feed");
+
+        foreach (string job in BackgroundJobs.Known)
+        {
+            bool expected = job is "vuln-scan" or "threat-feed";
+            Assert.Equal(expected, mode.IsJobDisabled(job));
+        }
+    }
+
+    // ── Unrecognised values fail closed ──────────────────────────────────────────
+
+    [Theory]
+    [InlineData("not-a-real-job")]
+    [InlineData("vuln-scan,not-a-real-job")]
+    [InlineData("vulnscan")]          // a typo of a real name
+    [InlineData("yes")]               // a boolean spelling the switch does not accept
+    [InlineData("on")]
+    [InlineData("none")]
+    public void UnknownToken_FailsConstruction_NamingTheTokenAndTheKnownNames(string value)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => Build(null, value));
+
+        string bad = value.Split(',').Select(t => t.Trim()).First(t => !BackgroundJobs.Known.Contains(t));
+        Assert.Contains($"'{bad}'", ex.Message);
+        Assert.Contains("DISABLE_BACKGROUND_JOBS", ex.Message);
+        foreach (string job in BackgroundJobs.Known)
+        {
+            Assert.Contains(job, ex.Message);
+        }
+    }
+
+    [Theory]
+    [InlineData("true,vuln-scan")]
+    [InlineData("vuln-scan,TRUE")]
+    [InlineData("all,threat-feed")]
+    [InlineData("1,retention")]
+    [InlineData("false,vuln-scan")]
+    [InlineData("0,vuln-scan")]
+    [InlineData("true,false")]
+    public void SwitchValueInsideAList_FailsConstruction(string value)
+    {
+        // true/1/all and false/0 switch the whole job set; inside a list their meaning is
+        // ambiguous ("everything" or "this name"?), so the value is refused rather than guessed.
+        var ex = Assert.Throws<InvalidOperationException>(() => Build(null, value));
+        Assert.Contains("DISABLE_BACKGROUND_JOBS", ex.Message);
+        Assert.Contains("on its own", ex.Message);
+    }
+
+    [Fact]
+    public void NoKnownJobNameCollidesWithASwitchValue()
+    {
+        // A job named "all" (or "true") would make the whole-set switch and the job name
+        // indistinguishable; the registry must never contain one.
+        foreach (string reserved in new[] { "true", "1", "all", "false", "0" })
+        {
+            Assert.DoesNotContain(reserved, BackgroundJobs.Known);
+        }
     }
 
     [Fact]
@@ -137,14 +253,15 @@ public class AirGapModeTests
     // ── IsJobDisabled ─────────────────────────────────────────────────────────────
 
     [Fact]
-    public void IsJobDisabled_AirGapEnabled_AllJobsDisabled()
+    public void IsJobDisabled_AirGapEnabled_AllJobsDisabledExceptHousekeeping()
     {
         var mode = Build("true");
         Assert.True(mode.IsJobDisabled("vuln-scan"));
         Assert.True(mode.IsJobDisabled("vuln-rescan"));
         Assert.True(mode.IsJobDisabled("deprecation-refresh"));
-        Assert.True(mode.IsJobDisabled("cache-eviction"));
         Assert.True(mode.IsJobDisabled("retention"));
+        Assert.False(mode.IsJobDisabled("cache-eviction"));
+        Assert.False(mode.IsJobDisabled("oci-staging-janitor"));
     }
 
     [Fact]
@@ -175,8 +292,46 @@ public class AirGapModeTests
     [Fact]
     public void IsJobDisabled_AirGapPlusDisableList_AirGapWins()
     {
-        // Even if a job is NOT in DisabledJobs, IsEnabled=true makes all jobs disabled.
+        // Even if a job is NOT in DisabledJobs, IsEnabled=true disables it (housekeeping aside).
         var mode = Build("true", "vuln-scan");
+        Assert.True(mode.IsJobDisabled("retention"));
+    }
+
+    [Fact]
+    public void AirGapExemption_IsExactlyTheDatabaseOnlyScanSweep()
+    {
+        // Pinned so leaving another job running under AIR_GAPPED is a deliberate, reviewed change.
+        Assert.Equal(new[] { "oci-scan-sweep" }, BackgroundJobs.AirGapExempt.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void IsJobDisabled_AirGapLeavesTheScanSweepRunning_ButEveryOtherSwitchStopsIt()
+    {
+        Assert.False(Build("true").IsJobDisabled("oci-scan-sweep"));
+        Assert.Null(BackgroundJobDisabledReason.For(Build("true"), "oci-scan-sweep"));
+
+        Assert.True(Build(null, "true").IsJobDisabled("oci-scan-sweep"));
+        Assert.Equal(BackgroundJobDisabledReason.AllJobs, BackgroundJobDisabledReason.For(Build(null, "true"), "oci-scan-sweep"));
+        Assert.Equal(BackgroundJobDisabledReason.AllJobs, BackgroundJobDisabledReason.For(Build("true", "true"), "oci-scan-sweep"));
+
+        Assert.True(Build("true", "oci-scan-sweep").IsJobDisabled("oci-scan-sweep"));
+        Assert.Equal(BackgroundJobDisabledReason.Named, BackgroundJobDisabledReason.For(Build("true", "oci-scan-sweep"), "oci-scan-sweep"));
+
+        var edge = new AirGapMode(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["AIR_GAPPED"] = "true", ["DEPLOYMENT_MODE"] = "edge" })
+            .Build());
+        Assert.True(edge.IsJobDisabled("oci-scan-sweep"));
+        Assert.Equal(BackgroundJobDisabledReason.Edge, BackgroundJobDisabledReason.For(edge, "oci-scan-sweep"));
+
+        // The exemption is the sweep's alone: every other non-housekeeping job still reports air-gap.
+        Assert.Equal(BackgroundJobDisabledReason.AirGapped, BackgroundJobDisabledReason.For(Build("true"), "oci-blob-sweep"));
+    }
+
+    [Fact]
+    public void IsJobDisabled_AirGapPlusNamedHousekeepingJob_NamedEntryStopsIt()
+    {
+        var mode = Build("true", "cache-eviction");
         Assert.True(mode.IsJobDisabled("cache-eviction"));
+        Assert.False(mode.IsJobDisabled("oci-staging-janitor"));
     }
 }

@@ -26,6 +26,10 @@ public class PathSafeUpstreamSegmentTests
     [InlineData("repomd.xml")]
     [InlineData("repomd.xml.asc")]
     [InlineData("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0-primary.xml.gz")]
+    // Dots that are part of a segment, the adversarial twins of the rejected lone '.'.
+    [InlineData(".npmrc")]
+    [InlineData("x.")]
+    [InlineData("v1.0.0")]
     public void LegitimatePackageSegments_Pass(string value)
         => Assert.True(PathSafeValidator.ValidateUpstreamSegment(value, "segment").IsValid);
 
@@ -43,6 +47,9 @@ public class PathSafeUpstreamSegmentTests
     // traversal rides in the tail: "{sha256}-%2e%2e%2f%2e%2e%2fx".
     [InlineData("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0-%2e%2e%2f%2e%2e%2fx")]
     [InlineData("%2e%2e%2f%2e%2e%2fetc%2fpasswd.rpm")]
+    // A lone '.' is removed when the composed URL is parsed, so the request names a different
+    // path than the one any check on the uncollapsed value saw.
+    [InlineData(".")]
     public void TraversalAndEncodedSegments_AreRejected(string value)
         => Assert.False(PathSafeValidator.ValidateUpstreamSegment(value, "segment").IsValid);
 

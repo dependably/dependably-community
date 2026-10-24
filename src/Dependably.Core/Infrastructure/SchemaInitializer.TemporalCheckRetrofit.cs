@@ -67,16 +67,23 @@ public sealed partial class SchemaInitializer
     /// <c>ApplySchemaAsync</c>, which already holds the cross-process migration lock, so no
     /// additional serialization is needed.
     /// </summary>
-    internal async Task RetrofitTemporalChecksAsync(DbConnection conn, string schemaSql)
+    internal async Task RetrofitTemporalChecksAsync(
+        DbConnection conn, string schemaSql, RetrofitPass? sharedPass = null)
     {
         if (_db.Provider != DbProvider.Postgres)
         {
             return;
         }
 
+        var pass = sharedPass ?? new RetrofitPass(_time, RetrofitPassBudget);
         foreach (var (table, column) in DeclaredTemporalCheckColumns(schemaSql))
         {
-            await EnsureTemporalCheckAsync(conn, table, column);
+            await EnsureTemporalCheckAsync(conn, pass, table, column);
+        }
+
+        if (sharedPass is null)
+        {
+            pass.LogSummary(_logger);
         }
     }
 
@@ -96,7 +103,10 @@ public sealed partial class SchemaInitializer
                 .Select(column => (Table: entry.Key, column.Name)))
             .ToList();
 
-    private async Task EnsureTemporalCheckAsync(DbConnection conn, string table, string column)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "S2077:Formatting SQL queries is security-sensitive",
+        Justification = "The DDL identifiers and bodies derive from the embedded schema text this boot applied or from a "
+                        + "private constant array; none is caller input, and Postgres cannot bind a DDL identifier.")]
+    private async Task EnsureTemporalCheckAsync(DbConnection conn, RetrofitPass pass, string table, string column)
     {
         // Postgres's own auto-generated name for the unnamed inline CHECK in Schema.pg.sql's
         // CREATE TABLE block. Reusing it is what makes a retrofitted database and a fresh install
@@ -126,41 +136,29 @@ public sealed partial class SchemaInitializer
             return;
         }
 
-        // Sonar's engine mis-models Dapper's nullable scalar return and reads this branch as
-        // dead; `validated` is `null` exactly when ExecuteScalarAsync<bool?> found no matching
-        // row, which is the constraint-absent path this branch exists to handle.
-#pragma warning disable S2583
-        if (validated is null)
-        {
-            // rawsql: table, column, and constraintName are all structurally derived from the fixed
-            // embedded Schema.pg.sql text this same boot applied, and the predicate comes from
-            // TemporalCheckPredicate — none of it is caller-supplied, and Postgres has no parameter
-            // form for a DDL identifier or a constraint body.
-            await conn.ExecuteAsync(
-                $"ALTER TABLE {table} ADD CONSTRAINT {constraintName} " +
-                $"{TemporalCheckPredicate.ForPostgres(column)} NOT VALID");
-        }
-#pragma warning restore S2583
+        // rawsql: table, column, and constraintName are all structurally derived from the fixed
+        // embedded Schema.pg.sql text this same boot applied, and the predicate comes from
+        // TemporalCheckPredicate — none of it is caller-supplied, and Postgres has no parameter
+        // form for a DDL identifier or a constraint body.
+        string add = $"ALTER TABLE {table} ADD CONSTRAINT {constraintName} "
+            + $"{TemporalCheckPredicate.ForPostgres(column)} NOT VALID";
 
-        try
-        {
-            // rawsql: see above — identifiers derived from the embedded schema text.
-            await conn.ExecuteAsync($"ALTER TABLE {table} VALIDATE CONSTRAINT {constraintName}");
-        }
-        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.CheckViolation)
+        // Bounded within the shared pass: a table that stays locked is skipped for every remaining
+        // column and constraint, and a spent deadline defers the rest to the next boot.
+        var violation = await ApplyConstraintAsync(
+            conn, pass, [table], table, constraintName,
+            validated is null ? add : null, "temporal_check_retrofit:" + constraintName);
+        if (violation is { } ex)
         {
             // One column's existing rows do not all satisfy the canonical shape. The constraint
-            // stays in place and NOT VALID: every new write to this column is still rejected if it
-            // is non-canonical, only the pre-existing rows are unvouched-for. Logged rather than
-            // rethrown so the remaining columns are still retrofitted and the instance still boots
-            // — and re-attempted on the next boot, so repairing the row is all an operator needs to
-            // do to get the constraint proven.
-            _logger.LogWarning(
-                "Constraint {Constraint} on {Table}.{Column} could not be validated: existing rows " +
-                "hold a non-canonical timestamp shape ({SqlState}). The constraint remains in place " +
-                "but NOT VALID — new writes are still rejected if non-canonical, existing rows are " +
-                "left as they are. Repair those rows to have the next boot validate it.",
-                constraintName, table, column, ex.SqlState);
+            // stays in place and NOT VALID, which Postgres still checks on every INSERT and every
+            // UPDATE of a row, so the warning names the rows that now reject an UPDATE. Logged
+            // rather than rethrown so the remaining columns are still retrofitted and the instance
+            // still boots — and re-attempted on the next boot, so repairing the rows is all an
+            // operator needs to do to get the constraint proven.
+            await WarnOnViolatingRowsAsync(
+                conn, pass, constraintName, table, column,
+                CheckViolationPredicate(TemporalCheckPredicate.ForPostgres(column)), ex);
         }
     }
 }

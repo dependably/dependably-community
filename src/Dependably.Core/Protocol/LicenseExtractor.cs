@@ -652,7 +652,9 @@ public static partial class LicenseExtractor
     }
 
     /// <summary>
-    /// Walks an npm tarball to <c>package/package.json</c> and parses it.
+    /// Walks an npm tarball to its single top-level <c>package.json</c> (at the root or inside one wrapper
+    /// directory of any name, as <see cref="NpmTarballManifestScanner"/> defines) and parses it; a tarball
+    /// with several top-level manifests yields <see cref="ExtractedMetadata.Empty"/>.
     /// <para>Owns <paramref name="tarball"/> — see stream-ownership note on the class.
     /// Streams the gzip / tar without buffering the artefact; the per-entry
     /// <c>package.json</c> body is small (a few KB) and copied into a local
@@ -662,26 +664,12 @@ public static partial class LicenseExtractor
     {
         try
         {
-            using var gzip = new LimitedReadStream(
-                new GZipStream(tarball, CompressionMode.Decompress, leaveOpen: false),
-                ArchiveDecompressLimits.MaxDecompressedBytes, "npm tarball");
-            using var tar = new TarReader(gzip, leaveOpen: false);
-            while (tar.GetNextEntry() is { } entry)
+            // An ambiguous (multi-manifest) or unreadable tarball yields no licence: unknown, never
+            // the first manifest's claim.
+            var scan = NpmTarballManifestScanner.Scan(tarball, leaveOpen: false);
+            if (scan.Outcome == NpmManifestScanOutcome.Found)
             {
-                if (entry.DataStream is null)
-                {
-                    continue;
-                }
-
-                if (!entry.Name.EndsWith("package/package.json", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                using var ms = new MemoryStream();
-                entry.DataStream.CopyTo(ms);
-                var node = JsonNode.Parse(ms.ToArray());
-                return FromNpmPackumentVersion(node);
+                return FromNpmPackumentVersion(JsonNode.Parse(scan.Bytes!));
             }
         }
         catch { /* malformed tarball — return empty metadata, callers tolerate */ }

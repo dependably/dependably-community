@@ -181,7 +181,7 @@ async function putRawDocument(path, rawBody) {
 // longer carries `org` in URLs. System-admin endpoints are at /api/v1/system/* and only
 // reachable from the apex host (multi mode).
 export const api = {
-  // Bootstrap — public, unauthenticated. Returns { mode, isApex, apexHost?, tenantSlug?, capabilities }.
+  // Bootstrap — public, unauthenticated. Returns { mode, isApex, apexHost?, tenantDomain?, tenantSlug?, capabilities }.
   getBootstrap: () => req('GET', '/bootstrap'),
 
   // Third-party attribution data (CycloneDX subset). Public, unauthenticated. May return
@@ -314,6 +314,18 @@ export const api = {
     return req('GET', `/packages?${q}`)
   },
   getPackage: (eco, name) => req('GET', `/packages/${eco}/${name.replaceAll('/', '%2F')}`),
+  // One OCI image's stored scan detail: every platform's coverage, one platform's components a
+  // page at a time. `affectedOnly` defaults to true on the server; omitted options are not sent.
+  getOciScan: (
+    /** @type {string} */ name,
+    /** @type {string} */ digest,
+    /** @type {{ platform?: string, affectedOnly?: boolean, offset?: number, limit?: number }} */
+    { platform, affectedOnly, offset, limit } = {},
+  ) => {
+    const q = qs({ platform, affectedOnly, offset, limit })
+    const query = q ? `?${q}` : ''
+    return req('GET', `/packages/oci/${name.replaceAll('/', '%2F')}/${digest}/scan${query}`)
+  },
   deleteVersion: (eco, name, ver) => req('DELETE', `/packages/${eco}/${name.replaceAll('/', '%2F')}/${ver}`),
   // Download a single artifact. Cookie-authenticated; the server streams from the correct
   // storage tier and sets Content-Disposition, so the saved filename matches the artifact.
@@ -556,7 +568,8 @@ export const api = {
   //
   // The allowlist carries both non-denied dispositions: 'allowed' is a blanket yes and
   // 'conditional' means acceptable only in some contexts, with the condition in the note.
-  // Both serve; only the blocklist refuses.
+  // Both serve. The blocklist always refuses; under block mode a licence on neither list
+  // is refused too, so an empty allowlist refuses everything.
   getLicensePolicy: () => req('GET', '/license-policy'),
   setLicenseMode: (mode) => req('PUT', '/license-policy/mode', { mode }),
   addLicenseAllow: (spdx, disposition = 'allowed', note = null) =>
@@ -593,9 +606,18 @@ export const api = {
   // Lazy advisory detail for the expandable row — tenant-scoped server-side (BOLA).
   // `version` (optional) is the installed version; the server uses it to resolve the
   // fixed version of the affected range containing it (remediation.fixedVersion).
-  getVulnDetail: (osvId, version) => {
-    const versionQuery = version ? `?version=${encodeURIComponent(version)}` : ''
-    return req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}${versionQuery}`)
+  // `ecosystem` + `name` name the package being viewed: one advisory can affect several packages,
+  // and the fixed version is resolved for this one.
+  getVulnDetail: (osvId, version, ecosystem, name) => {
+    const params = new URLSearchParams()
+    if (version) params.set('version', version)
+    if (ecosystem && name) {
+      params.set('ecosystem', ecosystem)
+      params.set('name', name)
+    }
+    const query = params.toString()
+    const suffix = query ? `?${query}` : ''
+    return req('GET', `/vulnerabilities/${encodeURIComponent(osvId)}${suffix}`)
   },
   // Blast radius — "which of my applications ship this?", the reverse of the SBOM component
   // cross-link. Org-scoped server-side from the session, never from a parameter. Latest project

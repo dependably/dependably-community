@@ -743,4 +743,159 @@ public sealed class SystemMfaTwoStepLoginTests : IClassFixture<DependablyMultiFa
             Assert.DoesNotContain("dependably_mfa=", cookies);
         }
     }
+
+    // ── Status change between the factors: the challenge mints nothing ────────
+
+    private async Task SetAdminStatusAsync(string adminId, string status)
+    {
+        using var operatorClient = await _factory.CreateSystemAdminClient();
+        var resp = await operatorClient.PatchAsJsonAsync(
+            $"/api/v1/system/admins/{adminId}/account-status", new { accountStatus = status });
+        Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
+    }
+
+    private async Task<(long Devices, long LoginSuccesses, string? LastLoginAt)> ReadLoginTraceAsync(string adminId)
+    {
+        await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        // xtenant: mfa_trusted_devices user_id is globally unique for system admins
+        long devices = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM mfa_trusted_devices WHERE user_id = @adminId AND realm = 'system'",
+            new { adminId });
+        // xtenant: system audit is global, no org_id filter required
+        long logins = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM audit_log WHERE actor_id = @adminId AND action = 'login.success' AND scope = 'system'",
+            new { adminId });
+        string? lastLogin = await conn.ExecuteScalarAsync<string?>(
+            "SELECT last_login_at FROM system_admins WHERE id = @adminId", new { adminId });
+        return (devices, logins, lastLogin);
+    }
+
+    /// <summary>
+    /// The challenge carries the admin id and token version from the first factor. An admin
+    /// locked, disabled, or disabled and re-activated after the first factor must not complete the
+    /// second: no session, no remembered device, no login.success or last_login_at, and the same
+    /// 401 an expired challenge gets, so the response does not reveal the account's status.
+    /// </summary>
+    [Theory]
+    [InlineData("disabled", false)]
+    [InlineData("locked", false)]
+    [InlineData("disabled", true)]
+    public async Task StatusChangedBetweenFactors_SecondFactorIssuesNothing(string status, bool reactivate)
+    {
+        var (adminId, email) = await SeedMfaAdminAsync();
+        string manualKey = await GetManualKeyForAdminAsync(adminId);
+
+        using var c = CreateApexClient();
+        var step1 = await PostLoginAsync(c, email, TestPassword);
+        Assert.Equal(HttpStatusCode.OK, step1.StatusCode);
+        string? mfaCookie = ExtractCookieValue(step1, "dependably_mfa");
+        Assert.NotNull(mfaCookie);
+
+        await SetAdminStatusAsync(adminId, status);
+        if (reactivate)
+        {
+            await SetAdminStatusAsync(adminId, "active");
+        }
+
+        foreach (string code in TotpTestHelper.ComputeWindow(manualKey))
+        {
+            var step2 = await PostLoginTotpAsync(c, mfaCookie, code, rememberDevice: true);
+            Assert.Equal(HttpStatusCode.Unauthorized, step2.StatusCode);
+            Assert.Null(ExtractCookieValue(step2, "dependably_session"));
+            Assert.Null(ExtractCookieValue(step2, "dependably_device"));
+            using var body = JsonDocument.Parse(await step2.Content.ReadAsStringAsync());
+            Assert.Equal("Invalid credentials.", body.RootElement.GetProperty("detail").GetString());
+        }
+
+        var (devices, logins, lastLogin) = await ReadLoginTraceAsync(adminId);
+        Assert.Equal(0, devices);
+        Assert.Equal(0, logins);
+        Assert.Null(lastLogin);
+    }
+
+    /// <summary>
+    /// A refused stale challenge is a login failure an operator needs to see: the audit row names
+    /// the reason and realm, and the LoginFailure event reaches the audit emitter (and so the SIEM
+    /// and webhook feeds). It is still not charged against the lockout budget.
+    /// </summary>
+    [Fact]
+    public async Task StaleChallengeRefusal_IsAuditedWithItsReason_AndEmitsLoginFailure()
+    {
+        var (adminId, email) = await SeedMfaAdminAsync();
+        string manualKey = await GetManualKeyForAdminAsync(adminId);
+        string emailHashPattern = "%" + LoginService.HashEmail(email) + "%";
+
+        using var c = CreateApexClient();
+        var step1 = await PostLoginAsync(c, email, TestPassword);
+        Assert.Equal(HttpStatusCode.OK, step1.StatusCode);
+        string? mfaCookie = ExtractCookieValue(step1, "dependably_mfa");
+        Assert.NotNull(mfaCookie);
+
+        long refusalsBefore = await CountSystemStaleRefusalsAsync();
+        await SetAdminStatusAsync(adminId, "disabled");
+
+        var step2 = await PostLoginTotpAsync(c, mfaCookie!, TotpTestHelper.Compute(manualKey));
+        Assert.Equal(HttpStatusCode.Unauthorized, step2.StatusCode);
+
+        Assert.Equal(refusalsBefore + 1, await CountSystemStaleRefusalsAsync());
+        await using (var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync())
+        {
+            // xtenant: system-realm events carry no org_id
+            long events = await conn.ExecuteScalarAsync<long>(
+                """
+                SELECT COUNT(*) FROM audit_event
+                WHERE org_id IS NULL AND event_type = 'auth.login.failure' AND outcome = 'rejected'
+                  AND payload LIKE @emailHashPattern AND payload LIKE '%"realm":"system"%'
+                """,
+                new { emailHashPattern });
+            Assert.Equal(1, events);
+        }
+
+        var lockout = _factory.Services.GetRequiredService<ILockoutStore>();
+        var (failedCount, _) = await lockout.GetAsync(
+            LoginService.HashLockoutKey("system", null, email), CancellationToken.None);
+        Assert.Equal(0, failedCount);
+    }
+
+    private async Task<long> CountSystemStaleRefusalsAsync()
+    {
+        await using var conn = await _factory.Services.GetRequiredService<IMetadataStore>().OpenAsync();
+        // xtenant: system audit is global, no org_id filter required
+        return await conn.ExecuteScalarAsync<long>(
+            """
+            SELECT COUNT(*) FROM audit_log
+            WHERE scope = 'system' AND action = 'login.failure'
+              AND detail LIKE '%"reason":"stale_challenge"%' AND detail LIKE '%"realm":"system"%'
+            """);
+    }
+
+    /// <summary>
+    /// A remembered device that exists when an admin is re-activated (for example one written while
+    /// the admin was disabled) is dropped by the re-activation, so the next login asks for the
+    /// second factor again.
+    /// </summary>
+    [Fact]
+    public async Task Reactivation_DropsRememberedDevices_SoTheNextLoginNeedsTheSecondFactor()
+    {
+        var (adminId, email) = await SeedMfaAdminAsync();
+
+        await SetAdminStatusAsync(adminId, "disabled");
+        var devices = _factory.Services.GetRequiredService<TrustedDeviceService>();
+        string deviceCookie = await devices.CreateAsync(adminId, "system", null, "test-agent");
+        Assert.Equal(1, (await ReadLoginTraceAsync(adminId)).Devices);
+
+        await SetAdminStatusAsync(adminId, "active");
+
+        Assert.Equal(0, (await ReadLoginTraceAsync(adminId)).Devices);
+        using var c = CreateApexClient();
+        using var login = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/login");
+        login.Content = JsonContent.Create(new { email, password = TestPassword });
+        login.Headers.Add("Cookie", $"dependably_device={deviceCookie}");
+        var resp = await c.SendAsync(login);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        using var body = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.True(body.RootElement.TryGetProperty("mfaRequired", out var mfaRequired) && mfaRequired.GetBoolean(),
+            "the remembered device must not skip the second factor after re-activation");
+        Assert.Null(ExtractCookieValue(resp, "dependably_session"));
+    }
 }

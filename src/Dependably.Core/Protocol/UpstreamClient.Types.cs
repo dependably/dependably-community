@@ -177,6 +177,17 @@ public sealed record UpstreamMetadataResponse(
     byte[] Body)
 {
     public string BodyAsString() => System.Text.Encoding.UTF8.GetString(Body);
+
+    /// <summary>
+    /// True when the metadata cache served this body past its positive TTL because the refresh
+    /// fetch failed (a transport fault or a 5xx): the upstream did not answer, and the body is the
+    /// last answer it gave. A request-serving caller relays it as before, which is the point of
+    /// the serve-stale window. A caller that records upstream facts treats it as no answer from
+    /// that source, because the last answer may predate a deprecation, yank, unlisting or
+    /// retirement the upstream has since published. False for a live upstream response and for a
+    /// cached entry still inside its TTL.
+    /// </summary>
+    public bool IsStale { get; init; }
 }
 
 // S3925 (legacy ISerializable pattern) is suppressed on each exception below:

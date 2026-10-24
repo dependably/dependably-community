@@ -18,9 +18,9 @@
 # fork build with no mirror access, the GitHub Actions workflow) is unaffected.
 # image-registry-ok: these defaults are the public refs a mirrorless build needs; the GitLab
 # pipeline overrides all three with --build-arg pointing at the mirror.
-ARG NODE_IMAGE=node:26-alpine@sha256:e88a35be04478413b7c71c455cd9865de9b9360e1f43456be5951032d7ac1a66
-ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:5c559aa5d99337e400d39ab4fa1f6979d126c29b20939d53658ed38300571e74
-ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:f276c0256ffca8fe816d48ba261962b54fea1b0e6f870b6a60b3b705c89e78ac
+ARG NODE_IMAGE=node:26-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797
+ARG SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0-alpine@sha256:230c3fbae0ceedc70bca04eed2bfb5694e8b248cadbb81010f41b7a993601f55
+ARG RUNTIME_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:10.0-alpine@sha256:1a5dbee0a1d2bb1d038e212e8ccdbc12783b5cfbed866fe75d126ee80178a52a
 
 # Frontend build stage. Pinned to the build platform: the emitted wwwroot assets
 # and SBOM are architecture-independent, so this stage runs node/esbuild natively
@@ -186,11 +186,12 @@ ARG REGISTRY_URL=
 # credential nor the private host survives in the shipped layer. An empty
 # REGISTRY_URL or an absent secret leaves the default dl-cdn.alpinelinux.org
 # mirror in place, so the build succeeds unmodified for public/fork checkouts.
-# The proxy is a cache, not a trust root, so it fails open: if the proxied apk
-# add does not resolve (proxy down, apk ecosystem not yet served, index cold),
-# the original repositories are restored and the packages are fetched from
-# dl-cdn. This keeps the image build from hard-depending on the registry running
-# ahead of it — the apk proxy is itself shipped in this image.
+# With credentials present the proxy is the only apk source: a proxied apk add
+# that does not resolve (proxy down, apk ecosystem not served, index cold) fails
+# the build rather than falling back to dl-cdn, so a credentialed build never
+# reaches the public mirror and a proxy regression surfaces here instead of
+# being papered over. A build that must proceed with the registry down is a
+# mirrorless build: run it with REGISTRY_URL and the secret unset.
 # tzdata is not optional cosmetics: .NET resolves IANA zones by reading
 # /usr/share/zoneinfo, and the runtime-deps base ships none. Without it
 # TimeZoneInfo.TryFindSystemTimeZoneById rejects every zone, so the per-user and
@@ -205,9 +206,8 @@ RUN --mount=type=secret,id=registry_key \
       HOST=$(printf '%s' "$REGISTRY_URL" | sed -E 's|^https?://||; s|/.*||') && \
       sed -E -i "s|https://dl-cdn\.alpinelinux\.org/alpine|${SCHEME}://ci:$(cat /run/secrets/registry_key)@${HOST}/apk|" /etc/apk/repositories; \
       if ! apk add --no-cache sqlite-libs icu-libs tzdata; then \
-        echo "apk proxy unreachable at ${REGISTRY_URL}; falling back to dl-cdn.alpinelinux.org" >&2; \
-        cp /etc/apk/repositories.orig /etc/apk/repositories && \
-        apk add --no-cache sqlite-libs icu-libs tzdata; \
+        echo "ERROR: apk proxy at ${REGISTRY_URL} did not serve sqlite-libs icu-libs tzdata; refusing to fall back to dl-cdn.alpinelinux.org" >&2; \
+        exit 1; \
       fi; \
       mv /etc/apk/repositories.orig /etc/apk/repositories; \
     else \

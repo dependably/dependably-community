@@ -322,6 +322,27 @@ public sealed class NuGetFlatContainerHandlerVersionListFailureTests : IAsyncLif
             TimeProvider.System, NullLogger<NuGetFlatContainerHandler>.Instance);
     }
 
+    [Fact]
+    public async Task VersionList_UpstreamVersionDifferingOnlyInCase_FoldsIntoTheLocalOne()
+    {
+        // NuGet versions are case-insensitive, so the upstream 1.0.0-RC1 is the same version as the
+        // hosted 1.0.0-rc1 and is listed once.
+        const string id = "case-fold-pkg";
+        await SeedLocalPackageAsync(id, "1.0.0-rc1");
+        await SeedMixedClaimAsync("nuget", id);
+        await SeedUpstreamsAsync(_serverA.Urls[0]);
+        StubVersionList(_serverA, id, 200, """{"versions":["1.0.0-RC1","2.0.0"]}""");
+
+        var handler = BuildHandler();
+        var http = BuildHttpContext(_orgId);
+        var result = await handler.FlatcontainerVersionsAsync(http, _orgId, id, CancellationToken.None);
+
+        var json = Assert.IsType<JsonResult>(result);
+        var versions = Assert.IsAssignableFrom<IEnumerable<string>>(json.Value!.GetType().GetProperty("versions")!.GetValue(json.Value));
+        Assert.Equal(2, versions.Count());
+    }
+
+
     private static DefaultHttpContext BuildHttpContext(string orgId)
     {
         var http = new DefaultHttpContext();

@@ -338,12 +338,20 @@ public sealed partial class SchemaInitializer
                 first_seen_at       TEXT,
                 cache_artifact_id   TEXT REFERENCES cache_artifact(id) ON DELETE CASCADE,
                 owner_kind          TEXT NOT NULL DEFAULT 'package_version'
-                                    CHECK (owner_kind IN ('package_version','cache_artifact'))
+                                    CHECK (owner_kind IN ('package_version','cache_artifact')),
+                mal_still_live_for_version INTEGER NOT NULL DEFAULT 0
+                                    CHECK (mal_still_live_for_version IN (0,1)),
+                alias_severity      TEXT,
+                alias_cvss_score    REAL,
+                alias_summary       TEXT,
+                alias_resolved_at   TEXT
             );
             INSERT INTO package_version_vulns_new
-                (id, package_version_id, vuln_id, checked_at, first_seen_at, cache_artifact_id, owner_kind)
+                (id, package_version_id, vuln_id, checked_at, first_seen_at, cache_artifact_id, owner_kind,
+                 mal_still_live_for_version, alias_severity, alias_cvss_score, alias_summary, alias_resolved_at)
             SELECT lower(hex(randomblob(16))), package_version_id, vuln_id, checked_at, first_seen_at,
-                   cache_artifact_id, owner_kind
+                   cache_artifact_id, owner_kind, mal_still_live_for_version, alias_severity, alias_cvss_score,
+                   alias_summary, alias_resolved_at
             FROM package_version_vulns;
             DROP TABLE package_version_vulns;
             ALTER TABLE package_version_vulns_new RENAME TO package_version_vulns;

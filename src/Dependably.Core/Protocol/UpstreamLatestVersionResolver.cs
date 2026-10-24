@@ -17,11 +17,22 @@ namespace Dependably.Protocol;
 /// first in the ecosystem's native ordering — the raw material for the per-version
 /// versions-behind operational-risk count (see <see cref="EcosystemVersionOrdering"/>). Null when
 /// the ecosystem's metadata document doesn't enumerate the full version set or the fetch failed.
+/// <see cref="IsReserved"/> marks the result for a name the org has reserved: upstream was never
+/// consulted, so the result carries no upstream answer at all. It is not a miss, and callers must
+/// not record it as one in state another org can read.
 /// </summary>
 public sealed record UpstreamLatestVersion(
     string? Version, DateTimeOffset? PublishedAt, IReadOnlyList<string>? StableVersionsDescending = null)
 {
     public static readonly UpstreamLatestVersion None = new(null, null, null);
+
+    /// <summary>The result for a reserved name: no version, and upstream was not consulted.</summary>
+    public static readonly UpstreamLatestVersion Reserved = new(null, null, null) { IsReserved = true };
+
+    /// <summary>
+    /// True when the name is reserved for the org, so upstream was deliberately not consulted.
+    /// </summary>
+    public bool IsReserved { get; private init; }
 }
 
 /// <summary>
@@ -34,6 +45,15 @@ public interface IUpstreamLatestVersionResolver
     /// ecosystem's metadata carries one) for <paramref name="purlName"/>.
     /// </summary>
     Task<UpstreamLatestVersion> ResolveAsync(string ecosystem, string orgId, string purlName, CancellationToken ct = default);
+
+    /// <summary>
+    /// <see cref="ResolveAsync"/> for a caller that records the answer as an upstream fact: a
+    /// metadata body the cache served past its TTL because the upstream failed
+    /// (<see cref="UpstreamMetadataResponse.IsStale"/>) is no answer from that source, so the next
+    /// source is asked, and <see cref="UpstreamLatestVersion.None"/> is returned when no source gives
+    /// a live answer. <see cref="ResolveAsync"/> reads a stale body like a live one.
+    /// </summary>
+    Task<UpstreamLatestVersion> ResolveFreshAsync(string ecosystem, string orgId, string purlName, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -66,10 +86,19 @@ public interface IUpstreamLatestVersionResolver
 ///         set, so the stable-version list stays null.</item>
 /// </list>
 ///
+/// A name the org has reserved in its ecosystem (see
+/// <see cref="ReservedNamespaceService.IsUpstreamNameReservedAsync"/>; for Maven, either reading
+/// of its metadata URL) is never looked up: no upstream request is made for it and the result is
+/// <see cref="UpstreamLatestVersion.Reserved"/>, never <see cref="UpstreamLatestVersion.None"/>.
+///
 /// Every ecosystem's upstream base URL is resolved per-org through <see cref="UpstreamRegistryResolver"/>
 /// — the same DB-backed, priority-ordered source the hosted proxy handlers use — so an edge node's
 /// seeded master row (with its Bearer reader token) and a tenant's configured mirror are honored
 /// identically here, rather than a hardcoded public-registry default bypassing both.
+///
+/// <see cref="ResolveFreshAsync"/> declines a metadata body the cache served stale and asks the
+/// next source, for a caller that records the answer as an upstream fact (the deprecation
+/// refresh); <see cref="ResolveAsync"/> reads one like a live answer.
 ///
 /// Methods return <see cref="UpstreamLatestVersion.None"/> when the upstream definitively has no
 /// latest (non-success status, empty/missing version data) and let transient/parse exceptions
@@ -80,44 +109,75 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
 {
     private readonly UpstreamClient _upstream;
     private readonly UpstreamRegistryResolver _registries;
+    private readonly ReservedNamespaceService _reservedNamespaces;
     private readonly Hex.HexMasterKeyResolver? _hexMasterKeys;
 
     public UpstreamLatestVersionResolver(
         UpstreamClient upstream,
         UpstreamRegistryResolver registries,
+        ReservedNamespaceService reservedNamespaces,
         Hex.HexMasterKeyResolver? hexMasterKeys = null)
     {
         _upstream = upstream;
         _registries = registries;
+        _reservedNamespaces = reservedNamespaces;
         _hexMasterKeys = hexMasterKeys;
     }
 
+    private static readonly HashSet<string> ResolvableEcosystems =
+        ["npm", "pypi", "nuget", "maven", "cargo", "hex", "golang"];
+
     /// <inheritdoc />
-    public Task<UpstreamLatestVersion> ResolveAsync(string ecosystem, string orgId, string purlName, CancellationToken ct = default) =>
-        ecosystem switch
+    public Task<UpstreamLatestVersion> ResolveAsync(string ecosystem, string orgId, string purlName, CancellationToken ct = default)
+        => ResolveCoreAsync(ecosystem, orgId, purlName, requireFresh: false, ct);
+
+    /// <inheritdoc />
+    public Task<UpstreamLatestVersion> ResolveFreshAsync(string ecosystem, string orgId, string purlName, CancellationToken ct = default)
+        => ResolveCoreAsync(ecosystem, orgId, purlName, requireFresh: true, ct);
+
+    // A source's response is an answer when it is a 2xx and, for a fresh-only resolve, not a body
+    // the metadata cache served stale.
+    private static bool IsAnswer(UpstreamMetadataResponse resp, bool requireFresh) =>
+        resp.IsSuccessStatusCode && !(requireFresh && resp.IsStale);
+
+    private async Task<UpstreamLatestVersion> ResolveCoreAsync(
+        string ecosystem, string orgId, string purlName, bool requireFresh, CancellationToken ct)
+    {
+        if (!ResolvableEcosystems.Contains(ecosystem))
         {
-            "npm" => ResolveNpmAsync(orgId, purlName, ct),
-            "pypi" => ResolvePyPiAsync(orgId, purlName, ct),
-            "nuget" => ResolveNuGetAsync(orgId, purlName, ct),
-            "maven" => ResolveMavenAsync(orgId, purlName, ct),
-            "cargo" => ResolveCargoAsync(orgId, purlName, ct),
-            "hex" => ResolveHexAsync(orgId, purlName, ct),
-            "golang" => ResolveGoAsync(orgId, purlName, ct),
-            _ => Task.FromResult(UpstreamLatestVersion.None),
-        };
+            return UpstreamLatestVersion.None;
+        }
+
+        // Decided before the registry resolve, so a reserved name costs no upstream request (the
+        // NuGet registration-leaf fetch included) and every caller (first-fetch seed, package
+        // lookup, daily refresh) inherits the decision.
+        return await _reservedNamespaces.IsUpstreamNameReservedAsync(orgId, ecosystem, purlName, ct)
+            ? UpstreamLatestVersion.Reserved
+            : ecosystem switch
+            {
+                "npm" => await ResolveNpmAsync(orgId, purlName, requireFresh, ct),
+                "pypi" => await ResolvePyPiAsync(orgId, purlName, requireFresh, ct),
+                "nuget" => await ResolveNuGetAsync(orgId, purlName, requireFresh, ct),
+                "maven" => await ResolveMavenAsync(orgId, purlName, requireFresh, ct),
+                "cargo" => await ResolveCargoAsync(orgId, purlName, requireFresh, ct),
+                "hex" => await ResolveHexAsync(orgId, purlName, requireFresh, ct),
+                "golang" => await ResolveGoAsync(orgId, purlName, requireFresh, ct),
+                _ => UpstreamLatestVersion.None,
+            };
+    }
 
     /// <summary>
     /// Cargo: the sparse index enumerates every published version with its yank state. Yanked
     /// versions are excluded — a yanked crate is not a release Cargo resolves to. The index
     /// carries no publish date, so PublishedAt stays null.
     /// </summary>
-    private async Task<UpstreamLatestVersion> ResolveCargoAsync(string orgId, string purlName, CancellationToken ct)
+    private async Task<UpstreamLatestVersion> ResolveCargoAsync(string orgId, string purlName, bool requireFresh, CancellationToken ct)
     {
         foreach (var source in await _registries.ResolveAsync(orgId, "cargo", ct))
         {
             var resp = await _upstream.GetOrFetchMetadataAsync(
                 $"{source.Url}/{CargoController.IndexPath(purlName)}", source.AuthorizationHeader, ct);
-            if (!resp.IsSuccessStatusCode)
+            if (!IsAnswer(resp, requireFresh))
             {
                 continue;
             }
@@ -146,10 +206,11 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
     /// status and publish time. Retired releases are excluded — a retirement is Hex's deprecation —
     /// and the latest carries the publish time the index recorded for it.
     /// </summary>
-    private async Task<UpstreamLatestVersion> ResolveHexAsync(string orgId, string purlName, CancellationToken ct)
+    private async Task<UpstreamLatestVersion> ResolveHexAsync(string orgId, string purlName, bool requireFresh, CancellationToken ct)
     {
         var result = await Hex.HexUpstreamPackageFetcher.FetchAsync(
-            _upstream, _registries, orgId, purlName, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, _hexMasterKeys, ct);
+            _upstream, _registries, orgId, purlName, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, _hexMasterKeys,
+            requireFresh, ct);
         if (result.Package is null)
         {
             return UpstreamLatestVersion.None;
@@ -165,14 +226,14 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         return new UpstreamLatestVersion(stable[0], latest?.PublishedAt?.ToDateTimeOffset(), stable);
     }
 
-    private async Task<UpstreamLatestVersion> ResolveGoAsync(string orgId, string purlName, CancellationToken ct)
+    private async Task<UpstreamLatestVersion> ResolveGoAsync(string orgId, string purlName, bool requireFresh, CancellationToken ct)
     {
         string encodedModule = GoController.EncodeBangEncoding(purlName);
         foreach (var source in await _registries.ResolveAsync(orgId, "golang", ct))
         {
             var resp = await _upstream.GetOrFetchMetadataAsync(
                 $"{source.Url}/{encodedModule}/@latest", source.AuthorizationHeader, ct);
-            if (!resp.IsSuccessStatusCode)
+            if (!IsAnswer(resp, requireFresh))
             {
                 continue;
             }
@@ -203,10 +264,10 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         return UpstreamLatestVersion.None;
     }
 
-    private async Task<UpstreamLatestVersion> ResolveNpmAsync(string orgId, string purlName, CancellationToken ct)
+    private async Task<UpstreamLatestVersion> ResolveNpmAsync(string orgId, string purlName, bool requireFresh, CancellationToken ct)
     {
         // Scoped packages arrive percent-encoded (%40scope%2Fpkg); the packument URL uses @scope/pkg.
-        string packageName = Uri.UnescapeDataString(purlName).Replace("%40", "@").Replace("%2F", "/");
+        string packageName = PurlNormalizer.NpmPackageName(purlName);
 
         foreach (var source in await _registries.ResolveAsync(orgId, "npm", ct))
         {
@@ -215,7 +276,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
             // (publishedAt stays null).
             var resp = await NpmPackumentFetcher.FetchAsync(
                 _upstream, $"{source.Url}/{packageName}", source.AuthorizationHeader, logger: null, ct);
-            if (!resp.IsSuccessStatusCode)
+            if (!IsAnswer(resp, requireFresh))
             {
                 continue;
             }
@@ -250,12 +311,12 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         return UpstreamLatestVersion.None;
     }
 
-    private async Task<UpstreamLatestVersion> ResolvePyPiAsync(string orgId, string purlName, CancellationToken ct)
+    private async Task<UpstreamLatestVersion> ResolvePyPiAsync(string orgId, string purlName, bool requireFresh, CancellationToken ct)
     {
         foreach (var source in await _registries.ResolveAsync(orgId, "pypi", ct))
         {
             var resp = await _upstream.GetOrFetchMetadataAsync($"{source.Url}/pypi/{purlName}/json", source.AuthorizationHeader, ct);
-            if (!resp.IsSuccessStatusCode)
+            if (!IsAnswer(resp, requireFresh))
             {
                 continue;
             }
@@ -309,7 +370,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         return null;
     }
 
-    private async Task<UpstreamLatestVersion> ResolveNuGetAsync(string orgId, string id, CancellationToken ct)
+    private async Task<UpstreamLatestVersion> ResolveNuGetAsync(string orgId, string id, bool requireFresh, CancellationToken ct)
     {
         // Reject path-shaped ids before they reach the upstream URL (defence in depth — ids
         // sourced from cache_artifact were validated at fetch time, but this method is also
@@ -323,7 +384,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         {
             var resp = await _upstream.GetOrFetchMetadataAsync(
                 $"{source.Url}/flatcontainer/{id.ToLowerInvariant()}/index.json", source.AuthorizationHeader, ct);
-            if (!resp.IsSuccessStatusCode)
+            if (!IsAnswer(resp, requireFresh))
             {
                 continue;
             }
@@ -369,6 +430,8 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
     // Flatcontainer carries no publish timestamp, so the picked version's date is a second,
     // best-effort fetch of its registration leaf ("published" or "catalogEntry.published").
     // Failure here must never fail latest-version resolution — the version is already resolved.
+    // A stale cached leaf is read even for a fresh-only resolve: the version was picked from a
+    // live flatcontainer answer, and a published version's own publish time does not change.
     private async Task<DateTimeOffset?> FetchNuGetPublishedAtAsync(
         UpstreamSource source, string id, string version, CancellationToken ct)
     {
@@ -396,7 +459,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         }
     }
 
-    private async Task<UpstreamLatestVersion> ResolveMavenAsync(string orgId, string coordinate, CancellationToken ct)
+    private async Task<UpstreamLatestVersion> ResolveMavenAsync(string orgId, string coordinate, bool requireFresh, CancellationToken ct)
     {
         // The maven purl name is "groupId:artifactId"; the metadata path is groupId-as-path/artifact.
         int sep = coordinate.IndexOf(':');
@@ -417,7 +480,7 @@ public sealed class UpstreamLatestVersionResolver : IUpstreamLatestVersionResolv
         {
             var resp = await _upstream.GetOrFetchMetadataAsync(
                 $"{source.Url}/{groupPath}/{artifact}/maven-metadata.xml", source.AuthorizationHeader, ct);
-            if (!resp.IsSuccessStatusCode)
+            if (!IsAnswer(resp, requireFresh))
             {
                 continue;
             }

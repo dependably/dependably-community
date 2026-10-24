@@ -34,6 +34,10 @@ public sealed class RowLevelSecurityCoverageComplianceTests
         "instance_lock",
         "vuln_tracker_health",
         "vuln_tracker_fetch_log",
+        "kev_catalog",              // public CISA KEV catalogue copy
+        "epss_scores",              // public FIRST.org EPSS bulk-file copy
+        "epss_scores_staging",      // transient landing copy of that file during a refresh
+        "vulnerability_aliases",    // derived alias -> advisory index over the shared advisory store
     ];
 
     /// <summary>

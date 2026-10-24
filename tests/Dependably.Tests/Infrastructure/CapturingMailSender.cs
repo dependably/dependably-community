@@ -34,6 +34,15 @@ public sealed class CapturingMailSender : SmtpMailSender
     /// </summary>
     public Func<Exception>? Failure { get; set; }
 
+    /// <summary>
+    /// When non-null, every send is recorded and then waits for this task before it completes (or
+    /// throws <see cref="Failure"/>). A test holds the gate to freeze the delivery worker mid-send,
+    /// which makes "queued, not yet delivered" a state it controls rather than a scheduling race;
+    /// completing the task lets the held sends finish. The wait honours the send's cancellation
+    /// token, so a host shutting down is never blocked by a gate nobody released.
+    /// </summary>
+    public Task? Gate { get; set; }
+
     /// <summary>Snapshot of every send recorded so far, in call order.</summary>
     public IReadOnlyList<SentMessage> Sent
     {
@@ -46,7 +55,7 @@ public sealed class CapturingMailSender : SmtpMailSender
         }
     }
 
-    public override Task SendAsync(
+    public override async Task SendAsync(
         SmtpTransportSettings transport, IReadOnlyList<string> to, string subject, string body,
         CancellationToken ct = default)
     {
@@ -57,6 +66,14 @@ public sealed class CapturingMailSender : SmtpMailSender
 
         // Recorded before throwing, so a test asserting a failure can still assert which recipients
         // and body the attempt carried.
-        return Failure is null ? Task.CompletedTask : Task.FromException(Failure());
+        if (Gate is not null)
+        {
+            await Gate.WaitAsync(ct);
+        }
+
+        if (Failure is not null)
+        {
+            throw Failure();
+        }
     }
 }

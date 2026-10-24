@@ -39,8 +39,19 @@ public sealed class VulnFactsConstructionComplianceTests
     private const string Construction = "new VersionFacts(";
     private const string OptOut = "vuln-facts-ok:";
 
-    /// <summary>The file where the gate's arm ladder lives and constructs the record directly.</summary>
+    /// <summary>The file that declares the <c>VersionFacts</c> record and its factory.</summary>
     private const string OwningFile = "BlockGateService.cs";
+
+    /// <summary>
+    /// The files of the gate's own partial class: the arm ladder and its policy core construct the
+    /// record directly. Named exactly, in the owning directory, so a new file cannot inherit the
+    /// standing by its name alone.
+    /// </summary>
+    private static readonly string[] OwningFiles =
+    {
+        Path.Combine("Dependably.Core", "Protocol", "BlockGateService.cs"),
+        Path.Combine("Dependably.Core", "Protocol", "BlockGateService.Policy.cs"),
+    };
 
     [Fact]
     public void VersionFactsAreBuiltThroughTheFactoryOrAReviewedSite_NotBareFieldByFieldAtCallSites()
@@ -50,7 +61,7 @@ public sealed class VulnFactsConstructionComplianceTests
 
         foreach (string file in SourceRoots.AllCSharpFiles())
         {
-            if (Path.GetFileName(file).Equals(OwningFile, StringComparison.Ordinal))
+            if (Array.Exists(OwningFiles, owner => file.EndsWith(Path.DirectorySeparatorChar + owner, StringComparison.Ordinal)))
             {
                 continue;
             }
@@ -67,7 +78,7 @@ public sealed class VulnFactsConstructionComplianceTests
 
                 string rel = Path.GetRelativePath(SourceRoots.OwningRoot(file), file);
                 violations.Add(
-                    $"{rel}:{i + 1}: VersionFacts constructed inline outside {OwningFile}. Use "
+                    $"{rel}:{i + 1}: VersionFacts constructed inline outside BlockGateService.cs and BlockGateService.Policy.cs. Use "
                     + "VersionFacts.ForUpstreamOnly(...) when it fits, or add a "
                     + "`// vuln-facts-ok: <reason>` marker in the 5 lines above a deliberate exception "
                     + "so a fact silently defaulting to \"no signal\" here stays reviewable.");

@@ -20,6 +20,11 @@ public sealed class PostgresNumericColumnWideningLockTests
     private const string WidenMigration = "widen_postgres_numeric_columns";
     private const int SeededBlobs = 50_000;
 
+    // Upper bound on the schema apply reaching the widen step on a loaded machine, and on the
+    // first lock-retry warning once the widen holds its blocker (lock_timeout is 2 s there).
+    private static readonly TimeSpan ApplyBound = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RetryBound = TimeSpan.FromSeconds(30);
+
     private static string ConnectionString =>
         Environment.GetEnvironmentVariable("TEST_POSTGRES_CONNECTION")
         ?? throw new InvalidOperationException(
@@ -39,9 +44,14 @@ public sealed class PostgresNumericColumnWideningLockTests
         };
         var apply = init.InitializeAsync();
 
-        // Without the bound the ALTER waits on the blocker indefinitely and never logs a retry;
-        // the wait below times out instead of hanging the suite.
-        var first = await Task.WhenAny(log.FirstRetry.Task, apply, Task.Delay(TimeSpan.FromSeconds(20), TimeProvider.System));
+        // The schema apply before the widen scales with the machine's load, so the retry is awaited
+        // from the moment the widen starts (the blocker is taken then), never from the start of the
+        // apply. Each wait is bounded so a regression fails rather than hanging the suite.
+        var started = await Task.WhenAny(log.WidenStarted.Task, apply, Task.Delay(ApplyBound, TimeProvider.System));
+        Assert.True(started == log.WidenStarted.Task, "The widening migration was never reached.");
+
+        // Without the lock bound the ALTER waits on the blocker indefinitely and never logs a retry.
+        var first = await Task.WhenAny(log.FirstRetry.Task, apply, Task.Delay(RetryBound, TimeProvider.System));
         Assert.True(first == log.FirstRetry.Task, "No lock-retry warning was logged while oci_blobs was blocked.");
 
         blocker.Release();
@@ -143,14 +153,26 @@ public sealed class PostgresNumericColumnWideningLockTests
         Assert.False(await IsLedgeredAsync(conn, WidenMigration));
     }
 
+    // The reshape is one multi-statement command that rewrites the table and inserts the seed; the
+    // client's 30 s default command timeout is not headroom a loaded machine can be promised.
+    private const int SetupCommandTimeoutSeconds = 300;
+
     // Applies the current schema, then puts oci_blobs.size_bytes back to int4 with the migration
     // unledgered, and seeds enough rows that the rewrite is measurable.
+    //
+    // Autovacuum is switched off for oci_blobs before the seed. Inserting the rows crosses the
+    // table's autovacuum and autoanalyze thresholds, so a worker can pick it up in the window
+    // before the widening ALTER and hold SHARE UPDATE EXCLUSIVE, which conflicts with the ALTER's
+    // ACCESS EXCLUSIVE. A worker only yields to a conflicting waiter after deadlock_timeout (1 s by
+    // default), so a lock_timeout shorter than that fails against it rather than outwaiting it, and
+    // the only lock holder each test intends is the one it takes itself.
     private static async Task ReshapeToPreWidenAsync(IMetadataStore store)
     {
         await new SchemaInitializer(store).InitializeAsync();
         await using var conn = await store.OpenAsync();
-        await conn.ExecuteAsync(
+        await conn.ExecuteAsync(new CommandDefinition(
             """
+            ALTER TABLE oci_blobs SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
             DO $$
             DECLARE v record;
             BEGIN
@@ -165,7 +187,8 @@ public sealed class PostgresNumericColumnWideningLockTests
                 SELECT 'sha256:' || g, 'o1', 'application/octet-stream', g, 'k' || g
                 FROM generate_series(1, @count) AS g;
             """,
-            new { count = SeededBlobs });
+            new { count = SeededBlobs },
+            commandTimeout: SetupCommandTimeoutSeconds));
         Assert.Equal("integer", await ColumnTypeAsync(conn, "oci_blobs", "size_bytes"));
     }
 
@@ -213,6 +236,8 @@ public sealed class PostgresNumericColumnWideningLockTests
     {
         private readonly ConcurrentQueue<LogLevel> _entries = new();
 
+        public TaskCompletionSource WidenStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public TaskCompletionSource FirstRetry { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int RetryWarnings => _entries.Count(level => level == LogLevel.Warning);
@@ -248,6 +273,7 @@ public sealed class PostgresNumericColumnWideningLockTests
                 && properties.Any(p => p.Key == "Migration" && (p.Value as string) == WidenMigration))
             {
                 blocker.Hold();
+                WidenStarted.TrySetResult();
                 return;
             }
 

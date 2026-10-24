@@ -221,7 +221,9 @@ public sealed partial class UpstreamClient
 
         try
         {
-            await using (var responseStream = await response.Content.ReadAsStreamAsync(ct))
+            await using (var responseStream = new IdleTimeoutReadStream(
+                await response.Content.ReadAsStreamAsync(ct), UpstreamBodyIdleTimeout, _time,
+                $"Upstream body from {url}"))
             {
                 var fileStream = new FileStream(
                     tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,

@@ -17,7 +17,7 @@ namespace Dependably.Protocol;
 public enum BlockArm
 {
     None, Manual, Deprecated, Revoked, ReleaseAge, MaliciousLive, Malicious, Provenance,
-    Kev, KevRansomware, SsvcExploitation, Epss, EpssPercentile, VulnScore, InstallScript, License,
+    Kev, KevRansomware, SsvcExploitation, Epss, EpssPercentile, VulnScore, InstallScript, Unscanned, License,
 }
 
 /// <summary>
@@ -92,6 +92,7 @@ public readonly record struct BlockOutcome(BlockDecision Decision, BlockArm Arm)
         BlockArm.EpssPercentile => "epss_percentile",
         BlockArm.VulnScore => "vuln_score",
         BlockArm.InstallScript => "install_script",
+        BlockArm.Unscanned => "unscanned",
         BlockArm.License => "license",
         _ => null,
     };
@@ -150,4 +151,10 @@ public readonly record struct BlockPolicy(
     /// the broad arm, so <c>BlockMaliciousMode = "warn"</c> with this at <c>"block"</c> is
     /// expressible.
     /// </summary>
-    string? BlockMaliciousLiveMode = null);
+    string? BlockMaliciousLiveMode = null,
+    /// <summary>
+    /// Tenant policy from <c>org_settings.oci_scan_enforcement</c>: 'off' | 'warn' | 'block'.
+    /// Drives the <see cref="BlockArm.Unscanned"/> arm only, and only for a fact set that marks a
+    /// scan as required (<see cref="VersionFacts.ScanRequired"/>). Only 'block' denies.
+    /// </summary>
+    string? OciScanEnforcementMode = null);

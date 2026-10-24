@@ -27,8 +27,14 @@ public sealed class OrgCacheEpochStore
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _epochs =
         new(StringComparer.Ordinal);
 
-    private CancellationTokenSource GuardFor(string orgId) =>
-        _epochs.GetOrAdd(orgId, static _ => new CancellationTokenSource());
+    // A blank org id is a caller bug (a request that resolved no tenant reaching a cache), not an
+    // org: reject it by name rather than letting the dictionary throw a bare ArgumentNullException
+    // or, for an empty string, silently share one epoch across every caller that lost its org.
+    private CancellationTokenSource GuardFor(string orgId)
+    {
+        RequireOrgId(orgId);
+        return _epochs.GetOrAdd(orgId, static _ => new CancellationTokenSource());
+    }
 
     /// <summary>
     /// Returns an expiration token bound to <paramref name="orgId"/>'s current epoch. Add this to
@@ -43,6 +49,8 @@ public sealed class OrgCacheEpochStore
     /// </summary>
     public void Invalidate(string orgId)
     {
+        RequireOrgId(orgId);
+
         // Remove-then-cancel (not cancel-in-place): a fresh GuardFor call racing this Invalidate
         // must never observe and bind to the token being retired. The source is left undisposed
         // on purpose — an in-flight Set may still read its Token struct, and cancelled-then-
@@ -50,6 +58,16 @@ public sealed class OrgCacheEpochStore
         if (_epochs.TryRemove(orgId, out var retired))
         {
             retired.Cancel();
+        }
+    }
+
+    private static void RequireOrgId(string orgId)
+    {
+        if (string.IsNullOrWhiteSpace(orgId))
+        {
+            throw new ArgumentException(
+                "A cache epoch is per org and needs a non-blank org id; the caller has no resolved tenant.",
+                nameof(orgId));
         }
     }
 }

@@ -31,8 +31,8 @@ public sealed partial class MetadataResponseCacheTests : IClassFixture<Dependabl
 
     /// <summary>
     /// A second GET of the same packument must be served from the in-process cache.
-    /// The IMemoryCache entry is present under the key metadata:{orgId}:npm:{name} after
-    /// the first request populates it.
+    /// The rendered-cache entry for the requesting host is present after the first request
+    /// populates it.
     /// </summary>
     [Fact]
     public async Task Npm_SecondPackumentRequest_HitsCache()
@@ -49,12 +49,14 @@ public sealed partial class MetadataResponseCacheTests : IClassFixture<Dependabl
         string body1 = await resp1.Content.ReadAsStringAsync();
 
         // Resolve the orgId to construct the expected cache key.
-        var cache = _factory.Services.GetRequiredService<IMemoryCache>();
+        // The packument embeds tarball URLs, so it is cached per public base (the test host).
+        var cache = _factory.Services.GetRequiredService<
+            Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.NpmPackumentKey>>();
         var orgs = _factory.Services.GetRequiredService<Dependably.Infrastructure.OrgRepository>();
         var org = await orgs.GetBySlugAsync("default");
-        string cacheKey = $"metadata:{org!.Id}:npm:{pkg}";
+        var cacheKey = new Dependably.Infrastructure.Caching.NpmPackumentKey(org!.Id, pkg) { PublicBase = "http://localhost" };
 
-        Assert.True(cache.TryGetValue<byte[]>(cacheKey, out byte[]? cached), "Cache entry must exist after first fetch.");
+        Assert.True(cache.TryGet(cacheKey, out byte[]? cached), "Cache entry must exist after first fetch.");
         Assert.NotNull(cached);
 
         // Second request — reads from cache.
@@ -191,12 +193,17 @@ public sealed partial class MetadataResponseCacheTests : IClassFixture<Dependabl
         Assert.Equal(HttpStatusCode.OK, resp1.StatusCode);
         string body1 = await resp1.Content.ReadAsStringAsync();
 
-        var cache = _factory.Services.GetRequiredService<IMemoryCache>();
+        // The registration embeds absolute URLs, so it is cached per public base (the test host).
+        var cache = _factory.Services.GetRequiredService<
+            Dependably.Infrastructure.Caching.RenderedResponseCache<Dependably.Infrastructure.Caching.NuGetRegistrationKey>>();
         var orgs = _factory.Services.GetRequiredService<Dependably.Infrastructure.OrgRepository>();
         var org = await orgs.GetBySlugAsync("default");
-        string sv1Key = $"metadata:{org!.Id}:nuget:{pkg}:sv1";
+        var sv1Key = new Dependably.Infrastructure.Caching.NuGetRegistrationKey(org!.Id, pkg, SemVer2: false)
+        {
+            PublicBase = "http://localhost",
+        };
 
-        Assert.True(cache.TryGetValue<byte[]>(sv1Key, out byte[]? cached), "Cache entry must exist after first fetch.");
+        Assert.True(cache.TryGet(sv1Key, out byte[]? cached), "Cache entry must exist after first fetch.");
         Assert.NotNull(cached);
 
         // Second request — reads from cache.

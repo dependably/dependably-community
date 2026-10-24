@@ -12,7 +12,8 @@ namespace Dependably.Tests.Unit.Security;
 ///
 /// The enricher rewrites the <c>RequestPath</c> property, which fixes both the structured field
 /// and the rendered <c>{RequestPath}</c> message. Non-PII paths are left untouched so the
-/// request log stays useful (no over-redaction).
+/// request log stays useful (no over-redaction). Masked-form assertions run with a generous
+/// match timeout (see <see cref="TestScrubbers"/>); the fail-closed timeout path is pinned on its own.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class RequestPathScrubbingEnricherTests
@@ -52,7 +53,7 @@ public sealed class RequestPathScrubbingEnricherTests
     {
         var evt = BuildRequestEvent(rawPath);
 
-        new RequestPathScrubbingEnricher().Enrich(evt, new CapturingFactory());
+        new RequestPathScrubbingEnricher(TestScrubbers.Generous).Enrich(evt, new CapturingFactory());
 
         string scrubbed = RequestPathValue(evt);
         Assert.Equal(expected, scrubbed);
@@ -74,7 +75,7 @@ public sealed class RequestPathScrubbingEnricherTests
     {
         var evt = BuildRequestEvent(path);
 
-        new RequestPathScrubbingEnricher().Enrich(evt, new CapturingFactory());
+        new RequestPathScrubbingEnricher(TestScrubbers.Generous).Enrich(evt, new CapturingFactory());
 
         Assert.Equal(path, RequestPathValue(evt));
     }
@@ -86,7 +87,7 @@ public sealed class RequestPathScrubbingEnricherTests
         var evt = new LogEvent(TestTime.KnownNow, LogEventLevel.Information, exception: null,
             template, [new LogEventProperty("Other", new ScalarValue("value"))]);
 
-        new RequestPathScrubbingEnricher().Enrich(evt, new CapturingFactory());
+        new RequestPathScrubbingEnricher(TestScrubbers.Generous).Enrich(evt, new CapturingFactory());
 
         Assert.False(evt.Properties.ContainsKey("RequestPath"));
         Assert.Equal("value", ((ScalarValue)evt.Properties["Other"]).Value);
@@ -105,6 +106,65 @@ public sealed class RequestPathScrubbingEnricherTests
     public void Scrub_KeepsDomain_MasksLocalPartOnly()
     {
         Assert.Equal("***@customer.example",
-            LogPathScrubber.Scrub("alice@customer.example"));
+            TestScrubbers.Generous.Scrub("alice@customer.example"));
+    }
+
+    [Fact]
+    public void Enrich_MatcherTimesOut_RedactsRequestPathWhole()
+    {
+        var evt = BuildRequestEvent(TestScrubbers.SlowToScan);
+
+        new RequestPathScrubbingEnricher(TestScrubbers.Instant).Enrich(evt, new CapturingFactory());
+
+        Assert.Equal(LogPathScrubber.RedactedValue, RequestPathValue(evt));
+        Assert.DoesNotContain("alice", evt.RenderMessage());
+    }
+
+    [Fact]
+    public void Scrub_MatcherTimesOut_RedactsWhole()
+    {
+        string scrubbed = TestScrubbers.Instant.Scrub(TestScrubbers.SlowToScan);
+
+        Assert.Equal(LogPathScrubber.RedactedValue, scrubbed);
+    }
+
+    [Fact]
+    public void Enrich_ProductionScrubber_NeverEmitsTheEmail()
+    {
+        // The parameterless constructor is the wiring Serilog uses. Whether its matcher finishes
+        // inside the default deadline depends on scheduling, so this asserts the property that
+        // holds either way: the path is masked or redacted whole, and the local part never survives.
+        var evt = BuildRequestEvent("/api/v1/system/users/alice@customer.example/account-status");
+
+        new RequestPathScrubbingEnricher().Enrich(evt, new CapturingFactory());
+
+        Assert.Contains(RequestPathValue(evt), new[]
+        {
+            "/api/v1/system/users/***@customer.example/account-status",
+            LogPathScrubber.RedactedValue,
+        });
+        Assert.DoesNotContain("alice", evt.RenderMessage());
+    }
+
+    [Fact]
+    public void Default_RunsUnderTheProductionMatchTimeout()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(100), LogPathScrubber.DefaultMatchTimeout);
+        Assert.Equal(LogPathScrubber.DefaultMatchTimeout, LogPathScrubber.Default.MatchTimeout);
+    }
+
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(-1L)]
+    public void Constructor_RejectsNonPositiveTimeout(long ticks)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new LogPathScrubber(TimeSpan.FromTicks(ticks)));
+    }
+
+    [Fact]
+    public void Constructor_RejectsInfiniteTimeout()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new LogPathScrubber(System.Text.RegularExpressions.Regex.InfiniteMatchTimeout));
     }
 }
