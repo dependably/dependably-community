@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-10-24
+
+The application is unchanged from 0.14.1. No upgrade steps are needed.
+
+### Fixed
+
+- The integration test suite no longer runs out of memory on CI runners. Each test host
+  stayed in memory after disposal, kept alive by two framework timers: the HttpClient handler
+  expiry and the ASP.NET Core endpoint rate limiter. The test hosts now stop both timers, and
+  `DependablyFactoryReleaseTests` checks that a disposed host can be garbage-collected.
+
 ## [0.14.1] - 2026-10-23
 
 Version 0.14.0 was not published. When upgrading from v0.13.3, read this section together with

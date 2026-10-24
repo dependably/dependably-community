@@ -1,10 +1,12 @@
 using Dependably.Infrastructure;
 using Dependably.Infrastructure.RowLevelSecurity;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Http;
 
 namespace Dependably.Tests.Infrastructure;
 
@@ -19,11 +21,17 @@ namespace Dependably.Tests.Infrastructure;
 /// <c>Program.ConfigureBuilder</c>, <see cref="ConfigureServices"/> after it, and
 /// <see cref="Start"/> in place of <c>app.Start()</c>. <see cref="HarnessStore"/> is the
 /// unrestricted store for the factory's own seeding helpers.</para>
+///
+/// <para>Being the one seam every host passes through, it also stops the timers that would keep
+/// a disposed host reachable — the HttpClient handler expiry and ASP.NET Core's endpoint rate
+/// limiter. Without that the suite retains every host it has built and outgrows a CI runner's
+/// memory; <c>DependablyFactoryReleaseTests</c> pins it.</para>
 /// </summary>
 public sealed class IntegrationDatabase(string? mode = null) : IAsyncDisposable
 {
     private TestMetadataStore? _sqlite;
     private PostgresTestDatabase? _postgres;
+    private IServer? _server;
 
     public string Mode { get; } = mode ?? DependablyFactory.IntegrationDatabase;
 
@@ -64,6 +72,11 @@ public sealed class IntegrationDatabase(string? mode = null) : IAsyncDisposable
     public void ConfigureServices(IServiceCollection services)
     {
         ArgumentNullException.ThrowIfNull(services);
+        // A finite handler lifetime arms an expiry timer per client handler, and the expired
+        // handler's cleanup keeps rescheduling while a singleton in the stopped host still holds
+        // its HttpClient — rooting the whole host in the timer queue. Test hosts never live long
+        // enough for handler rotation to matter.
+        services.PostConfigureAll<HttpClientFactoryOptions>(o => o.HandlerLifetime = Timeout.InfiniteTimeSpan);
         if (OnPostgres)
         {
             services.RemoveAll<IAmbientTenantScope>();
@@ -88,6 +101,7 @@ public sealed class IntegrationDatabase(string? mode = null) : IAsyncDisposable
         try
         {
             app.Start();
+            _server = app.Services.GetRequiredService<IServer>();
         }
         finally
         {
@@ -98,9 +112,18 @@ public sealed class IntegrationDatabase(string? mode = null) : IAsyncDisposable
         }
     }
 
-    /// <summary>Drops the database. Call after the host itself has been disposed.</summary>
+    /// <summary>
+    /// Drops the database and releases the host's endpoint rate limiter
+    /// (<see cref="EndpointRateLimiterRelease"/>). Call after the host itself has been disposed.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
+        if (_server is not null)
+        {
+            EndpointRateLimiterRelease.Release(_server);
+            _server = null;
+        }
+
         if (_sqlite is not null)
         {
             await _sqlite.DisposeAsync();
